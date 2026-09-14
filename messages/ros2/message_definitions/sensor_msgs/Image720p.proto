@@ -1,0 +1,23 @@
+// sensor_msgs/Image720p.proto
+// Fixed-resolution variant of Image.proto for 720p (HD) — 1280 × 720.
+// Suggested compile (RGB8, 3 bytes/pixel = 2764800):
+//   sb message compile --iox2 --bytes-cap 2764800 sensor_msgs/Image720p
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image720p {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 1280x720 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 720
+  uint32 width = 3;   // expected 1280
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

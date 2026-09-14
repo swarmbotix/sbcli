@@ -1,0 +1,9 @@
+// shape_msgs/MeshTriangle.proto
+//  Definition of a triangle's vertices.
+syntax = "proto3";
+
+package shape_msgs;
+
+message MeshTriangle {
+  repeated uint32 vertex_indices = 1;  // fixed [3]
+}

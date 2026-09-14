@@ -1,0 +1,23 @@
+// sensor_msgs/Image480p.proto
+// Fixed-resolution variant of Image.proto for 480p (SD / VGA) — 640 × 480.
+// Suggested compile (RGB8, 3 bytes/pixel = 921600):
+//   sb message compile --iox2 --bytes-cap 921600 sensor_msgs/Image480p
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image480p {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 640x480 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 480
+  uint32 width = 3;   // expected 640
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

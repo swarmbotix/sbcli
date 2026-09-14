@@ -1,0 +1,9 @@
+module: subber
+language: rust
+root: /home/el/Dropbox/Projects/swarmbotix/examples/level5_hello_world/subber
+io_dir: swarmbotix_io
+subscribers:
+- name: hello
+  topic: /dev01/demo/pubber/hello
+  type: std/StringStamped
+  transport: zenoh

@@ -1,0 +1,24 @@
+// sensor_msgs/Image640p.proto
+// Fixed-resolution variant of Image.proto for nHD — 640 × 360.
+// (Not a widely-used label; chosen to disambiguate from 480p / VGA.)
+// Suggested compile (RGB8, 3 bytes/pixel = 691200):
+//   sb message compile --iox2 --bytes-cap 691200 sensor_msgs/Image640p
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image640p {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 640x360 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 360
+  uint32 width = 3;   // expected 640
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

@@ -1,0 +1,10 @@
+// primitives/Vector3.proto — 3-component vector (position, velocity, ...).
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+message Vector3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}

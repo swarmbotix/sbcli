@@ -1,0 +1,12 @@
+// primitives/Mat33.proto — 3x3 matrix, ROW-MAJOR.
+//
+// data[row * 3 + col]. Fixed at exactly 9 elements; the iox2 capacity is
+// pinned to 9 via `vec_caps` so the flattened struct is [f64; 9] with no
+// slack. Used for rotation matrices, inertia tensors, and 3x3 covariance.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+message Mat33 {
+  repeated double data = 1;
+}

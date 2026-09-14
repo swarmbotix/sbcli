@@ -1,0 +1,11 @@
+// diagnostic_msgs/KeyValue.proto
+//  What to label this value when viewing.
+syntax = "proto3";
+
+package diagnostic_msgs;
+
+message KeyValue {
+  string key = 1;
+  //  A value to track over time.
+  string value = 2;
+}

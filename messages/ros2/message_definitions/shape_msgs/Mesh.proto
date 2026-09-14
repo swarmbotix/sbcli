@@ -1,0 +1,16 @@
+// shape_msgs/Mesh.proto
+//  Definition of a mesh.
+syntax = "proto3";
+
+package shape_msgs;
+
+import "geometry_msgs/Point.proto";
+import "shape_msgs/MeshTriangle.proto";
+
+message Mesh {
+  //  List of triangles; the index values refer to positions in vertices[].
+  repeated shape_msgs.MeshTriangle triangles = 1;
+
+  //  The actual vertices that make up the mesh.
+  repeated geometry_msgs.Point vertices = 2;
+}

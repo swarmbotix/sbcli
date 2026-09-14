@@ -1,0 +1,24 @@
+// sensor_msgs/Image2160p.proto
+// Fixed-resolution variant of Image.proto for 2160p (UHD / "4K") — 3840 × 2160.
+// (Cinema DCI 4K is 4096×2160; this uses the consumer UHD label.)
+// Suggested compile (RGB8, 3 bytes/pixel = 24883200):
+//   sb message compile --iox2 --bytes-cap 24883200 sensor_msgs/Image2160p
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image2160p {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 3840x2160 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 2160
+  uint32 width = 3;   // expected 3840
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

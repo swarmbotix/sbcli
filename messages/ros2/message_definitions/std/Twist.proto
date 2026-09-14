@@ -1,0 +1,11 @@
+// std/Twist.proto — linear + angular velocity. Mirrors geometry_msgs/Twist.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+import "std/Vector3.proto";
+
+message Twist {
+  Vector3 linear = 1;
+  Vector3 angular = 2;
+}

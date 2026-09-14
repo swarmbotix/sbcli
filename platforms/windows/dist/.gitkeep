@@ -1,0 +1,2 @@
+# Release output. One directory per version: platforms/windows/dist/<version>/
+# Created by platforms/windows/dist-tooling/build.ps1 -- see installguide_windows.md.

@@ -1,0 +1,39 @@
+# Line-ending policy.
+#
+# `core.autocrlf=true` is the Git for Windows default, and without this file
+# it rewrites checked-out files to CRLF. That is harmless for ordinary source,
+# but it silently breaks the L3 codegen snapshot tests, because BOTH sides of
+# those tests are files in this repo:
+#
+#   * the goldens, read off disk and compared byte-for-byte, and
+#   * the minijinja templates, whose bytes `include_dir!` bakes into the
+#     binary at compile time, and which therefore become the generator's
+#     output verbatim.
+#
+# Pinning only the goldens is worse than pinning neither: the generator picks
+# up CRLF from a translated template while the golden stays LF, so every
+# snapshot fails by exactly one byte per template line, as a whole-file diff
+# that looks like a content change and is not. Pin both sides rather than
+# teach the comparison to normalize; the goldens exist to catch byte-level
+# drift, so nothing may rewrite them. `embedded_templates_are_lf_only` in
+# sb-codegen fails loudly if the template half of this ever comes undone.
+
+# Sensible default: git decides text vs binary, normalizes to LF in the repo.
+* text=auto
+
+# Both sides of the codegen snapshot comparison, plus the committed input the
+# goldens are rendered from. Never translate these on checkout, on any
+# platform.
+crates/sb-cli/tests/level3_goldens/** text eol=lf
+crates/sb-codegen/templates/** text eol=lf
+crates/sb-cli/tests/fixtures/** text eol=lf
+
+# Shipped message definitions and the shell installers are consumed by
+# protoc/flatc and by bash; keep them LF everywhere.
+messages/**/*.proto text eol=lf
+*.bash text eol=lf
+*.sh text eol=lf
+
+# Windows-only scripts stay CRLF so cmd.exe/PowerShell hosts read them cleanly.
+*.bat text eol=crlf
+*.ps1 text eol=crlf

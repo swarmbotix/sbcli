@@ -1,0 +1,21 @@
+// sensor_msgs/RelativeHumidity.proto
+//  Single reading from a relative humidity sensor.
+//  Defines the ratio of partial pressure of water vapor to the saturated vapor
+//  pressure at a temperature.
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message RelativeHumidity {
+  std_msgs.Header header = 1;  // timestamp of the measurement
+  //  frame_id is the location of the humidity sensor
+
+  double relative_humidity = 2;  // Expression of the relative humidity
+  //  from 0.0 to 1.0.
+  //  0.0 is no partial pressure of water vapor
+  //  1.0 represents partial pressure of saturation
+
+  double variance = 3;  // 0 is interpreted as variance unknown
+}

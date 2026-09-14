@@ -1,0 +1,12 @@
+// std_msgs/Int32.proto
+//  This was originally provided as an example message.
+//  It is deprecated as of Foxy
+//  It is recommended to create your own semantically meaningful message.
+//  However if you would like to continue using this please use the equivalent in example_msgs.
+syntax = "proto3";
+
+package std_msgs;
+
+message Int32 {
+  int32 data = 1;
+}

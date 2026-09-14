@@ -1,0 +1,20 @@
+// sensor_msgs/FluidPressure.proto
+//  Single pressure reading.  This message is appropriate for measuring the
+//  pressure inside of a fluid (air, water, etc).  This also includes
+//  atmospheric or barometric pressure.
+//
+//  This message is not appropriate for force/pressure contact sensors.
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message FluidPressure {
+  std_msgs.Header header = 1;  // timestamp of the measurement
+  //  frame_id is the location of the pressure sensor
+
+  double fluid_pressure = 2;  // Absolute pressure reading in Pascals.
+
+  double variance = 3;  // 0 is interpreted as variance unknown
+}

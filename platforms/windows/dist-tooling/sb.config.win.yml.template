@@ -1,0 +1,145 @@
+# sb.config.yml - swarmbotix CLI configuration (Windows)
+#
+#   sb doctor         check every path below actually works
+#   sb config show    merged values + which layer each came from
+#   sb config open    edit this file
+#
+# Layering, highest wins:
+#   $SB_CONFIG  >  <workspace>\sb.config.yml  >  THIS FILE  >  built-in defaults
+# A `null` value falls through to the next layer.
+
+
+# --- Tool paths -------------------------------------------------------
+# Point at the FILE, not the folder it lives in. Forward slashes.
+# Leave `null` for anything you don't need yet; `sb doctor` reports it.
+#
+# Example (adjust roots and versions to your box):
+#   protoc:      C:/cmake_ext_libs/protoc/35.0/bin/protoc.exe
+#   flatc:       C:/cmake_ext_libs/flatbuffers/25.12.19/flatc.exe
+#   libzenohc:   C:/cmake_ext_libs/zenoh-c/1.9.0/bin/zenohc.dll
+#   libiceoryx2: C:/cmake_ext_libs/iceoryx2/0.9.3/lib/iceoryx2_ffi_c.dll
+#   tmux:        C:/Users/you/AppData/Local/psmux/tmux.exe
+#
+# Gotchas:
+#   - .dll, never .lib. The .lib next to it is a linker import library.
+#   - iceoryx2 ships its FFI dll under lib/, not bin/. bin/ holds
+#     iceoryx2_cxx.dll, which is the wrong one.
+#   - Windows has no tmux; psmux installs as tmux.exe and is what sb calls.
+#
+# What each is used for:
+#   protoc       .proto -> descriptor set, for `sb message compile`
+#   flatc        flatbuffers codegen (optional)
+#   libzenohc    cross-device pub/sub          (match zenoh 1.9)
+#   libiceoryx2  same-device shared memory     (match iceoryx2 0.9)
+#   tmux         `sb up` / `sb run` panes
+protoc:      null
+flatc:       null
+libzenohc:   null
+libiceoryx2: null
+tmux:        null
+
+
+# --- Message styles ---------------------------------------------------
+# Written by the installer. Messages are grouped into STYLES; each style is
+# a directory under messages_root with its own sources and build output:
+#
+#   <messages_root>/<style>/message_definitions   .proto sources you edit
+#   <messages_root>/<style>/message_targets       generated bindings,
+#                                                 disposable, rebuilt by
+#                                                 `sb message compile`
+#
+# Shipped styles:
+#   swarmbotix  header/, primitives/, images/, sensors/
+#   ros2        std/ + the ROS2 mirror (std_msgs, geometry_msgs, ...) - 138 files
+#
+# Styles are an OPEN SET - drop messages/<yourname>/message_definitions/
+# beside them and it is usable immediately.
+#
+# There is no "active" style, and nothing here selects one. A message is
+# named in full wherever it appears:
+#
+#   <style>/<namespace>/<Leaf>
+#
+#   sb message list                            every style, fully qualified
+#   sb pub add -m ros2/std/StringStamped ...
+#   sb pub add -m swarmbotix/images/Image480pMono8 ...
+#   sb message compile --style ros2            compile just one (a filter)
+#
+# That is deliberate: one module routinely publishes one style and
+# subscribes to another, and `Header.metadata.msg_type` travels on the wire
+# to consumers that share no config with the publisher. A name that only
+# means something relative to somebody's config is not an identity.
+messages_root: __SB_HOME__/messages
+
+
+# --- Defaults for new modules -----------------------------------------
+# device becomes the first segment of every topic:
+#   /<device>/<workspace>/<module>/<transport>/<topic>
+device:                 __HOSTNAME__
+transport_on_device:    iceoryx2
+transport_cross_device: zenoh
+
+
+# --- iox2 buffer sizes ------------------------------------------------
+# iceoryx2 needs a compile-time-fixed buffer per variable-length field.
+# The 4 KiB default is 2-3 orders of magnitude too small for images,
+# lidar, or audio. Add an entry, then re-run `sb message compile --iox2`.
+#
+# Key is <pkg>.<Msg>.<field>; value is bytes.
+#
+# Example:
+#   bytes_caps:
+#     sensor_msgs.Image1920x1080.data: 2073600   # 1920x1080 MONO8
+#     sensor_msgs.LaserScan.ranges:    65536
+#
+# Built in already (redeclare to override, `null` to drop):
+#   sensor_msgs.Image1280x1024.data:       1310720
+#   swarmbotix.sensors.PointCloud.data:    2097152
+
+
+# --- Repeated-field capacities -----------------------------------------
+# Same idea for `repeated <scalar>` fields. Without an entry every repeated
+# field gets one global number (256), which is far too big for a fixed 3x3
+# matrix and far too small for a lidar sweep.
+#
+# Key is <pkg>.<Msg>.<field>; value is the ELEMENT count.
+#
+# Built in already:
+#   swarmbotix.primitives.Mat33.data:            9
+#   swarmbotix.primitives.Mat44.data:           16
+#   swarmbotix.sensors.LaserScan.ranges:      1080
+#   swarmbotix.sensors.LaserScan.intensities: 1080
+# vec_caps:
+#   swarmbotix.sensors.LaserScan.ranges: 2048
+
+
+# --- iox2 variants: one schema, many fixed-size types ------------------
+# A variable-length payload has no single correct iceoryx2 size. An image
+# is 230 KB at 360p mono8 and 6 MB at 1080p rgb8; sizing one struct for the
+# worst case wastes shared memory on every small frame.
+#
+# So ONE .proto fans out into several iox2 types at build time. Adding a
+# resolution is an entry here -- never another .proto. When a message has
+# variants, the BASE type is not emitted (it is the one size that is always
+# wrong).
+#
+#   iox2_variants:
+#     <pkg>.<Msg>:
+#       <OutputTypeName>:
+#         <field>: <capacity>
+#
+# Built in already -- images/Image, capacity = width x height x bytes/pixel:
+#   Image360pMono8    640 x  360 x 1 =   230400
+#   Image360pRgb8     640 x  360 x 3 =   691200
+#   Image480pMono8    640 x  480 x 1 =   307200
+#   Image480pRgb8     640 x  480 x 3 =   921600
+#   Image720pMono8   1280 x  720 x 1 =   921600
+#   Image720pRgb8    1280 x  720 x 3 =  2764800
+#   Image1080pMono8  1920 x 1080 x 1 =  2073600
+#   Image1080pRgb8   1920 x 1080 x 3 =  6220800
+#
+# Add a 4K mono variant:
+# iox2_variants:
+#   swarmbotix.images.Image:
+#     Image2160pMono8:
+#       data: 8294400

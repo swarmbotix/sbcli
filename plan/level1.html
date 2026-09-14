@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>L1 — Foundation, Messages &amp; Doctor</title>
+<style>
+:root { --fg:#222; --muted:#666; --code:#f4f4f4; --accent:#0066cc; --warn:#d4a017; --ok:#2a8c2a; }
+body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1.5em; color: var(--fg); line-height: 1.55; }
+h1 { border-bottom: 2px solid var(--fg); padding-bottom: 0.3em; margin-top: 0; }
+h2 { margin-top: 1.8em; }
+h3 { color: var(--muted); margin-top: 1.3em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+pre { background: var(--code); padding: 0.9em; border-radius: 4px; overflow-x: auto; line-height: 1.4; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 3px; }
+.goal { font-size: 1.05em; color: var(--muted); margin: 0.5em 0 1.5em; }
+.test { background: #fffbe6; border-left: 3px solid var(--warn); padding: 0.7em 1em; margin: 0.7em 0; }
+.test b { color: #8a6b08; }
+.done { background: #eef9ee; border-left: 3px solid var(--ok); padding: 0.7em 1em; margin: 1.5em 0; }
+.done b { color: #1f6b1f; }
+.nav { font-size: 0.9em; color: var(--muted); margin-bottom: 1.5em; }
+.nav a { color: var(--accent); text-decoration: none; margin-right: 0.6em; }
+.nav a:hover { text-decoration: underline; }
+.nav .here { font-weight: 700; color: var(--fg); }
+ul, ol { padding-left: 1.6em; }
+li { margin: 0.25em 0; }
+.tag { display: inline-block; background: #333; color: white; padding: 0.05em 0.45em; border-radius: 3px; font-size: 0.8em; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="./level1.html" class="here">L1</a>·
+<a href="./level2.html">L2</a>·
+<a href="./level3.html">L3</a>·
+<a href="./level4.html">L4</a>·
+<a href="./level5.html">L5</a>·
+<a href="./level6.html">L6</a>
+</div>
+
+<h1>L1 — Foundation, Messages &amp; Doctor</h1>
+<p class="goal">After L1, a freshly-installed user can run <code>sb doctor</code>, browse <code>sb message list</code>, and trust that the message schemas every later level depends on are locked in. No transports yet, no codegen yet — just the contract everything else builds on.</p>
+
+<h2>Scope</h2>
+
+<h3>sb-core — pure logic, zero IO</h3>
+<ul>
+  <li><code>TopicName</code> parser/validator for <code>/&lt;device&gt;/&lt;workspace&gt;/&lt;module&gt;/&lt;transport&gt;/&lt;topic&gt;</code> where <code>&lt;transport&gt;</code> is the literal <code>iox2</code> or <code>zenoh</code>.</li>
+  <li>Serde types — file ↔ Rust type:
+    <ul>
+      <li><code>SbCliConfig</code> ← <code>sb.config.yml</code> (CLI's own settings: tool paths, defaults)</li>
+      <li><code>ModuleDevConfig</code> ← <code>sb.dev.yml</code> (per-module dev interface)</li>
+      <li><code>ModulePrdConfig</code> ← <code>sb.prd.yml</code> (per-module production interface)</li>
+      <li><code>WorkspaceFlow</code> ← <code>flow.yaml</code> (workspace module registry — defined here, first used at L2)</li>
+    </ul>
+  </li>
+  <li><code>Transport::{Zenoh, Iceoryx2}</code> enum with per-transport key/service-name derivation.</li>
+  <li><code>SbCliConfig::merge(env_override, workspace, global)</code> — pure layered loader.</li>
+</ul>
+
+<h3>sb.config.yml loader</h3>
+<ul>
+  <li>Reads (highest priority first):
+    <ol>
+      <li><code>$SB_CONFIG</code> env var (explicit path; tests / CI / ad-hoc)</li>
+      <li><code>&lt;active_workspace&gt;/sb.config.yml</code> (L2 will start populating this)</li>
+      <li><code>~/.swarmbotix/sb.config.yml</code></li>
+      <li>Built-in defaults</li>
+    </ol>
+  </li>
+  <li>Missing paths surface as explicit errors from <code>sb doctor</code> — never silently swallowed.</li>
+</ul>
+
+<h3>Message vault</h3>
+<ul>
+  <li><b>Forge-bundled <code>messages/ros2/message_definitions/</code> at repo root</b> — source of truth for <code>std/*</code>. Embedded into the <code>sb</code> binary via <code>include_dir!</code>. <code>std/</code> ships in the <code>ros2</code> style.</li>
+  <li>Per <code>project_message_split</code>:
+    <ul>
+      <li><code>std/Header.proto</code> — metadata only. <b>Includes <code>metadata.msg_freq_desired</code></b> so any future <code>*Stamped</code> message can advertise its intended Hz to topic-list at L4.</li>
+      <li><code>std/String.proto</code> — bare payload (mirrors ROS2 <code>std_msgs/String</code>)</li>
+      <li><code>std/StringStamped.proto</code> — Header + String composite</li>
+      <li>Same pattern for Twist, Image, PointCloud, etc.</li>
+    </ul>
+  </li>
+  <li><b>Install-on-first-run</b>: first invocation that touches the vault copies <code>std/*</code> from the embedded bundle into <code>~/.swarmbotix/messages/ros2/message_definitions/std/</code> if absent. Idempotent. Never overwrites user edits.</li>
+  <li><b>Vault CRUD</b>:
+    <pre>sb message list            # walk vault, print names
+sb message new &lt;Name&gt;      # write .proto skeleton under user namespace
+sb message rm  &lt;Name&gt;      # delete file (refuse if under std/)
+sb message compile         # protoc all → cache dir
+sb message compile &lt;Name&gt;  # protoc a single message</pre>
+  </li>
+  <li><b>Vault lookup API</b> (used by every later level): <code>fn schema(name: &amp;str) -&gt; Option&lt;MessageSchema&gt;</code> backed by the protoc-generated <code>FileDescriptorSet</code>.</li>
+</ul>
+
+<h3>Doctor &amp; config commands</h3>
+<ul>
+  <li><code>sb doctor</code> — reads merged sb.config.yml, validates every declared path:
+    <ul>
+      <li><code>protoc --version</code> succeeds (libprotoc 35.0 currently)</li>
+      <li><code>flatc --version</code> succeeds</li>
+      <li><code>libzenohc.so</code>, <code>libiceoryx2_ffi_c.so</code>: file exists, <code>dlopen</code> succeeds</li>
+      <li><code>tmux</code> (or <code>psmux</code> on Windows) on PATH</li>
+      <li><code>~/.swarmbotix/messages/ros2/message_definitions/std/</code> populated; offers to re-install from embedded bundle if missing</li>
+    </ul>
+  </li>
+  <li><code>sb config</code> — open merged sb.config.yml in <code>$EDITOR</code>.</li>
+  <li><code>sb config set &lt;key&gt; &lt;value&gt;</code> — write to global file. <code>--workspace</code> writes to active workspace (no-op until L2 lands).</li>
+</ul>
+
+<h2>TDD plan</h2>
+
+<div class="test"><b>1. Topic name parser table test</b><br>
+20+ fixtures covering valid forms and each failure mode (missing leading slash, wrong segment count, illegal chars, empty segment). Drive <code>TopicName::parse()</code>; assert each fixture maps to the expected <code>Ok</code> / <code>Err(variant)</code>. <code>crates/sb-core/src/topic.rs</code>.
+</div>
+
+<div class="test"><b>2. YAML round-trip per config type</b><br>
+For each of <code>SbCliConfig</code>, <code>ModuleDevConfig</code>, <code>ModulePrdConfig</code>, <code>WorkspaceFlow</code>: <code>from_str → struct → to_string → from_str</code> must be a fixed point. Catches accidental schema drift before any downstream code depends on it.
+</div>
+
+<div class="test"><b>3. <code>SbCliConfig::merge</code> + env override</b><br>
+Pure-function tests: <code>$SB_CONFIG</code> wins outright over both workspace and global; workspace overrides global; missing keys fall through; all missing returns built-in default. Five fixture pairs, exact-match assertion.
+</div>
+
+<div class="test"><b>4. Vault CRUD round-trip</b><br>
+Tempdir <code>$HOME</code>: <code>new("custom/Foo") → list contains "custom/Foo" → rm → list does not</code>. <code>rm</code> on <code>std/*</code> refused with explicit message. Name validator rejects non-PascalCase leaf, illegal namespace chars.
+</div>
+
+<div class="test"><b>5. Install-on-first-run</b><br>
+Fresh tempdir <code>$HOME</code>; first <code>sb message list</code> populates <code>std/*</code> from embedded bundle. Second call is a no-op. User-edited <code>std/Header.proto</code> is preserved across re-runs (no clobber).
+</div>
+
+<div class="test"><b>6. protoc invocation</b><br>
+<code>sb message compile std/Header</code> with a valid <code>protoc</code> path produces a non-empty <code>FileDescriptorSet</code>. With <code>$SB_CONFIG</code> pointing at a config with a bogus path, fails non-zero with "protoc not found at <code>&lt;path&gt;</code>".
+</div>
+
+<div class="test"><b>7. Header / String split fixture</b><br>
+Golden test on <code>std/Header.proto</code>, <code>std/String.proto</code>, <code>std/StringStamped.proto</code> — fields exactly as <code>project_message_split</code> specifies. Header must contain <code>metadata.msg_freq_desired</code>; if someone "fixes" Header to include a payload, this test breaks loudly.
+</div>
+
+<div class="test"><b>8. Every std/* compiles to Rust</b><br>
+Loop over <code>std/*.proto</code>, run protoc with the Rust plugin, <code>cargo check</code> in a scratch crate. Python/C++/Dart/C# proof-of-compile lands at L3 once language codegen exists.
+</div>
+
+<div class="test"><b>9. Vault lookup API</b><br>
+<code>schema("std/Header")</code> returns <code>Some</code> with expected field names &amp; types. <code>schema("does/not/exist")</code> returns <code>None</code>. Used by every later level for type validation.
+</div>
+
+<div class="test"><b>10. <code>sb doctor</code> happy path + failure modes</b><br>
+Stub PATH with working <code>protoc</code>, <code>flatc</code>, <code>tmux</code>; <code>sb doctor</code> exits 0, one OK line per check. Strip <code>protoc</code> from PATH AND unset its sb.config.yml entry → exit non-zero, message names "protoc". Provide invalid <code>.so</code> path → exit non-zero, message contains the bad path. Each missing dep reported separately, not stopping at the first.
+</div>
+
+<h2>Why this is L1</h2>
+<ul>
+  <li>Messages are the load-bearing contract every later level reads from. Locking the Header / Stamped split early prevents app authors writing code against a transient shape.</li>
+  <li>The Header's <code>metadata.msg_freq_desired</code> field is the single design decision that lets L4 <code>topic list</code> show real rates without a wire-format wrapper. Bake it in here.</li>
+  <li>Pure-logic types (<code>sb-core</code>) are the substrate for every subsequent level. Building them in isolation (zero IO) keeps the unit-test surface fast.</li>
+  <li><code>sb doctor</code> lives here so a fresh installer can verify their toolchain on day 1 — before writing any app code.</li>
+</ul>
+
+<h2>Crate layout introduced</h2>
+<pre>swarmbotix/                  ← forge root
+  crates/
+    sb-core/                 ← pure logic (no IO): TopicName, configs, Transport
+    sb-config/               ← layered sb.config.yml loader + writer
+    sb-vault/                ← message CRUD, protoc, embedded bundle
+    sb-doctor/               ← environment validation
+    sb-cli/                  ← thin clap wrapper (only L1 verbs so far)
+  messages/<style>/message_definitions/   ← forge-bundled .proto (source of truth)
+    std/
+      Header.proto
+      String.proto
+      StringStamped.proto
+      ...
+  tests/integration/level1/
+    parse_topic_name.rs
+    config_layered_load.rs
+    vault_crud.rs
+    install_first_run.rs
+    std_messages_compile.rs
+    doctor_happy_and_failures.rs
+  Cargo.toml                 ← workspace
+</pre>
+
+<div class="done"><b>Done when</b>
+<ul>
+  <li><code>cargo test -p sb-core</code> + sb-config + sb-vault all green; coverage ≥ 90% on parser, serde, and vault.</li>
+  <li>Every shipped <code>std/*.proto</code> compiles to Rust.</li>
+  <li>First-run install verified in CI (fresh container → <code>sb message list</code> → <code>~/.swarmbotix/messages/ros2/message_definitions/std/</code> populated).</li>
+  <li><code>sb doctor</code> passes on this dev box and catches each missing tool with an actionable message.</li>
+</ul>
+</div>
+
+</body>
+</html>

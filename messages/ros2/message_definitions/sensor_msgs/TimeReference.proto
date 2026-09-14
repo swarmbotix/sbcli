@@ -1,0 +1,16 @@
+// sensor_msgs/TimeReference.proto
+//  Measurement from an external time source not actively synchronized with the system clock.
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "builtin_interfaces/Time.proto";
+import "std_msgs/Header.proto";
+
+message TimeReference {
+  std_msgs.Header header = 1;  // stamp is system time for which measurement was valid
+  //  frame_id is not used
+
+  builtin_interfaces.Time time_ref = 2;  // corresponding time from this external source
+  string source = 3;  // (optional) name of time source
+}

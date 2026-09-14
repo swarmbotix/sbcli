@@ -1,0 +1,10 @@
+// visualization_msgs/MarkerArray.proto
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "visualization_msgs/Marker.proto";
+
+message MarkerArray {
+  repeated visualization_msgs.Marker markers = 1;
+}

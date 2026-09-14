@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>L2 — Workspaces &amp; Module Init</title>
+<style>
+:root { --fg:#222; --muted:#666; --code:#f4f4f4; --accent:#0066cc; --warn:#d4a017; --ok:#2a8c2a; }
+body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1.5em; color: var(--fg); line-height: 1.55; }
+h1 { border-bottom: 2px solid var(--fg); padding-bottom: 0.3em; margin-top: 0; }
+h2 { margin-top: 1.8em; }
+h3 { color: var(--muted); margin-top: 1.3em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+pre { background: var(--code); padding: 0.9em; border-radius: 4px; overflow-x: auto; line-height: 1.4; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 3px; }
+.goal { font-size: 1.05em; color: var(--muted); margin: 0.5em 0 1.5em; }
+.test { background: #fffbe6; border-left: 3px solid var(--warn); padding: 0.7em 1em; margin: 0.7em 0; }
+.test b { color: #8a6b08; }
+.done { background: #eef9ee; border-left: 3px solid var(--ok); padding: 0.7em 1em; margin: 1.5em 0; }
+.done b { color: #1f6b1f; }
+.nav { font-size: 0.9em; color: var(--muted); margin-bottom: 1.5em; }
+.nav a { color: var(--accent); text-decoration: none; margin-right: 0.6em; }
+.nav a:hover { text-decoration: underline; }
+.nav .here { font-weight: 700; color: var(--fg); }
+ul, ol { padding-left: 1.6em; }
+li { margin: 0.25em 0; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="./level1.html">L1</a>·
+<a href="./level2.html" class="here">L2</a>·
+<a href="./level3.html">L3</a>·
+<a href="./level4.html">L4</a>·
+<a href="./level5.html">L5</a>·
+<a href="./level6.html">L6</a>
+</div>
+
+<h1>L2 — Workspaces &amp; Module Init</h1>
+<p class="goal">After L2, the user creates a workspace, sets it active, points <code>sb init</code> at an existing project directory (Rust crate, Python project, C++ tree, Flutter project, Unity project), and sb drops in its bookkeeping files (<code>sb.dev.yml</code>, a <code>runscript.bash</code> stub, an empty <code>swarmbotix_io/</code>) plus registers the module in <code>flow.yaml</code>. sb does <strong>not</strong> create the user's project — only adopts it.</p>
+
+<h2>Scope</h2>
+
+<h3>Workspaces — directories at <code>~/.swarmbotix/workspaces/&lt;name&gt;/</code></h3>
+<pre>sb ws create &lt;name&gt;     # mkdir ~/.swarmbotix/workspaces/&lt;name&gt;, init empty flow.yaml
+sb ws set    &lt;name&gt;     # write &lt;name&gt; to ~/.swarmbotix/active
+sb ws list              # list dirs under ~/.swarmbotix/workspaces/, mark active with *
+sb ws delete &lt;name&gt;     # rm -rf; clear active if it was set</pre>
+<ul>
+  <li>Backed by L1's <code>WorkspaceFlow</code> type (already defined for <code>flow.yaml</code> R/W).</li>
+  <li><code>~/.swarmbotix/active</code> is a one-line file holding the active workspace name. Missing or empty = no active workspace; not an error on its own.</li>
+  <li><code>sb ws delete</code> clears <code>active</code> if the deleted workspace was active, with a stderr warning.</li>
+</ul>
+
+<h3>Module init — <code>sb init</code></h3>
+<pre>sb init [&lt;rootpath&gt;] [--rust | --python | --cpp | --flutter | --unity] [--docker] [--force]</pre>
+<ul>
+  <li><code>&lt;rootpath&gt;</code> defaults to <code>.</code> (cwd). For Unity, point at the project root that contains <code>Assets/</code>.</li>
+  <li>Module name = <code>basename(rootpath)</code>. Must be a valid identifier (no spaces/slashes; same rule as workspace names).</li>
+  <li>Active workspace required — without one <code>sb init</code> errors with an actionable message (suggesting <code>sb ws create / sb ws set</code>).</li>
+  <li><b>Language flag</b>: required if no <code>sb.dev.yml</code> exists at <code>&lt;rootpath&gt;</code> yet (sb needs to know what to write); optional if one exists (must match the existing <code>language:</code> tag if given, else error).</li>
+  <li><b>Idempotent</b>: re-running <code>sb init</code> on an already-adopted dir is a no-op (no duplicate entry in <code>flow.yaml</code>, no clobbered files).</li>
+</ul>
+
+<h4>What sb writes into <code>&lt;rootpath&gt;</code></h4>
+<p>Each file is written only if missing (unless <code>--force</code>). sb never touches the user's existing project files.</p>
+<ul>
+  <li><code>sb.dev.yml</code> — <code>module: &lt;basename&gt;</code>, <code>language: &lt;lang&gt;</code>, <code>io_dir: swarmbotix_io/</code> (or <code>Assets/Scripts/swarmbotix_io/</code> for Unity), empty <code>publishers:</code> / <code>subscribers:</code> lists.</li>
+  <li><code>runscript.bash</code> — executable stub. The body prints a TODO message and exits non-zero. The header is a comment block describing the contract (working dir = module root; this is what <code>sb run</code>/<code>sb up</code> invokes) and example commands per language so a human or LLM agent can fill it in:
+<pre>#!/usr/bin/env bash
+# runscript.bash — invoked by `sb run` / `sb up`. Working dir = this module's root.
+# Fill in the command(s) that build and start this module. Examples by language:
+#   Rust:     cargo run --release
+#   Python:   python main.py
+#   C++:      cmake --build build &amp;&amp; ./build/app
+#   Flutter:  flutter run -d linux
+#   Unity:    : nothing — Unity runs from the editor
+#
+# Tip: point your LLM agent at this file plus your project tree.
+
+echo "TODO: configure $(pwd)/runscript.bash" &gt;&amp;2
+exit 1</pre>
+  </li>
+  <li><code>swarmbotix_io/</code> directory (or <code>Assets/Scripts/swarmbotix_io/</code> for Unity) — empty; L3 codegen fills it.</li>
+</ul>
+
+<h4>Flow.yaml registration</h4>
+<p>After writing the files, <code>sb init</code> appends <code>&lt;module&gt; → /abs/path/&lt;rootpath&gt;/sb.dev.yml</code> to <code>~/.swarmbotix/workspaces/&lt;active&gt;/flow.yaml</code> under the <code>modules:</code> map. Already-present entries are left untouched (idempotency).</p>
+
+<h4><code>flow.yaml::instances</code> — per-module deployment topology</h4>
+<p><code>WorkspaceFlow</code> now carries an optional <code>instances:</code> block per module. Each entry is a <code>ModuleInstance { id, label?, docker?, args? }</code>. Instances are the unit of node identity in the L6 graph editor; they also drive docker-aware runscript codegen at L2. A module without an entry runs as a single un-suffixed process (the default; matches the pre-instances flow.yaml shape, which still parses unchanged).</p>
+<p>No management subcommand at L2 — users hand-edit <code>flow.yaml</code> and re-run <code>sb init --docker --force</code>. <code>WorkspaceFlow::validate()</code> rejects invalid instance ids (empty / spaces / slashes / dots) and duplicate ids within a single module's list, called from <code>read_flow</code> so bad input fails at load time. ID character class matches <code>topic.rs::is_valid_segment_char</code> (<code>[A-Za-z0-9_-]+</code>) — wider than <code>validate_identifier</code> because <code>-</code> must be allowed for IDs like <code>front-left</code>.</p>
+
+<h4>Docker-flavored runscript — <code>sb init --docker</code></h4>
+<p>With <code>--docker</code>, sb emits a runscript whose body dispatches on <code>--id &lt;name&gt;</code> to one pre-resolved <code>docker run</code> invocation per instance declared in <code>flow.yaml::instances.&lt;module&gt;</code>. Image, env, devices, mounts, gpus, and network flags are baked in at <code>sb init</code> time — the runscript performs no flow.yaml lookup at runtime and has no dependency on <code>sb</code> being on PATH.</p>
+<ul>
+  <li><b>Preflight:</b> active workspace required; <code>flow.yaml::instances.&lt;module&gt;</code> must exist and be non-empty; every instance must have <code>docker.image</code>. Each failure prints an actionable error and exits non-zero; <code>runscript.bash</code> is not written.</li>
+  <li><b>Staleness check:</b> embedded in the runscript header; compares mtime of <code>flow.yaml</code> vs the runscript itself. If flow.yaml is newer, emits one stderr warning and continues. Regenerate with <code>sb init --docker --force</code>.</li>
+  <li><b>Container identity:</b> <code>docker run --name &lt;module&gt;-&lt;id&gt; --hostname &lt;module&gt;-&lt;id&gt;</code>. The hostname matches so in-container code that derives identity from <code>hostname</code> (logging, ROS adapters) picks up the instance label without re-parsing argv.</li>
+  <li><b>Argument threading:</b> <code>"$@"</code> follows the image, so the in-container <code>main()</code> still sees <code>--id &lt;name&gt;</code> and uses it to rewrite its wire topic segment (see <code>documents/sbcli_pubsub_consuming.md</code> §3 — string-form ids are interchangeable with the original numeric form).</li>
+  <li><b>Contract doc:</b> <code>documents/sbcli_docker_runscript.md</code> — schema reference, per-language in-container entry-point sketches, pitfalls. Treat this as the docker counterpart of the pub/sub consuming doc.</li>
+</ul>
+
+<h3>Out of scope at L2</h3>
+<ul>
+  <li><b>Project creation.</b> sb does not run <code>cargo new</code>, <code>flutter create</code>, or any equivalent. Users bring their own project — sb only adopts it.</li>
+  <li><b>Pubs/subs.</b> No publishers or subscribers yet. The user runs <code>sb init</code>, then at L3 adds <code>sb pub add ...</code>.</li>
+  <li><b>Codegen.</b> L2 doesn't touch <code>swarmbotix_io/</code> beyond creating an empty directory. L3 owns codegen.</li>
+  <li><b>Launch / tmux.</b> No <code>sb up/down/run/attach</code> yet — L5 owns multi-module orchestration. The runscript stub is in place but users invoke it manually until L5.</li>
+  <li><b>Production export.</b> <code>sb gopro</code> lands at L5.</li>
+</ul>
+
+<h2>TDD plan</h2>
+
+<div class="test"><b>1. Workspace lifecycle round-trip</b><br>
+Tempdir <code>$HOME</code>: <code>create ws1 → list shows ws1 → set ws1 → active marker = ws1 → create ws2 → set ws2 → delete ws2 → active cleared with warning → delete ws1</code>. Each step inspects the filesystem directly.
+</div>
+
+<div class="test"><b>2. <code>sb init</code> no active workspace</b><br>
+Tempdir project + no <code>~/.swarmbotix/active</code> → <code>sb init --rust .</code> exits non-zero with a message naming <code>sb ws set</code>. No files written into the project, no <code>flow.yaml</code> mutation.
+</div>
+
+<div class="test"><b>3. <code>sb init</code> on an empty dir writes the three artifacts</b><br>
+Tempdir empty, active workspace = demo: <code>sb init --rust ./pubber</code> writes <code>pubber/sb.dev.yml</code>, <code>pubber/runscript.bash</code> (executable bit set), <code>pubber/swarmbotix_io/</code> (empty). Appends <code>pubber → /abs/.../pubber/sb.dev.yml</code> to <code>~/.swarmbotix/workspaces/demo/flow.yaml</code>. Direct filesystem assertions.
+</div>
+
+<div class="test"><b>4. <code>sb init</code> is idempotent</b><br>
+Run <code>sb init --rust ./pubber</code> twice. Second call exits 0, doesn't touch any file's mtime, doesn't duplicate the <code>flow.yaml</code> entry. Then run a third time without <code>--rust</code>: also exits 0 (no-op; language tag already on disk).
+</div>
+
+<div class="test"><b>5. <code>sb init</code> preserves user files</b><br>
+Tempdir containing a real Rust crate (<code>Cargo.toml</code> + <code>src/main.rs</code> with arbitrary code): <code>sb init --rust .</code> → <code>cargo check</code> still passes; <code>Cargo.toml</code> + <code>src/</code> bytes unchanged; the three sb artifacts now exist alongside. Repeat for Python (don't touch <code>pyproject.toml</code> / <code>main.py</code>), C++ (don't touch <code>CMakeLists.txt</code>), Flutter (don't touch <code>pubspec.yaml</code>), Unity (don't touch <code>Assets/</code> contents).
+</div>
+
+<div class="test"><b>6. Language flag handling</b><br>
+(a) No <code>sb.dev.yml</code> + no language flag → exits non-zero, message names the required flags. (b) Existing <code>sb.dev.yml: language: rust</code> + <code>sb init --python</code> → exits non-zero, "language tag mismatch". (c) Existing <code>sb.dev.yml: language: rust</code> + <code>sb init</code> (no flag) → succeeds (just registers, no language to choose).
+</div>
+
+<div class="test"><b>7. <code>sb.dev.yml</code> shape</b><br>
+For each language: <code>sb init --&lt;lang&gt; ./demo</code> produces a <code>sb.dev.yml</code> that parses into <code>ModuleDevConfig</code> with the right <code>module</code>, <code>language</code>, <code>io_dir</code> (<code>swarmbotix_io/</code> for the four; <code>Assets/Scripts/swarmbotix_io/</code> for Unity), empty pub/sub lists. Direct serde assertion, no shell-out.
+</div>
+
+<div class="test"><b>8. <code>runscript.bash</code> stub contents</b><br>
+Each language produces a runscript.bash whose body exits non-zero (TODO behavior) and whose header comment contains the per-language example line (golden snippet test on the comment block). Executable bit set; shebang is <code>#!/usr/bin/env bash</code>.
+</div>
+
+<div class="test"><b>9. Unity io_dir</b><br>
+Tempdir with <code>Assets/Scripts/</code> already present: <code>sb init --unity .</code> writes <code>sb.dev.yml</code> at the rootpath (next to <code>Assets/</code>) with <code>io_dir: Assets/Scripts/swarmbotix_io/</code>, creates the <code>Assets/Scripts/swarmbotix_io/</code> dir, leaves all other <code>Assets/</code> contents untouched.
+</div>
+
+<div class="test"><b>10. Refuse-to-overwrite</b><br>
+With <code>sb.dev.yml</code> already at <code>&lt;rootpath&gt;</code> from a manual edit: bare <code>sb init</code> only registers (doesn't rewrite). <code>sb init --force --rust .</code> wipes and rewrites both <code>sb.dev.yml</code> and <code>runscript.bash</code>. A test fixture mid-edit verifies the no-force path preserves user comments / formatting.
+</div>
+
+<div class="test"><b>11. Module name validation</b><br>
+Reject rootpaths whose basename isn't a valid identifier (<code>demo-app</code>, <code>123demo</code>, empty, names containing spaces or slashes). Workspace names follow the same rule. One table test.
+</div>
+
+<div class="test"><b>12. <code>flow.yaml::instances</code> schema</b><br>
+Unit-level (in <code>sb-core/src/config.rs</code>): <code>WorkspaceFlow</code> with a populated <code>instances:</code> block round-trips through serde_yaml unchanged; pre-instances flow.yaml (modules only, no <code>instances:</code> key) still parses (backwards compat); <code>flow.instance("cam", "left")</code> resolves; <code>WorkspaceFlow::validate()</code> rejects empty / whitespace / <code>/</code> / <code>.</code> ids and duplicate ids within a single module's list.
+</div>
+
+<div class="test"><b>13. <code>sb init --docker</code> emits a docker-flavored runscript</b><br>
+Sandbox + pre-seeded <code>flow.yaml::instances.cam_gige_ht</code> with <code>left</code> + <code>right</code>: <code>sb init --cpp --docker ./cam_gige_ht</code> writes a <code>runscript.bash</code> that contains <code>'left')</code> and <code>'right')</code> case branches, <code>--name 'cam_gige_ht-left'</code> / <code>'cam_gige_ht-right'</code>, the env / device / gpu flags from flow.yaml, the image then <code>"$@"</code>, the <code>"known: left right"</code> error hint, and the staleness-check preamble. Executable bit set.
+</div>
+
+<div class="test"><b>14. <code>sb init --docker</code> preflights</b><br>
+(a) No <code>instances:</code> entry for the module → exits non-zero, stderr names <code>flow.yaml</code> and <code>sbcli_docker_runscript.md</code>; <code>runscript.bash</code> not written. (b) Instance without <code>docker:</code> → same shape, error names the offending instance id. (c) Instance with <code>docker:</code> but no <code>image:</code> → same shape, error names the offending instance id and the missing field.
+</div>
+
+<div class="test"><b>15. <code>sb init --docker --force</code> regenerates from updated flow.yaml</b><br>
+First run produces a runscript with <code>left</code> + <code>right</code> branches. Rewrite flow.yaml to drop <code>right</code> and bump the image tag. Bare <code>sb init --cpp --docker</code> (no force) leaves the runscript unchanged. <code>sb init --cpp --docker --force</code> regenerates: only <code>left</code> branch remains; new image appears.
+</div>
+
+<div class="test"><b>16. Generated docker runscript behavior</b><br>
+Three end-to-end shell asserts (no docker daemon required — every path exits before invoking <code>docker run</code>): missing <code>--id</code> exits 2 with <code>--id &lt;name&gt; required</code> and the known list; unknown <code>--id ghost</code> exits 2 naming the unknown id and the known list; touching <code>flow.yaml</code> after init produces a one-line staleness warning on stderr when the runscript is next invoked (the warning fires before id dispatch, so an unknown id still surfaces it).
+</div>
+
+<h2>Why this is L2</h2>
+<ul>
+  <li>L3 (pub/sub management) operates on a module's <code>sb.dev.yml</code>, and its <code>--module &lt;name&gt;</code> flag wants to find modules by name. Both need modules to exist <em>and</em> a workspace registry to look them up in — settling that here keeps L3 focused on codegen.</li>
+  <li>"Adopt-don't-create" is a deliberate scope cut. Generating language-specific project skeletons (Cargo.toml, pyproject.toml, CMakeLists.txt, …) is a maintenance burden — every Rust edition bump, every flutter SDK change, every C++ toolchain quirk would land here. By treating sb as <em>swarmbotix's bookkeeping</em> rather than a project generator, L2 stays tiny and language-agnostic.</li>
+  <li>Workspaces are conceptually inseparable from modules — you almost never want one without the other. Folding workspace lifecycle and module init into the same level removes the cross-level dependency that existed when workspaces were at L5.</li>
+  <li>L2 is independently useful: a user can <code>sb ws create demo &amp;&amp; sb ws set demo &amp;&amp; sb init --rust ./my_existing_crate</code>, fill in <code>runscript.bash</code>, run it manually, and ignore the rest of sb. The forge is opt-in.</li>
+</ul>
+
+<h2>Crate layout additions</h2>
+<pre>crates/
+  sb-workspace/              ← workspace lifecycle, flow.yaml R/W,
+                               sb init (file emission + registration)
+tests/integration/level2/
+  workspace_lifecycle.rs
+  init_no_active_workspace.rs
+  init_empty_dir.rs
+  init_idempotent.rs
+  init_preserves_user_files.rs   ← per-language matrix
+  init_language_flag.rs
+  dev_yml_shape.rs
+  runscript_stub.rs
+  init_unity_io_dir.rs
+  refuse_overwrite.rs
+  init_docker.rs                 ← --docker preflight, codegen, regen, runscript behavior
+</pre>
+<p>No <code>sb-scaffold/</code> crate (no language-specific project templates anymore — sb only writes its own three artifacts).</p>
+
+<div class="done"><b>Done when</b>
+<ul>
+  <li>Full workspace lifecycle works against tempdir <code>$HOME</code>.</li>
+  <li><code>sb init</code> on an existing project of each language drops the three artifacts, registers in <code>flow.yaml</code>, and leaves the user's files byte-identical.</li>
+  <li>Idempotent re-run + <code>--force</code> overwrite both behave as specified.</li>
+  <li>Unity rootpath produces <code>io_dir: Assets/Scripts/swarmbotix_io/</code>; the dir is created at that path.</li>
+  <li>Language-flag mismatch / missing-flag errors are clear and actionable.</li>
+</ul>
+</div>
+
+</body>
+</html>

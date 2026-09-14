@@ -1,0 +1,13 @@
+// geometry_msgs/PoseWithCovarianceStamped.proto
+//  This expresses an estimated pose with a reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/PoseWithCovariance.proto";
+import "std_msgs/Header.proto";
+
+message PoseWithCovarianceStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.PoseWithCovariance pose = 2;
+}

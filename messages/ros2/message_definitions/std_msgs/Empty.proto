@@ -1,0 +1,7 @@
+// std_msgs/Empty.proto
+syntax = "proto3";
+
+package std_msgs;
+
+message Empty {
+}

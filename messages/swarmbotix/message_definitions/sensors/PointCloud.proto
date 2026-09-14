@@ -1,0 +1,45 @@
+// sensors/PointCloud.proto — 3D point cloud, packed binary layout.
+//
+// Mirrors sensor_msgs/PointCloud2: `data` is an opaque packed buffer and
+// `fields` describes how to read one point out of it. `data` is pinned to
+// 2 MiB via `bytes_caps` (~131k XYZI float32 points at 16 B/point).
+syntax = "proto3";
+
+package swarmbotix.sensors;
+
+import "header/Header.proto";
+
+message PointCloud {
+  swarmbotix.header.Header header = 1;
+
+  // 1 for an unordered cloud; >1 for an organized (image-like) cloud.
+  uint32 height = 2;
+  uint32 width = 3;
+
+  repeated PointField fields = 4;
+
+  bool is_bigendian = 5;
+  uint32 point_step = 6;  // bytes per point
+  uint32 row_step = 7;    // bytes per row
+  bytes data = 8;
+  bool is_dense = 9;      // false means the cloud contains NaN/inf points
+
+  message PointField {
+    string name = 1;      // "x", "y", "z", "intensity", ...
+    uint32 offset = 2;    // byte offset within a point
+    Datatype datatype = 3;
+    uint32 count = 4;     // elements in this field (usually 1)
+
+    enum Datatype {
+      DATATYPE_UNSPECIFIED = 0;
+      INT8 = 1;
+      UINT8 = 2;
+      INT16 = 3;
+      UINT16 = 4;
+      INT32 = 5;
+      UINT32 = 6;
+      FLOAT32 = 7;
+      FLOAT64 = 8;
+    }
+  }
+}

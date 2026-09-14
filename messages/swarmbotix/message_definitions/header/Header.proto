@@ -1,0 +1,56 @@
+// header/Header.proto — load-bearing metadata for every swarmbotix message.
+//
+// Header is METADATA ONLY (no payload). Every images/* and sensors/*
+// message embeds one as field 1.
+//
+// `metadata.msg_freq_desired` is the publisher's INTENDED rate in Hz.
+// L4 `sb topic list` reads it from a single sample to display per-topic
+// rate — no rolling sampler, no out-of-band config. Removing this field
+// breaks L4.
+syntax = "proto3";
+
+package swarmbotix.header;
+
+message Header {
+  // Nanoseconds since the UNIX epoch (1970-01-01T00:00:00Z), UTC.
+  //
+  // Nanoseconds is the base unit precisely so every coarser unit is an
+  // EXACT integer divide — no floating point, no rounding drift:
+  //
+  //   microseconds = timestamp_ns / 1'000
+  //   milliseconds = timestamp_ns / 1'000'000
+  //   seconds      = timestamp_ns / 1'000'000'000
+  //
+  // uint64 nanoseconds covers year 2554, so wraparound is not a concern.
+  // Publishers that only have millisecond resolution must still store
+  // ns (multiply by 1'000'000) rather than changing the unit.
+  uint64 timestamp_ns = 1;
+
+  // Coordinate frame this data is expressed in (free-form, e.g. "base_link").
+  string frame_id = 2;
+
+  // Monotonically increasing per-publisher sequence number. Gaps mean
+  // dropped frames; a consumer can detect loss without a timer.
+  uint64 seq = 3;
+
+  Metadata metadata = 4;
+
+  message Metadata {
+    // Fully-qualified topic name, e.g. /dev01/ws/cam/iox2/image_raw.
+    string topic_full_name = 1;
+
+    // FULLY-QUALIFIED vault name of this message:
+    //   <style>/<namespace>/<Leaf>
+    // e.g. "swarmbotix/images/Image480pMono8", "ros2/std/StringStamped".
+    //
+    // The style segment is required, not decorative. This field travels on
+    // the wire to consumers that share no configuration with the publisher,
+    // so "images/Image480pMono8" alone would not say which schema produced
+    // the bytes — two styles may both define an `images/Image`.
+    string msg_type = 2;
+
+    // Publisher's INTENDED rate in Hz. The `_desired` suffix is explicit
+    // so it cannot be confused with an observed rate.
+    double msg_freq_desired = 3;
+  }
+}

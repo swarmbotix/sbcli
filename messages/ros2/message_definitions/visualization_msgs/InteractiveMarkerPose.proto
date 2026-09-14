@@ -1,0 +1,19 @@
+// visualization_msgs/InteractiveMarkerPose.proto
+//  Time/frame info.
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "geometry_msgs/Pose.proto";
+import "std_msgs/Header.proto";
+
+message InteractiveMarkerPose {
+  std_msgs.Header header = 1;
+
+  //  Initial pose. Also, defines the pivot point for rotations.
+  geometry_msgs.Pose pose = 2;
+
+  //  Identifying string. Must be globally unique in
+  //  the topic that this message is sent through.
+  string name = 3;
+}

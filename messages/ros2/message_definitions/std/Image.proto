@@ -1,0 +1,13 @@
+// std/Image.proto — raw image payload. Mirrors sensor_msgs/Image.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+message Image {
+  uint32 width = 1;
+  uint32 height = 2;
+  // Pixel format identifier, e.g. "rgb8", "bgr8", "mono8", "yuv422".
+  string encoding = 3;
+  uint32 step = 4;        // bytes per row
+  bytes data = 5;
+}

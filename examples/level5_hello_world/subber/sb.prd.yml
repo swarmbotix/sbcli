@@ -1,0 +1,6 @@
+module: subber
+subscribers:
+- name: hello
+  topic: /dev01/demo/pubber/hello
+  type: std/StringStamped
+  transport: zenoh

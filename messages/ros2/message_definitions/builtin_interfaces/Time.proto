@@ -1,0 +1,11 @@
+// builtin_interfaces/Time.proto — point-in-time timestamp (sec + nanosec).
+syntax = "proto3";
+
+package builtin_interfaces;
+
+message Time {
+  // Seconds since UNIX epoch (signed so pre-1970 values are representable).
+  int32 sec = 1;
+  // Nanoseconds within the second, [0, 1e9).
+  uint32 nanosec = 2;
+}

@@ -1,0 +1,13 @@
+// geometry_msgs/PolygonInstance.proto
+//  A specification of a polygon where the first and last points are assumed to be connected
+//  It includes a unique identification field for disambiguating multiple instances
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Polygon.proto";
+
+message PolygonInstance {
+  geometry_msgs.Polygon polygon = 1;
+  int64 id = 2;
+}

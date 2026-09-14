@@ -1,0 +1,12 @@
+// std/TwistStamped.proto — Header + Twist.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+import "std/Header.proto";
+import "std/Twist.proto";
+
+message TwistStamped {
+  Header header = 1;
+  Twist twist = 2;
+}

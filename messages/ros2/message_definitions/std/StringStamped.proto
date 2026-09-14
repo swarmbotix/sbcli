@@ -1,0 +1,15 @@
+// std/StringStamped.proto — Header + bare string payload.
+//
+// Follows the <Type>Stamped convention: an inline `header` field plus
+// the payload fields (NOT a nested std/String — payload fields are
+// inlined directly for ergonomics).
+syntax = "proto3";
+
+package swarmbotix.std;
+
+import "std/Header.proto";
+
+message StringStamped {
+  Header header = 1;
+  string data = 2;
+}

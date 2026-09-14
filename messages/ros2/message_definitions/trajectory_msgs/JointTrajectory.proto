@@ -1,0 +1,21 @@
+// trajectory_msgs/JointTrajectory.proto
+//  The header is used to specify the coordinate frame and the reference time for
+//  the trajectory durations
+syntax = "proto3";
+
+package trajectory_msgs;
+
+import "std_msgs/Header.proto";
+import "trajectory_msgs/JointTrajectoryPoint.proto";
+
+message JointTrajectory {
+  std_msgs.Header header = 1;
+
+  //  The names of the active joints in each trajectory point. These names are
+  //  ordered and must correspond to the values in each trajectory point.
+  repeated string joint_names = 2;
+
+  //  Array of trajectory points, which describe the positions, velocities,
+  //  accelerations and/or efforts of the joints at each time point.
+  repeated trajectory_msgs.JointTrajectoryPoint points = 3;
+}

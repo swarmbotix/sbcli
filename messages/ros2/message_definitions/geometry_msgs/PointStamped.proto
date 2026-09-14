@@ -1,0 +1,13 @@
+// geometry_msgs/PointStamped.proto
+//  This represents a Point with reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Point.proto";
+import "std_msgs/Header.proto";
+
+message PointStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.Point point = 2;
+}

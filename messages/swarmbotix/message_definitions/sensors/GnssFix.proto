@@ -1,0 +1,39 @@
+// sensors/GnssFix.proto — global navigation satellite system fix.
+//
+// Named GnssFix rather than NavSatFix: GNSS is the vendor-neutral term
+// (GPS is one constellation among GLONASS / Galileo / BeiDou).
+syntax = "proto3";
+
+package swarmbotix.sensors;
+
+import "header/Header.proto";
+import "primitives/Mat33.proto";
+
+message GnssFix {
+  swarmbotix.header.Header header = 1;
+
+  Status status = 2;
+
+  double latitude = 3;   // deg, WGS84, +N
+  double longitude = 4;  // deg, WGS84, +E
+  double altitude = 5;   // m above the WGS84 ellipsoid
+
+  // ENU (east/north/up) position covariance, row-major 3x3, m^2.
+  swarmbotix.primitives.Mat33 position_covariance = 6;
+  CovarianceType position_covariance_type = 7;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    NO_FIX = 1;
+    FIX = 2;
+    SBAS_FIX = 3;   // satellite-based augmentation
+    GBAS_FIX = 4;   // ground-based augmentation (RTK)
+  }
+
+  enum CovarianceType {
+    COVARIANCE_TYPE_UNSPECIFIED = 0;
+    APPROXIMATED = 1;
+    DIAGONAL_KNOWN = 2;
+    KNOWN = 3;
+  }
+}

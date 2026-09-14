@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>L5 — Launch &amp; Production</title>
+<style>
+:root { --fg:#222; --muted:#666; --code:#f4f4f4; --accent:#0066cc; --warn:#d4a017; --ok:#2a8c2a; }
+body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1.5em; color: var(--fg); line-height: 1.55; }
+h1 { border-bottom: 2px solid var(--fg); padding-bottom: 0.3em; margin-top: 0; }
+h2 { margin-top: 1.8em; }
+h3 { color: var(--muted); margin-top: 1.3em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+pre { background: var(--code); padding: 0.9em; border-radius: 4px; overflow-x: auto; line-height: 1.4; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 3px; }
+.goal { font-size: 1.05em; color: var(--muted); margin: 0.5em 0 1.5em; }
+.test { background: #fffbe6; border-left: 3px solid var(--warn); padding: 0.7em 1em; margin: 0.7em 0; }
+.test b { color: #8a6b08; }
+.done { background: #eef9ee; border-left: 3px solid var(--ok); padding: 0.7em 1em; margin: 1.5em 0; }
+.done b { color: #1f6b1f; }
+.nav { font-size: 0.9em; color: var(--muted); margin-bottom: 1.5em; }
+.nav a { color: var(--accent); text-decoration: none; margin-right: 0.6em; }
+.nav a:hover { text-decoration: underline; }
+.nav .here { font-weight: 700; color: var(--fg); }
+ul, ol { padding-left: 1.6em; }
+li { margin: 0.25em 0; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="./level1.html">L1</a>·
+<a href="./level2.html">L2</a>·
+<a href="./level3.html">L3</a>·
+<a href="./level4.html">L4</a>·
+<a href="./level5.html" class="here">L5</a>·
+<a href="./level6.html">L6</a>
+</div>
+
+<h1>L5 — Launch &amp; Production</h1>
+<p class="goal">After L5 the user can launch every module in the active workspace in one shot with <code>sb up</code>, attach/kill the session, and freeze any module for production with <code>sb gopro</code>. This is where the multi-module workspaces created at L2 actually start running together.</p>
+
+<h2>Scope</h2>
+
+<h3>Launch (tmux/psmux)</h3>
+<pre>sb up                              # launch all modules in active workspace
+sb run &lt;module&gt; [args...]          # launch a single module; args -&gt; runscript.bash
+sb stop &lt;module&gt; [args...]         # stop a single module via its stopscript.bash
+sb down                            # kill the session
+sb attach                          # attach to it</pre>
+<ul>
+  <li>Session name: <code>sb-&lt;workspace&gt;</code>. <strong>One pane per <code>(module, instance)</code> pair</strong> — a module without an <code>instances:</code> entry in <code>flow.yaml</code> gets one un-suffixed pane (current behavior); a module with <em>N</em> declared instances gets <em>N</em> panes named <code>&lt;module&gt;-&lt;id&gt;</code> (matching the runscript's tmux session-name suffix).</li>
+  <li>Each pane: <code>cd &lt;module.root&gt; &amp;&amp; ./runscript.bash [args...]</code>. <code>sb up</code> passes no args; <code>sb run &lt;module&gt; [args...]</code> forwards trailing args verbatim — the <code>--id &lt;id&gt;</code> convention for instanced modules is one such use, but any args the runscript accepts are fair game.</li>
+  <li><code>sb stop &lt;module&gt; [args...]</code> is the symmetric counterpart: same module resolution, same <code>sb-&lt;workspace&gt;</code> session, same <code>respawn-window -k</code> idempotency, but swaps <code>stopscript.bash</code> in for <code>runscript.bash</code>. Errors clearly if no stopscript is present (no <code>sb init</code> stub today — user authors it alongside the runscript).</li>
+  <li>Module root + script path resolved via the active workspace's <code>flow.yaml</code> (from L2) → each module's <code>sb.dev.yml</code>. Instance fan-out resolved via <code>flow.yaml::instances</code> (also from L2 — see <a href="./level2.html">L2</a>).</li>
+  <li>Windows: <code>psmux</code> ships as the <code>tmux</code> command — no platform-specific code in sb.</li>
+</ul>
+<p><em>L2 already lands the data model and the docker-flavored runscript. L5's job is to walk <code>flow.modules</code> × <code>flow.instances</code> at launch time and spawn the right pane per pair; <code>sb-launch</code>'s current single-pane-per-module loop predates this and will fan out as part of L5.</em></p>
+
+<h3>Production export</h3>
+<pre>sb gopro                  # one module: dev.yml + io_dir → prd.yml
+sb gopro --all            # every module in active workspace</pre>
+<ul>
+  <li>Reads <code>sb.dev.yml</code> + walks <code>io_dir/</code> to confirm files exist; emits <code>sb.prd.yml</code>.</li>
+  <li><b>Strips</b>: <code>root:</code>, absolute paths, anything host-specific.</li>
+  <li><b>Keeps</b>: module name, full publishers + subscribers list with types &amp; transports.</li>
+  <li>Resulting <code>sb.prd.yml</code> is language-agnostic and ships with the binary — L6 swarmctl reads it for the design-time view.</li>
+</ul>
+
+<h2>TDD plan</h2>
+
+<div class="test"><b>1. <code>sb up</code> launches expected panes</b><br>
+2-module workspace → <code>sb up</code> → <code>tmux list-windows -t sb-&lt;ws&gt;</code> reports 2 panes. Each pane's working dir matches the module root. Cleanup with <code>sb down</code>: <code>tmux has-session</code> returns non-zero.
+</div>
+
+<div class="test"><b>2. <code>sb up</code> handles missing runscript</b><br>
+Module with no <code>runscript.bash</code> → <code>sb up</code> exits non-zero before creating the session (no orphan tmux). Message names the offending module.
+</div>
+
+<div class="test"><b>3. <code>sb up</code> handles no active workspace</b><br>
+With <code>~/.swarmbotix/active</code> empty/missing: <code>sb up</code> errors immediately with an actionable message (suggesting <code>sb ws set</code>). No tmux session created.
+</div>
+
+<div class="test"><b>4. <code>sb run &lt;module&gt;</code> is idempotent</b><br>
+Launches exactly one pane in <code>sb-&lt;ws&gt;</code>. Re-running with the same module name kills + restarts the existing pane, doesn't duplicate.
+</div>
+
+<div class="test"><b>4a. <code>sb run &lt;module&gt; [args...]</code> forwards args to runscript.bash</b><br>
+Trailing args after <code>&lt;module&gt;</code> reach the runscript's <code>$@</code> unmodified, including args that start with <code>-</code> and args containing spaces. <code>sb stop &lt;module&gt; [args...]</code> mirrors this for stopscript.bash; both verbs share the <code>sb-&lt;workspace&gt;</code> session and the same idempotent respawn semantics.
+</div>
+
+<div class="test"><b>4b. <code>sb stop</code> blames a missing stopscript</b><br>
+Module with a runscript but no <code>stopscript.bash</code> → <code>sb stop &lt;module&gt;</code> errors before touching tmux. Message names the module and the missing filename so the user knows what to author. Unknown module name on either verb fails the same way (TDD #4).
+</div>
+
+<div class="test"><b>5. <code>sb attach</code> / <code>sb down</code> round-trip</b><br>
+After <code>sb up</code>: <code>sb attach</code> in non-interactive mode reports the session name and exits 0 (or attaches in an interactive shell). <code>sb down</code> tears the session down; subsequent <code>sb attach</code> errors with "no session".
+</div>
+
+<div class="test"><b>6. <code>sb gopro</code> output is sanitized</b><br>
+After gopro, <code>sb.prd.yml</code> contains no <code>/home/</code> / <code>/Users/</code> / <code>C:\</code> substrings, no <code>root:</code> key. Lints fail loudly if any leak.
+</div>
+
+<div class="test"><b>7. <code>sb gopro</code> round-trip</b><br>
+Non-trivial <code>sb.dev.yml</code> (3 pubs, 2 subs, mixed transports) → gopro → parse <code>sb.prd.yml</code> → publishers + subscribers identical to dev (ignoring host fields). Sanity check that gopro doesn't drop entries.
+</div>
+
+<div class="test"><b>8. <code>sb gopro --all</code> covers every module</b><br>
+3-module workspace → <code>sb gopro --all</code> → each module's root contains a fresh <code>sb.prd.yml</code> that round-trips. Modules without an <code>io_dir/</code> on disk surface as a clear per-module error without blocking the others.
+</div>
+
+<div class="test"><b>9. Full end-to-end smoke</b><br>
+Script (CI step, not unit):
+<pre>sb ws create demo &amp;&amp; sb ws set demo                                # L2
+cargo new pubber &amp;&amp; sb init --rust ./pubber                        # L2 (user creates Rust crate; sb adopts it)
+echo 'cargo run' &gt; pubber/runscript.bash                           # L2 (fill in the runscript stub)
+sb pub add -m std/StringStamped /hello --zenoh --module pubber     # L3
+cargo new subber &amp;&amp; sb init --rust ./subber                        # L2
+echo 'cargo run' &gt; subber/runscript.bash                           # L2
+sb sub add -m std/StringStamped /hello --zenoh --module subber     # L3
+sb up                                                              # L5
+sleep 3
+sb topic list                                                      # L4 — finds /hello tagged [z]
+sb topic listen /hello -n 1                                        # L4 — one frame, schema decoded
+sb down                                                            # L5
+sb gopro --all                                                     # L5 — both modules get sb.prd.yml</pre>
+This is the proof-of-life for the whole stack from L1 through L5.
+</div>
+
+<h2>Why this is L5</h2>
+<ul>
+  <li>Launch needs <code>flow.yaml</code> (the multi-module registry, from L2) <em>and</em> module-level <code>runscript.bash</code> (from L2) <em>and</em> the per-module pubs/subs that make running together meaningful (from L3). Both prerequisites are in place by the time L5 starts.</li>
+  <li><code>gopro</code> is a pure transform on <code>sb.dev.yml</code> + <code>io_dir/</code> — small, but it ties off the dev → prod boundary cleanly before swarmctl reads <code>sb.prd.yml</code> at L6.</li>
+  <li>L4's topic introspection slotted in before this on purpose: <code>sb topic list/listen</code> is more leveraged for daily dev work than orchestration is, so it ships earlier.</li>
+</ul>
+
+<h2>Crate layout additions</h2>
+<pre>crates/
+  sb-launch/                 ← tmux/psmux orchestration
+  sb-gopro/                  ← sb.prd.yml export
+tests/integration/level5/
+  launch_two_modules.rs
+  launch_idempotent.rs
+  gopro_sanitized.rs
+  gopro_round_trip.rs
+  e2e_hello_world.sh
+</pre>
+
+<div class="done"><b>Done when</b>
+<ul>
+  <li>2-module hello-world (Rust pub ↔ Rust sub) round-trips via <code>sb up</code>; observable via <code>sb topic list</code>; <code>sb down</code> cleans up.</li>
+  <li><code>sb gopro</code> output passes the sanitization lint and round-trips.</li>
+  <li>E2E smoke test green in CI.</li>
+</ul>
+</div>
+
+</body>
+</html>

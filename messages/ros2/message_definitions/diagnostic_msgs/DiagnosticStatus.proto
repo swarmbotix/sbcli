@@ -1,0 +1,27 @@
+// diagnostic_msgs/DiagnosticStatus.proto
+//  This message holds the status of an individual component of the robot.
+syntax = "proto3";
+
+package diagnostic_msgs;
+
+import "diagnostic_msgs/KeyValue.proto";
+
+message DiagnosticStatus {
+  //  Possible levels of operations.
+  // const byte OK = 0;
+  // const byte WARN = 1;
+  // const byte ERROR = 2;
+  // const byte STALE = 3;
+
+  //  Level of operation enumerated above.
+  uint32 level = 1;
+  //  A description of the test/component reporting.
+  string name = 2;
+  //  A description of the status.
+  string message = 3;
+  //  A hardware unique string.
+  string hardware_id = 4;
+  //  An array of values associated with the status.
+  repeated diagnostic_msgs.KeyValue values = 5;
+
+}

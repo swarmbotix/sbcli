@@ -1,0 +1,18 @@
+[package]
+name = "level5_hello_subber"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "hello_subber"
+path = "main.rs"
+
+[dependencies]
+zenoh = "1.9"
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"

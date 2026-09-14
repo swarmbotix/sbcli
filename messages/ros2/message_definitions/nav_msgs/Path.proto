@@ -1,0 +1,16 @@
+// nav_msgs/Path.proto
+//  An array of poses that represents a Path for a robot to follow.
+syntax = "proto3";
+
+package nav_msgs;
+
+import "geometry_msgs/PoseStamped.proto";
+import "std_msgs/Header.proto";
+
+message Path {
+  //  Indicates the frame_id of the path.
+  std_msgs.Header header = 1;
+
+  //  Array of poses to follow.
+  repeated geometry_msgs.PoseStamped poses = 2;
+}

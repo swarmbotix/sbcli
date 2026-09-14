@@ -1,0 +1,34 @@
+// std/Header.proto — load-bearing metadata for every *Stamped message.
+//
+// Header is METADATA ONLY (no payload). Composite *Stamped messages
+// pair this with a payload (see std/StringStamped.proto).
+//
+// `metadata.msg_freq_desired` is the publisher's INTENDED rate in Hz.
+// L4 `sb topic list` reads it from a single sample to display per-topic
+// rate — no rolling sampler, no out-of-band config. Removing this field
+// breaks L4.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+message Header {
+  // Nanoseconds since UNIX epoch at publish time.
+  uint64 timestamp_ns = 1;
+
+  // Coordinate frame identifier (free-form).
+  string frame_id = 2;
+
+  Metadata metadata = 3;
+
+  message Metadata {
+    // Fully-qualified topic name, e.g. /dev01/ws/cam/iox2/image_raw.
+    string topic_full_name = 1;
+
+    // Vault name of the wrapping *Stamped type, e.g. "std/ImageStamped".
+    string msg_type = 2;
+
+    // Publisher's INTENDED rate in Hz. The `_desired` suffix is explicit
+    // so it cannot be confused with an observed rate.
+    double msg_freq_desired = 3;
+  }
+}

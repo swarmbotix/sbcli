@@ -1,0 +1,9 @@
+// std/String.proto — bare string payload.
+// Use std/StringStamped when timestamping / frame_id is needed.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+message String {
+  string data = 1;
+}

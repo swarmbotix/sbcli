@@ -1,0 +1,23 @@
+// visualization_msgs/InteractiveMarkerInit.proto
+//  Identifying string. Must be unique in the topic namespace
+//  that this server works on.
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "visualization_msgs/InteractiveMarker.proto";
+
+message InteractiveMarkerInit {
+  string server_id = 1;
+
+  //  Sequence number.
+  //  The client will use this to detect if it has missed a subsequent
+  //  update.  Every update message will have the same sequence number as
+  //  an init message.  Clients will likely want to unsubscribe from the
+  //  init topic after a successful initialization to avoid receiving
+  //  duplicate data.
+  uint64 seq_num = 2;
+
+  //  All markers.
+  repeated visualization_msgs.InteractiveMarker markers = 3;
+}

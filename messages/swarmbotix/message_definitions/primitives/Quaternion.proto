@@ -1,0 +1,12 @@
+// primitives/Quaternion.proto — rotation, Hamilton convention, (x, y, z, w)
+// with w the scalar part. Expected to be unit-norm; producers normalize.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+message Quaternion {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}

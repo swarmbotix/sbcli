@@ -1,0 +1,13 @@
+// geometry_msgs/PolygonStamped.proto
+//  This represents a Polygon with reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Polygon.proto";
+import "std_msgs/Header.proto";
+
+message PolygonStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.Polygon polygon = 2;
+}

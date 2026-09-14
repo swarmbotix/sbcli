@@ -1,0 +1,18 @@
+[package]
+name = "sb-vault"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Message vault: embedded std bundle, CRUD, protoc invocation."
+
+[dependencies]
+sb-core = { workspace = true }
+sb-config = { workspace = true }
+include_dir = { workspace = true }
+walkdir = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

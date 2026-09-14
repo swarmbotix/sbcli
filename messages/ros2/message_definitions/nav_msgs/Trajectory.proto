@@ -1,0 +1,16 @@
+// nav_msgs/Trajectory.proto
+//  An array of trajectory points that represents a trajectory for a robot to follow.
+syntax = "proto3";
+
+package nav_msgs;
+
+import "nav_msgs/TrajectoryPoint.proto";
+import "std_msgs/Header.proto";
+
+message Trajectory {
+  //  Indicates the frame_id in which the planner ran and timestamp represents when the trajectory was generated.
+  std_msgs.Header header = 1;
+
+  //  Array of trajectory points to follow.
+  repeated nav_msgs.TrajectoryPoint points = 2;
+}

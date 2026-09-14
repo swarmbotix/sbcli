@@ -1,0 +1,14 @@
+// geometry_msgs/PoseArray.proto
+//  An array of poses with a header for global reference.
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Pose.proto";
+import "std_msgs/Header.proto";
+
+message PoseArray {
+  std_msgs.Header header = 1;
+
+  repeated geometry_msgs.Pose poses = 2;
+}

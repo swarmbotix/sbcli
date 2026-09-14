@@ -1,0 +1,9 @@
+module: pubber
+language: rust
+root: /home/el/Dropbox/Projects/swarmbotix/examples/rust_rust_iceoryx/pubber
+io_dir: swarmbotix_io
+publishers:
+- name: frame
+  topic: frame
+  type: std/ImageStamped
+  transport: iceoryx2

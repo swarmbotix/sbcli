@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sb-core",
+    "crates/sb-config",
+    "crates/sb-vault",
+    "crates/sb-iox2-typegen",
+    "crates/sb-doctor",
+    "crates/sb-workspace",
+    "crates/sb-codegen",
+    "crates/sb-pubsub",
+    "crates/sb-discover",
+    "crates/sb-listen",
+    "crates/sb-launch",
+    "crates/sb-gopro",
+    "crates/sb-cli",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.41"
+license = "Apache-2.0"
+rust-version = "1.82"
+
+[workspace.dependencies]
+sb-core = { path = "crates/sb-core" }
+sb-config = { path = "crates/sb-config" }
+sb-vault = { path = "crates/sb-vault" }
+sb-iox2-typegen = { path = "crates/sb-iox2-typegen" }
+sb-doctor = { path = "crates/sb-doctor" }
+sb-workspace = { path = "crates/sb-workspace" }
+sb-codegen = { path = "crates/sb-codegen" }
+sb-pubsub = { path = "crates/sb-pubsub" }
+sb-discover = { path = "crates/sb-discover" }
+sb-listen = { path = "crates/sb-listen" }
+sb-launch = { path = "crates/sb-launch" }
+sb-gopro = { path = "crates/sb-gopro" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+anstyle = "1"
+include_dir = "0.7"
+walkdir = "2"
+dirs = "5"
+libloading = "0.8"
+tempfile = "3"
+which = "7"
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+prost-reflect = { version = "0.16", features = ["serde"] }
+zenoh = "=1.9.0"
+iceoryx2 = "=0.9.3"

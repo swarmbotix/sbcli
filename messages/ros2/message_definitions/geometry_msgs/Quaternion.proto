@@ -1,0 +1,12 @@
+// geometry_msgs/Quaternion.proto
+//  This represents an orientation in free space in quaternion form.
+syntax = "proto3";
+
+package geometry_msgs;
+
+message Quaternion {
+  double x = 1;  // default=0
+  double y = 2;  // default=0
+  double z = 3;  // default=0
+  double w = 4;  // default=1
+}

@@ -1,0 +1,13 @@
+// geometry_msgs/TwistStamped.proto
+//  A twist with reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Twist.proto";
+import "std_msgs/Header.proto";
+
+message TwistStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.Twist twist = 2;
+}

@@ -1,0 +1,112 @@
+# ─────────────────────────────────────────────────────────────────────
+# Rust / Cargo
+# ─────────────────────────────────────────────────────────────────────
+
+# Build output. One workspace at the repo root, so `/target` covers the
+# real one; `**/target/` catches nested builds under examples/ and any
+# user module a test fixture happens to `cargo build` in place.
+/target
+**/target/
+
+# NOTE: Cargo.lock is deliberately NOT ignored. This workspace ships an
+# executable (the `sb` binary), and the lockfile is what makes a release
+# build reproducible — installguide.md pins zenoh 1.9 / iceoryx2 0.9 and
+# relies on it. Only *library* crates ignore their lockfile.
+Cargo.lock.bak
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug symbols. Release builds emit target/<triple>/release/sb.pdb
+# (9.8 MB at v0.1.29) — already covered by /target, but a stray copy left
+# next to a hand-run binary should not be committed either.
+*.pdb
+
+# Coverage / profiling
+*.profraw
+*.profdata
+/coverage/
+/tarpaulin-report.*
+
+# ─────────────────────────────────────────────────────────────────────
+# Build switch
+# ─────────────────────────────────────────────────────────────────────
+
+# Per-dev-box platform selector (OS=windows|linux|mac). Copy .env.example
+# to .env. See installguide_windows.md §2.
+/.env
+
+# Release artifacts under platforms/*/dist/ are deliberately NOT ignored —
+# they are the record of what shipped. See platforms/README.md.
+
+# ─────────────────────────────────────────────────────────────────────
+# Generated message-vault artifacts
+# ─────────────────────────────────────────────────────────────────────
+
+# `sb message compile` writes a protobuf descriptor cache and per-backend
+# bindings into the vault. Sources are the .proto files only; everything
+# below is regenerable and is excluded from the release payload too
+# (installguide.md step 4 rsync).
+message_definitions/.cache/
+message_definitions/targets/
+
+# Defensive: older layouts emitted bindings alongside the .proto they came
+# from rather than under targets/.
+message_definitions/**/*.rs
+message_definitions/**/*.h
+message_definitions/**/*.py
+
+# ─────────────────────────────────────────────────────────────────────
+# Claude Code
+# ─────────────────────────────────────────────────────────────────────
+
+.claude/
+.claude.json
+.claude.local.json
+.mcp.json
+CLAUDE.md
+CLAUDE.local.md
+
+# ...except project skills, which encode repo-wide invariants (e.g.
+# /sb-release owns the seven-way version mirror). A teammate without them
+# would bump versions by hand and break the build's drift check.
+!.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
+
+# ─────────────────────────────────────────────────────────────────────
+# Editors
+# ─────────────────────────────────────────────────────────────────────
+
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# ─────────────────────────────────────────────────────────────────────
+# OS cruft
+# ─────────────────────────────────────────────────────────────────────
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ─────────────────────────────────────────────────────────────────────
+# Scratch
+# ─────────────────────────────────────────────────────────────────────
+
+/tmp/
+*.log

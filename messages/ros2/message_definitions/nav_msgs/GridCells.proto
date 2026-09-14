@@ -1,0 +1,21 @@
+// nav_msgs/GridCells.proto
+//  An array of cells in a 2D grid
+syntax = "proto3";
+
+package nav_msgs;
+
+import "geometry_msgs/Point.proto";
+import "std_msgs/Header.proto";
+
+message GridCells {
+  std_msgs.Header header = 1;
+
+  //  Width of each cell
+  float cell_width = 2;
+
+  //  Height of each cell
+  float cell_height = 3;
+
+  //  Each cell is represented by the Point at the center of the cell
+  repeated geometry_msgs.Point cells = 4;
+}

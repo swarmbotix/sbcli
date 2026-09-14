@@ -1,0 +1,12 @@
+// std/ImageStamped.proto — Header + Image.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+import "std/Header.proto";
+import "std/Image.proto";
+
+message ImageStamped {
+  Header header = 1;
+  Image image = 2;
+}

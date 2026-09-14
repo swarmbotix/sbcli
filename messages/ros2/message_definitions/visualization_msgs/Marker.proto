@@ -1,0 +1,97 @@
+// visualization_msgs/Marker.proto
+//  See:
+//   - http://www.ros.org/wiki/rviz/DisplayTypes/Marker
+//   - http://www.ros.org/wiki/rviz/Tutorials/Markers%3A%20Basic%20Shapes
+//
+//  for more information on using this message with rviz.
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "builtin_interfaces/Duration.proto";
+import "geometry_msgs/Point.proto";
+import "geometry_msgs/Pose.proto";
+import "geometry_msgs/Vector3.proto";
+import "sensor_msgs/CompressedImage.proto";
+import "std_msgs/ColorRGBA.proto";
+import "std_msgs/Header.proto";
+import "visualization_msgs/MeshFile.proto";
+import "visualization_msgs/UVCoordinate.proto";
+
+message Marker {
+  // const int32 ARROW = 0;
+  // const int32 CUBE = 1;
+  // const int32 SPHERE = 2;
+  // const int32 CYLINDER = 3;
+  // const int32 LINE_STRIP = 4;
+  // const int32 LINE_LIST = 5;
+  // const int32 CUBE_LIST = 6;
+  // const int32 SPHERE_LIST = 7;
+  // const int32 POINTS = 8;
+  // const int32 TEXT_VIEW_FACING = 9;
+  // const int32 MESH_RESOURCE = 10;
+  // const int32 TRIANGLE_LIST = 11;
+  // const int32 ARROW_STRIP = 12;
+
+  // const int32 ADD = 0;
+  // const int32 MODIFY = 0;
+  // const int32 DELETE = 2;
+  // const int32 DELETEALL = 3;
+
+  //  Header for timestamp and frame id.
+  std_msgs.Header header = 1;
+  //  Namespace in which to place the object.
+  //  Used in conjunction with id to create a unique name for the object.
+  string ns = 2;
+  //  Object ID used in conjunction with the namespace for manipulating and deleting the object later.
+  int32 id = 3;
+  //  Type of object.
+  int32 type = 4;
+  //  Action to take; one of:
+  //   - 0 add/modify an object
+  //   - 1 (deprecated)
+  //   - 2 deletes an object (with the given ns and id)
+  //   - 3 deletes all objects (or those with the given ns if any)
+  int32 action = 5;
+  //  Pose of the object with respect the frame_id specified in the header.
+  geometry_msgs.Pose pose = 6;
+  //  Scale of the object; 1,1,1 means default (usually 1 meter square).
+  geometry_msgs.Vector3 scale = 7;
+  //  Color of the object; in the range: [0.0-1.0]
+  std_msgs.ColorRGBA color = 8;
+  //  How long the object should last before being automatically deleted.
+  //  0 indicates forever.
+  builtin_interfaces.Duration lifetime = 9;
+  //  If this marker should be frame-locked, i.e. retransformed into its frame every timestep.
+  bool frame_locked = 10;
+
+  //  Only used if the type specified has some use for them (eg. POINTS, LINE_STRIP, ARROW_STRIP, etc.)
+  repeated geometry_msgs.Point points = 11;
+  //  Only used if the type specified has some use for them (eg. POINTS, LINE_STRIP, etc.)
+  //  The number of colors provided must either be 0 or equal to the number of points provided.
+  //  NOTE: alpha is not yet used
+  repeated std_msgs.ColorRGBA colors = 12;
+
+  //  Texture resource is a special URI that can either reference a texture file in
+  //  a format acceptable to (resource retriever)[https://docs.ros.org/en/rolling/p/resource_retriever/]
+  //  or an embedded texture via a string matching the format:
+  //    "embedded://texture_name"
+  string texture_resource = 13;
+  //  An image to be loaded into the rendering engine as the texture for this marker.
+  //  This will be used iff texture_resource is set to embedded.
+  sensor_msgs.CompressedImage texture = 14;
+  //  Location of each vertex within the texture; in the range: [0.0-1.0]
+  repeated visualization_msgs.UVCoordinate uv_coordinates = 15;
+
+  //  Only used for text markers
+  string text = 16;
+
+  //  Only used for MESH_RESOURCE markers.
+  //  Similar to texture_resource, mesh_resource uses resource retriever to load a mesh.
+  //  Optionally, a mesh file can be sent in-message via the mesh_file field. If doing so,
+  //  use the following format for mesh_resource:
+  //    "embedded://mesh_name"
+  string mesh_resource = 17;
+  visualization_msgs.MeshFile mesh_file = 18;
+  bool mesh_use_embedded_materials = 19;
+}

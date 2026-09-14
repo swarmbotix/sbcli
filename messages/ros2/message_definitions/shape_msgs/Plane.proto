@@ -1,0 +1,14 @@
+// shape_msgs/Plane.proto
+//  Representation of a plane, using the plane equation ax + by + cz + d = 0.
+//
+//  a := coef[0]
+//  b := coef[1]
+//  c := coef[2]
+//  d := coef[3]
+syntax = "proto3";
+
+package shape_msgs;
+
+message Plane {
+  repeated double coef = 1;  // fixed [4]
+}

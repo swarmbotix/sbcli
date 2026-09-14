@@ -1,0 +1,38 @@
+// visualization_msgs/InteractiveMarker.proto
+//  Time/frame info.
+//  If header.time is set to 0, the marker will be retransformed into
+//  its frame on each timestep. You will receive the pose feedback
+//  in the same frame.
+//  Otherwise, you might receive feedback in a different frame.
+//  For rviz, this will be the current 'fixed frame' set by the user.
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "geometry_msgs/Pose.proto";
+import "std_msgs/Header.proto";
+import "visualization_msgs/InteractiveMarkerControl.proto";
+import "visualization_msgs/MenuEntry.proto";
+
+message InteractiveMarker {
+  std_msgs.Header header = 1;
+
+  //  Initial pose. Also, defines the pivot point for rotations.
+  geometry_msgs.Pose pose = 2;
+
+  //  Identifying string. Must be globally unique in
+  //  the topic that this message is sent through.
+  string name = 3;
+
+  //  Short description (< 40 characters).
+  string description = 4;
+
+  //  Scale to be used for default controls (default=1).
+  float scale = 5;
+
+  //  All menu and submenu entries associated with this marker.
+  repeated visualization_msgs.MenuEntry menu_entries = 6;
+
+  //  List of controls displayed for this marker.
+  repeated visualization_msgs.InteractiveMarkerControl controls = 7;
+}

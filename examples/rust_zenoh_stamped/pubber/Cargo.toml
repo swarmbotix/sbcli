@@ -1,0 +1,19 @@
+[package]
+name = "pubber_stamped"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+# Standalone crate — not a member of the parent forge workspace.
+[workspace]
+
+[[bin]]
+name = "pub_stamped"
+path = "main.rs"
+
+[dependencies]
+zenoh = "1.9"
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"

@@ -1,0 +1,11 @@
+// sensor_msgs/JoyFeedbackArray.proto
+//  This message publishes values for multiple feedback at once.
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "sensor_msgs/JoyFeedback.proto";
+
+message JoyFeedbackArray {
+  repeated sensor_msgs.JoyFeedback array = 1;
+}

@@ -1,0 +1,41 @@
+// visualization_msgs/InteractiveMarkerUpdate.proto
+//  Identifying string. Must be unique in the topic namespace
+//  that this server works on.
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "visualization_msgs/InteractiveMarker.proto";
+import "visualization_msgs/InteractiveMarkerPose.proto";
+
+message InteractiveMarkerUpdate {
+  string server_id = 1;
+
+  //  Sequence number.
+  //  The client will use this to detect if it has missed an update.
+  uint64 seq_num = 2;
+
+  //  Type holds the purpose of this message.  It must be one of UPDATE or KEEP_ALIVE.
+  //  UPDATE: Incremental update to previous state.
+  //          The sequence number must be 1 higher than for
+  //          the previous update.
+  //  KEEP_ALIVE: Indicates the that the server is still living.
+  //              The sequence number does not increase.
+  //              No payload data should be filled out (markers, poses, or erases).
+  // const uint8 KEEP_ALIVE = 0;
+  // const uint8 UPDATE = 1;
+
+  uint32 type = 3;
+
+  //  Note: No guarantees on the order of processing.
+  //        Contents must be kept consistent by sender.
+
+  //  Markers to be added or updated
+  repeated visualization_msgs.InteractiveMarker markers = 4;
+
+  //  Poses of markers that should be moved
+  repeated visualization_msgs.InteractiveMarkerPose poses = 5;
+
+  //  Names of markers to be erased
+  repeated string erases = 6;
+}

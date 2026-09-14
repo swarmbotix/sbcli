@@ -1,0 +1,16 @@
+[package]
+name = "sb-iox2-typegen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Flatten protobuf FileDescriptorSet into iceoryx2 (iox2) compatible Rust/C++/Python types."
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

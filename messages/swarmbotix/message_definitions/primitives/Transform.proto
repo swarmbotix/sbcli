@@ -1,0 +1,15 @@
+// primitives/Transform.proto — rigid-body transform between two frames.
+//
+// Distinct from Pose: a Pose is "where something is", a Transform is
+// "how to convert coordinates". Same fields, different intent.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+import "primitives/Vector3.proto";
+import "primitives/Quaternion.proto";
+
+message Transform {
+  Vector3 translation = 1;
+  Quaternion rotation = 2;
+}

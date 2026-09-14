@@ -1,0 +1,9 @@
+module: pubber
+language: rust
+root: /home/el/Dropbox/Projects/swarmbotix/examples/rust_zenoh_stamped/pubber
+io_dir: swarmbotix_io
+publishers:
+- name: chatter
+  topic: chatter
+  type: std/StringStamped
+  transport: zenoh

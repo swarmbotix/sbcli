@@ -1,0 +1,14 @@
+[package]
+name = "subber_rust_iox"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "sub_frame"
+path = "main.rs"
+
+[dependencies]
+iceoryx2 = "0.9"

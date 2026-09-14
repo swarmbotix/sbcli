@@ -1,0 +1,11 @@
+// geometry_msgs/Polygon.proto
+//  A specification of a polygon where the first and last points are assumed to be connected
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Point32.proto";
+
+message Polygon {
+  repeated geometry_msgs.Point32 points = 1;
+}

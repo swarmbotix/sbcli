@@ -1,0 +1,48 @@
+// visualization_msgs/ImageMarker.proto
+syntax = "proto3";
+
+package visualization_msgs;
+
+import "builtin_interfaces/Duration.proto";
+import "geometry_msgs/Point.proto";
+import "std_msgs/ColorRGBA.proto";
+import "std_msgs/Header.proto";
+
+message ImageMarker {
+  // const int32 CIRCLE = 0;
+  // const int32 LINE_STRIP = 1;
+  // const int32 LINE_LIST = 2;
+  // const int32 POLYGON = 3;
+  // const int32 POINTS = 4;
+
+  // const int32 ADD = 0;
+  // const int32 REMOVE = 1;
+
+  std_msgs.Header header = 1;
+  //  Namespace which is used with the id to form a unique id.
+  string ns = 2;
+  //  Unique id within the namespace.
+  int32 id = 3;
+  //  One of the above types, e.g. CIRCLE, LINE_STRIP, etc.
+  int32 type = 4;
+  //  Either ADD or REMOVE.
+  int32 action = 5;
+  //  Two-dimensional coordinate position, in pixel-coordinates.
+  geometry_msgs.Point position = 6;
+  //  The scale of the object, e.g. the diameter for a CIRCLE.
+  float scale = 7;
+  //  The outline color of the marker.
+  std_msgs.ColorRGBA outline_color = 8;
+  //  Whether or not to fill in the shape with color.
+  uint32 filled = 9;
+  //  Fill color; in the range: [0.0-1.0]
+  std_msgs.ColorRGBA fill_color = 10;
+  //  How long the object should last before being automatically deleted.
+  //  0 indicates forever.
+  builtin_interfaces.Duration lifetime = 11;
+
+  //  Coordinates in 2D in pixel coords. Used for LINE_STRIP, LINE_LIST, POINTS, etc.
+  repeated geometry_msgs.Point points = 12;
+  //  The color for each line, point, etc. in the points field.
+  repeated std_msgs.ColorRGBA outline_colors = 13;
+}

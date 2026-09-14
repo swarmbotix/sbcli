@@ -1,0 +1,23 @@
+// sensor_msgs/Image1080p.proto
+// Fixed-resolution variant of Image.proto for 1080p (Full HD) — 1920 × 1080.
+// Suggested compile (RGB8, 3 bytes/pixel = 6220800):
+//   sb message compile --iox2 --bytes-cap 6220800 sensor_msgs/Image1080p
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image1080p {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 1920x1080 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 1080
+  uint32 width = 3;   // expected 1920
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

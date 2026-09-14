@@ -1,0 +1,13 @@
+// geometry_msgs/AccelStamped.proto
+//  An accel with reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Accel.proto";
+import "std_msgs/Header.proto";
+
+message AccelStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.Accel accel = 2;
+}

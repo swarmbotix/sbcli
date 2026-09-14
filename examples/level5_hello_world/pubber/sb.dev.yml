@@ -1,0 +1,9 @@
+module: pubber
+language: rust
+root: /home/el/Dropbox/Projects/swarmbotix/examples/level5_hello_world/pubber
+io_dir: swarmbotix_io
+publishers:
+- name: hello
+  topic: hello
+  type: std/StringStamped
+  transport: zenoh

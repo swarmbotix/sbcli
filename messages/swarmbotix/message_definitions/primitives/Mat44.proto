@@ -1,0 +1,11 @@
+// primitives/Mat44.proto — 4x4 matrix, ROW-MAJOR.
+//
+// data[row * 4 + col]. Fixed at exactly 16 elements (see Mat33 on the
+// capacity pin). Used for homogeneous transforms and projection matrices.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+message Mat44 {
+  repeated double data = 1;
+}

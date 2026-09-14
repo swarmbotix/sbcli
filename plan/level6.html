@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>L6 — swarmctl REST + MCP + Web UI</title>
+<style>
+:root { --fg:#222; --muted:#666; --code:#f4f4f4; --accent:#0066cc; --warn:#d4a017; --ok:#2a8c2a; }
+body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1.5em; color: var(--fg); line-height: 1.55; }
+h1 { border-bottom: 2px solid var(--fg); padding-bottom: 0.3em; margin-top: 0; }
+h2 { margin-top: 1.8em; }
+h3 { color: var(--muted); margin-top: 1.3em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+pre { background: var(--code); padding: 0.9em; border-radius: 4px; overflow-x: auto; line-height: 1.4; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 3px; }
+.goal { font-size: 1.05em; color: var(--muted); margin: 0.5em 0 1.5em; }
+.test { background: #fffbe6; border-left: 3px solid var(--warn); padding: 0.7em 1em; margin: 0.7em 0; }
+.test b { color: #8a6b08; }
+.done { background: #eef9ee; border-left: 3px solid var(--ok); padding: 0.7em 1em; margin: 1.5em 0; }
+.done b { color: #1f6b1f; }
+.nav { font-size: 0.9em; color: var(--muted); margin-bottom: 1.5em; }
+.nav a { color: var(--accent); text-decoration: none; margin-right: 0.6em; }
+.nav a:hover { text-decoration: underline; }
+.nav .here { font-weight: 700; color: var(--fg); }
+ul, ol { padding-left: 1.6em; }
+li { margin: 0.25em 0; }
+table { border-collapse: collapse; margin: 0.6em 0; }
+td, th { border: 1px solid #ccc; padding: 0.4em 0.7em; }
+th { background: var(--code); text-align: left; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="./level1.html">L1</a>·
+<a href="./level2.html">L2</a>·
+<a href="./level3.html">L3</a>·
+<a href="./level4.html">L4</a>·
+<a href="./level5.html">L5</a>·
+<a href="./level6.html" class="here">L6</a>
+</div>
+
+<h1>L6 — swarmctl REST + MCP + Web UI</h1>
+<p class="goal">Three surfaces, one core. Every REST and MCP endpoint maps to a CLI verb already shipped in L1–L5. The Web UI never has logic the CLI lacks.</p>
+
+<h2>Scope</h2>
+
+<h3>swarmctl server</h3>
+<ul>
+  <li>Started by <code>sb ui</code> (tmux pane on demand — no daemon).</li>
+  <li>Two HTTP surfaces on the same port:
+    <ul>
+      <li><b>REST</b> at <code>/api/*</code> — thin wrapper, one route per CLI verb.</li>
+      <li><b>MCP</b> at <code>/mcp</code> — same operations, MCP transport for AI agents (Cursor, Claude Code, etc.).</li>
+    </ul>
+  </li>
+  <li>Both delegate to the same crates the CLI uses (<code>sb-core</code>, <code>sb-vault</code>, <code>sb-pubsub</code>, <code>sb-codegen</code>, <code>sb-discover</code>, <code>sb-workspace</code>, <code>sb-launch</code>, <code>sb-gopro</code>). No business logic in the server layer.</li>
+</ul>
+
+<h3>REST shape (sampling)</h3>
+<table>
+<tr><th>CLI verb (from level)</th><th>REST route</th></tr>
+<tr><td><code>sb message list</code> (L1)</td><td><code>GET /api/messages</code></td></tr>
+<tr><td><code>sb message new &lt;Name&gt;</code> (L1)</td><td><code>POST /api/messages</code></td></tr>
+<tr><td><code>sb init --rust &lt;path&gt;</code> (L2)</td><td><code>POST /api/modules</code> (body: <code>{language, rootpath}</code>)</td></tr>
+<tr><td><code>sb pub add ...</code> (L3)</td><td><code>POST /api/modules/:m/publishers</code></td></tr>
+<tr><td><code>sb pub rm &lt;n&gt;</code> (L3)</td><td><code>DELETE /api/modules/:m/publishers/:n</code></td></tr>
+<tr><td><code>sb topic list</code> (L4)</td><td><code>GET /api/topics</code></td></tr>
+<tr><td><code>sb topic listen &lt;t&gt;</code> (L4)</td><td><code>WS /api/topics/:t/stream</code></td></tr>
+<tr><td><code>sb ws list</code> (L2)</td><td><code>GET /api/workspaces</code></td></tr>
+<tr><td><code>sb up</code> (L5)</td><td><code>POST /api/workspace/up</code></td></tr>
+<tr><td><code>sb gopro</code> (L5)</td><td><code>POST /api/modules/:m/gopro</code></td></tr>
+</table>
+
+<h3>Web UI — design-time view</h3>
+<ul>
+  <li>Reads <code>flow.yaml</code>, then each module's <code>sb.dev.yml</code> (or <code>sb.prd.yml</code> if present).</li>
+  <li><strong>Node identity = <code>(module, instance)</code> pair.</strong> A module with <em>N</em> declared <code>flow.yaml::instances</code> (see <a href="./level2.html">L2</a>) draws as <em>N</em> separate boxes labelled <code>instance.label ?? instance.id</code>; a module without an <code>instances:</code> entry draws as one un-suffixed box (backwards compat with the pre-instances flow.yaml shape).</li>
+  <li>Each box's wire-segment for edge derivation is <code>&lt;module&gt;-&lt;id&gt;</code> when instanced, <code>&lt;module&gt;</code> when not — matching the runtime topic path produced by <code>TopicOverrides</code> (see <code>documents/sbcli_pubsub_consuming.md</code> §3).</li>
+  <li>Draws publishers on the right (output ports), subscribers on the left (input ports).</li>
+  <li>Derives edges by matching topic names. No manual edge declaration.</li>
+  <li>Right-click on a module box → add/remove publisher or subscriber. Calls REST → same effect as the L3 CLI. <em>Note: publisher/subscriber edits target the <strong>module</strong>, not the instance — instance IDs are launch-time only and never appear in <code>sb pub add</code>'s flag surface (see <code>documents/sbcli_docker_runscript.md</code> §7).</em></li>
+</ul>
+
+<h3>Web UI — runtime view</h3>
+<ul>
+  <li>Overlays live discovery (uses L4's <code>sb-discover</code> crate, called via REST).</li>
+  <li>Coloring is <strong>per-instance node</strong>: <code>cam_gige_ht-left</code> can be green while <code>cam_gige_ht-right</code> is orange — they are independent nodes with independent wire paths.</li>
+  <li>State per port:
+    <ul>
+      <li><b>Green</b>: designed and live.</li>
+      <li><b>Orange</b>: designed but not live (mismatch — app may be down, or topic name diverged).</li>
+      <li><b>Gray (unknown)</b>: live but not in design (unregistered publisher, stale leftover, or — common with instances — a publisher running with an <code>--id</code> that isn't declared in <code>flow.yaml::instances</code>).</li>
+    </ul>
+  </li>
+</ul>
+
+<h2>TDD plan</h2>
+
+<div class="test"><b>1. REST contract test per route</b><br>
+For every CLI verb that has a REST counterpart, two tests: (a) hitting the route mutates filesystem state identically to running the CLI; (b) GET routes return JSON matching a checked-in schema. Use <code>tower::ServiceExt</code> for in-process HTTP testing — no live server needed.
+</div>
+
+<div class="test"><b>2. MCP endpoint parity</b><br>
+Enumerate the union of L1–L5 operations; assert each appears in the MCP tool list with a JSON schema. <code>tools/call</code> on each verb produces the same effect as the matching REST call.
+</div>
+
+<div class="test"><b>3. Design-time edge derivation</b><br>
+Fixture <code>flow.yaml</code> with 3 modules; one publishes <code>/foo</code>, another subscribes to <code>/foo</code>; <code>GET /api/graph/design</code> returns one edge. Add a third module that also subscribes to <code>/foo</code> → two edges from the same source.
+</div>
+
+<div class="test"><b>4. Runtime overlay state machine</b><br>
+Stub <code>sb-discover</code> with controllable input. For each combination (designed × live, designed × not-live, not-designed × live), assert the returned port state is green / orange / gray respectively. No flakiness from real Zenoh in this test.
+</div>
+
+<div class="test"><b>5. Live overlay smoke</b><br>
+2-module hello-world from L5; spawn it via <code>sb up</code>; <code>GET /api/graph/runtime</code> returns both ports green. Kill the publisher; within 3s the publisher port flips to gray (was live, now gone) and the subscriber port to orange (designed, not live).
+</div>
+
+<div class="test"><b>6. UI ↔ CLI observational equivalence</b><br>
+Click "add publisher" in a headless browser (Playwright); assert resulting <code>sb.dev.yml</code> diff matches running <code>sb pub add</code> with the same args. One end-to-end test per UI mutation; saves manual QA.
+</div>
+
+<div class="test"><b>7. <code>sb ui</code> launch</b><br>
+<code>sb ui</code> starts the server in a tmux pane, waits for <code>/api/health</code> to return 200, then opens browser (mocked in test). <code>sb ui</code> a second time is a no-op (reuses existing pane).
+</div>
+
+<h2>Why this is L6 (last)</h2>
+<ul>
+  <li>Built on top of every other crate. The server must never have logic the CLI lacks; building it last guarantees the CLI surface is complete first.</li>
+  <li>Runtime view depends on L4's discovery + L5's launch — every dependency is shipped.</li>
+  <li>Web UI tooling (build pipeline, browser tests) adds enough surface that landing it earlier would slow L1–L5 reviews.</li>
+</ul>
+
+<h2>Crate layout additions</h2>
+<pre>crates/
+  swarmctl/                  ← axum REST + MCP server (depends on sb-* crates)
+  swarmctl-ui/               ← static SPA build (Vite + a small canvas/SVG lib)
+tests/integration/level6/
+  rest_contract.rs           ← per-verb contract tests
+  mcp_parity.rs
+  edge_derivation.rs
+  runtime_overlay.rs
+  ui_observational.rs        ← Playwright; CI-only
+</pre>
+
+<div class="done"><b>Done when</b>
+<ul>
+  <li>Every CLI verb has a matching REST route and MCP tool; contract tests green.</li>
+  <li>Runtime overlay correctly states green/orange/gray against a live 2-module setup.</li>
+  <li>UI mutation observationally identical to CLI mutation (Playwright suite green).</li>
+  <li><code>sb ui</code> launches and opens the browser cleanly; second invocation is idempotent.</li>
+</ul>
+</div>
+
+</body>
+</html>

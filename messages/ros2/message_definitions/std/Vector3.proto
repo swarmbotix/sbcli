@@ -1,0 +1,10 @@
+// std/Vector3.proto — 3D vector primitive. Mirrors geometry_msgs/Vector3.
+syntax = "proto3";
+
+package swarmbotix.std;
+
+message Vector3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}

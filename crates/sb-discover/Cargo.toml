@@ -1,0 +1,20 @@
+[package]
+name = "sb-discover"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "L4 — snapshot topic discovery (Zenoh `**` enumeration + iceoryx2 `Service::list`)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sb-core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost = { workspace = true }
+zenoh = { workspace = true }
+iceoryx2 = { workspace = true }

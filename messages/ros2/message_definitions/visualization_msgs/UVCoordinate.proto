@@ -1,0 +1,11 @@
+// visualization_msgs/UVCoordinate.proto
+//  Location of the pixel as a ratio of the width of a 2D texture.
+//  Values should be in range: [0.0-1.0].
+syntax = "proto3";
+
+package visualization_msgs;
+
+message UVCoordinate {
+  float u = 1;
+  float v = 2;
+}

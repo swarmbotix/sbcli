@@ -1,0 +1,61 @@
+// sensor_msgs/BatteryState.proto
+//  Constants are chosen to match the enums in the linux kernel
+//  defined in include/linux/power_supply.h as of version 3.7
+//  The one difference is for style reasons the constants are
+//  all uppercase not mixed case.
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message BatteryState {
+  //  Power supply status constants
+  // const uint8 POWER_SUPPLY_STATUS_UNKNOWN = 0;
+  // const uint8 POWER_SUPPLY_STATUS_CHARGING = 1;
+  // const uint8 POWER_SUPPLY_STATUS_DISCHARGING = 2;
+  // const uint8 POWER_SUPPLY_STATUS_NOT_CHARGING = 3;
+  // const uint8 POWER_SUPPLY_STATUS_FULL = 4;
+
+  //  Power supply health constants
+  // const uint8 POWER_SUPPLY_HEALTH_UNKNOWN = 0;
+  // const uint8 POWER_SUPPLY_HEALTH_GOOD = 1;
+  // const uint8 POWER_SUPPLY_HEALTH_OVERHEAT = 2;
+  // const uint8 POWER_SUPPLY_HEALTH_DEAD = 3;
+  // const uint8 POWER_SUPPLY_HEALTH_OVERVOLTAGE = 4;
+  // const uint8 POWER_SUPPLY_HEALTH_UNSPEC_FAILURE = 5;
+  // const uint8 POWER_SUPPLY_HEALTH_COLD = 6;
+  // const uint8 POWER_SUPPLY_HEALTH_WATCHDOG_TIMER_EXPIRE = 7;
+  // const uint8 POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE = 8;
+
+  //  Power supply technology (chemistry) constants
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_UNKNOWN = 0;  // Unknown battery technology
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_NIMH = 1;  // Nickel-Metal Hydride battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_LION = 2;  // Lithium-ion battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_LIPO = 3;  // Lithium Polymer battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_LIFE = 4;  // Lithium Iron Phosphate battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_NICD = 5;  // Nickel-Cadmium battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_LIMN = 6;  // Lithium Manganese Dioxide battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_TERNARY = 7;  // Ternary Lithium battery
+  // const uint8 POWER_SUPPLY_TECHNOLOGY_VRLA = 8;  // Valve Regulated Lead-Acid battery
+
+  std_msgs.Header header = 1;
+  float voltage = 2;  // Voltage in Volts (Mandatory)
+  float temperature = 3;  // Temperature in Degrees Celsius (If unmeasured NaN)
+  float current = 4;  // Negative when discharging (A)  (If unmeasured NaN)
+  float charge = 5;  // Current charge in Ah  (If unmeasured NaN)
+  float capacity = 6;  // Capacity in Ah (last full capacity)  (If unmeasured NaN)
+  float design_capacity = 7;  // Capacity in Ah (design capacity)  (If unmeasured NaN)
+  float percentage = 8;  // Charge percentage on 0 to 1 range  (If unmeasured NaN)
+  uint32 power_supply_status = 9;  // The charging status as reported. Values defined above
+  uint32 power_supply_health = 10;  // The battery health metric. Values defined above
+  uint32 power_supply_technology = 11;  // The battery chemistry. Values defined above
+  bool present = 12;  // True if the battery is present
+
+  repeated float cell_voltage = 13;  // An array of individual cell voltages for each cell in the pack
+  //  If individual voltages unknown but number of cells known set each to NaN
+  repeated float cell_temperature = 14;  // An array of individual cell temperatures for each cell in the pack
+  //  If individual temperatures unknown but number of cells known set each to NaN
+  string location = 15;  // The location into which the battery is inserted. (slot number or plug)
+  string serial_number = 16;  // The best approximation of the battery serial number
+}

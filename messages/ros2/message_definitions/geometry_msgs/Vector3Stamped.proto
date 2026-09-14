@@ -1,0 +1,16 @@
+// geometry_msgs/Vector3Stamped.proto
+//  This represents a Vector3 with reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Vector3.proto";
+import "std_msgs/Header.proto";
+
+message Vector3Stamped {
+  //  Note that this follows vector semantics with it always anchored at the origin,
+  //  so the rotational elements of a transform are the only parts applied when transforming.
+
+  std_msgs.Header header = 1;
+  geometry_msgs.Vector3 vector = 2;
+}

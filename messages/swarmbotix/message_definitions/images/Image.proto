@@ -1,0 +1,49 @@
+// images/Image.proto — raw image payload. ONE definition, many iox2 types.
+//
+// This is the single source-of-truth schema for images. It carries a
+// variable-length `data` field, which is fine for zenoh (FlatBuffers on
+// the wire, length-prefixed) but NOT for iceoryx2, which needs a
+// compile-time-fixed buffer per type.
+//
+// So `sb message compile --iox2` does NOT emit `Image`. It expands this
+// one definition into a fixed-capacity struct per resolution x pixel
+// format, declared under `iox2_variants` in sb.config.yml:
+//
+//   Image360pMono8    640 x  360 x 1 =   230,400 B
+//   Image360pRgb8     640 x  360 x 3 =   691,200 B
+//   Image480pMono8    640 x  480 x 1 =   307,200 B
+//   Image480pRgb8     640 x  480 x 3 =   921,600 B
+//   Image720pMono8   1280 x  720 x 1 =   921,600 B
+//   Image720pRgb8    1280 x  720 x 3 = 2,764,800 B
+//   Image1080pMono8  1920 x 1080 x 1 = 2,073,600 B
+//   Image1080pRgb8   1920 x 1080 x 3 = 6,220,800 B
+//
+// Add a resolution by adding an `iox2_variants` entry — never by adding
+// another .proto. The schema stays one file; the build fans out.
+//
+// `width`/`height`/`encoding`/`step` are still carried per-frame so a
+// consumer can validate that a frame matches the variant it arrived in
+// (e.g. a partially-filled 1080p buffer holding a 720p frame).
+syntax = "proto3";
+
+package swarmbotix.images;
+
+import "header/Header.proto";
+
+message Image {
+  swarmbotix.header.Header header = 1;
+
+  uint32 width = 2;
+  uint32 height = 3;
+
+  // Pixel format identifier: "mono8", "rgb8", "bgr8", "rgba8", "yuv422".
+  // The variant name encodes the format it was sized for; this field is
+  // what the frame actually contains.
+  string encoding = 4;
+
+  // Bytes per row. Equals width * bytes_per_pixel for packed formats.
+  uint32 step = 5;
+
+  // Row-major pixel data, `step * height` bytes.
+  bytes data = 6;
+}

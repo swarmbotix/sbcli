@@ -1,0 +1,9 @@
+module: subber
+language: python
+root: /home/el/Dropbox/Projects/swarmbotix/examples/python_python_iceoryx/subber
+io_dir: swarmbotix_io
+subscribers:
+- name: frame
+  topic: /dev01/demo/pubber/iox2/frame
+  type: std/ImageStamped
+  transport: iceoryx2

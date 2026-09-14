@@ -1,0 +1,9 @@
+module: subber_python
+language: python
+root: /home/el/Dropbox/Projects/swarmbotix/examples/rust_python_zenoh/subber_python
+io_dir: swarmbotix_io
+subscribers:
+- name: hello
+  topic: /dev01/demo/pubber_rust/hello
+  type: std/StringStamped
+  transport: zenoh

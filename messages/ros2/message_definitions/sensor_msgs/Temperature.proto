@@ -1,0 +1,16 @@
+// sensor_msgs/Temperature.proto
+//  Single temperature reading.
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Temperature {
+  std_msgs.Header header = 1;  // timestamp is the time the temperature was measured
+  //  frame_id is the location of the temperature reading
+
+  double temperature = 2;  // Measurement of the Temperature in Degrees Celsius.
+
+  double variance = 3;  // 0 is interpreted as variance unknown.
+}

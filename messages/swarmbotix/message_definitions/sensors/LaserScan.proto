@@ -1,0 +1,28 @@
+// sensors/LaserScan.proto — planar (2D) lidar sweep.
+//
+// `ranges` and `intensities` are pinned to 1080 samples via `vec_caps`
+// — one sample per 1/3 degree over a full turn, which covers every
+// common 2D unit (Hokuyo, RPLIDAR, Sick TiM). Bump the cap, not the
+// schema, for a denser unit.
+syntax = "proto3";
+
+package swarmbotix.sensors;
+
+import "header/Header.proto";
+
+message LaserScan {
+  swarmbotix.header.Header header = 1;
+
+  float angle_min = 2;        // rad, start of sweep
+  float angle_max = 3;        // rad, end of sweep
+  float angle_increment = 4;  // rad between samples
+
+  float time_increment = 5;   // s between samples
+  float scan_time = 6;        // s for a full sweep
+
+  float range_min = 7;        // m, below this is invalid
+  float range_max = 8;        // m, above this is invalid
+
+  repeated float ranges = 9;       // m; NaN/inf = no return
+  repeated float intensities = 10; // device-specific units; may be empty
+}

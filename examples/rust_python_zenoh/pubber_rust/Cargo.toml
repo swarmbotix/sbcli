@@ -1,0 +1,15 @@
+[package]
+name = "pubber_rust"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+# Standalone crate — not a member of the parent forge workspace.
+[workspace]
+
+[[bin]]
+name = "pub_hello"
+path = "main.rs"
+
+[dependencies]
+zenoh = "1.9"

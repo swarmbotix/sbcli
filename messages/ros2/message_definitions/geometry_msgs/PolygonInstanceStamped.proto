@@ -1,0 +1,14 @@
+// geometry_msgs/PolygonInstanceStamped.proto
+//  This represents a Polygon with reference coordinate frame and timestamp
+//  It includes a unique identification field for disambiguating multiple instances
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/PolygonInstance.proto";
+import "std_msgs/Header.proto";
+
+message PolygonInstanceStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.PolygonInstance polygon = 2;
+}

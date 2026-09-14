@@ -1,0 +1,13 @@
+// geometry_msgs/Transform.proto
+//  This represents the transform between two coordinate frames in free space.
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Quaternion.proto";
+import "geometry_msgs/Vector3.proto";
+
+message Transform {
+  geometry_msgs.Vector3 translation = 1;
+  geometry_msgs.Quaternion rotation = 2;
+}

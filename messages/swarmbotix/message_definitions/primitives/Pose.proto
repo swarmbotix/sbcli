@@ -1,0 +1,12 @@
+// primitives/Pose.proto — position + orientation in a frame.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+import "primitives/Vector3.proto";
+import "primitives/Quaternion.proto";
+
+message Pose {
+  Vector3 position = 1;
+  Quaternion orientation = 2;
+}

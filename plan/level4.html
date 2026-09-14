@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>L4 — Topic Introspection</title>
+<style>
+:root { --fg:#222; --muted:#666; --code:#f4f4f4; --accent:#0066cc; --warn:#d4a017; --ok:#2a8c2a; }
+body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1.5em; color: var(--fg); line-height: 1.55; }
+h1 { border-bottom: 2px solid var(--fg); padding-bottom: 0.3em; margin-top: 0; }
+h2 { margin-top: 1.8em; }
+h3 { color: var(--muted); margin-top: 1.3em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+pre { background: var(--code); padding: 0.9em; border-radius: 4px; overflow-x: auto; line-height: 1.4; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 3px; }
+.goal { font-size: 1.05em; color: var(--muted); margin: 0.5em 0 1.5em; }
+.test { background: #fffbe6; border-left: 3px solid var(--warn); padding: 0.7em 1em; margin: 0.7em 0; }
+.test b { color: #8a6b08; }
+.done { background: #eef9ee; border-left: 3px solid var(--ok); padding: 0.7em 1em; margin: 1.5em 0; }
+.done b { color: #1f6b1f; }
+.nav { font-size: 0.9em; color: var(--muted); margin-bottom: 1.5em; }
+.nav a { color: var(--accent); text-decoration: none; margin-right: 0.6em; }
+.nav a:hover { text-decoration: underline; }
+.nav .here { font-weight: 700; color: var(--fg); }
+ul, ol { padding-left: 1.6em; }
+li { margin: 0.25em 0; }
+.tag { display: inline-block; background: #333; color: white; padding: 0.05em 0.45em; border-radius: 3px; font-size: 0.8em; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="./level1.html">L1</a>·
+<a href="./level2.html">L2</a>·
+<a href="./level3.html">L3</a>·
+<a href="./level4.html" class="here">L4</a>·
+<a href="./level5.html">L5</a>·
+<a href="./level6.html">L6</a>
+</div>
+
+<h1>L4 — Topic Introspection</h1>
+<p class="goal">After L4, with two L3 modules running, <code>sb topic list</code> shows their topics tagged <span class="tag">[z]</span> / <span class="tag">[i]</span>, and <code>sb topic listen &lt;topic&gt;</code> streams decoded frames. Surface and output format mirror the <code>swarmbotix_old/crates/sb-introspect</code> prototype.</p>
+
+<h2>Scope</h2>
+
+<h3>Commands</h3>
+<pre>sb topic list   [-t &lt;sec&gt;] [-k &lt;keyword&gt;] [--case-sensitive]
+                [--transport zenoh|iceoryx2|all] [--json]
+sb topic listen &lt;topic&gt; [--transport zenoh|iceoryx2] [--raw] [-n &lt;count&gt;]
+sb topic pub    &lt;topic&gt; '&lt;bytes-hex&gt;' [--transport zenoh|iceoryx2]
+sb topic prune  [--json]</pre>
+
+<h3><code>sb topic list</code></h3>
+<ul>
+  <li><b>Zenoh</b>: open short-lived session, declare <code>**</code> wildcard subscriber, sleep <code>window</code> (default 500 ms), collect unique key expressions. First sample per topic wins — no rolling rate sampler.</li>
+  <li><b>iceoryx2</b>: <code>Service::list(Config::global_config(), …)</code>. Type name extracted from <code>static_details.message_type_details().payload.type_name()</code> — free from the registry, no subscribe needed.</li>
+  <li><b>Schema + rate decoding</b>: any payload whose first few bytes parse as a protobuf <code>std/Header</code> populates <code>schema</code> from the descriptor (via L1 vault lookup) and <code>rate_hz</code> from <code>header.metadata.msg_freq_desired</code>. Foreign payloads stay <code>null</code>. Wireless wrapper, but L3 publishers always emit Header-leading <code>*Stamped</code> messages, so the columns fill in for sb-generated topics.</li>
+  <li><b>PID + liveness</b> (iceoryx2 only): each iox2 service's <code>dynamic_details.nodes</code> records the <code>UniqueNodeId</code> of every Node that holds a publisher / subscriber port; <code>UniqueNodeId::pid()</code> gives the owning process. The discoverer picks the first <em>alive</em> node's PID and surfaces it; if every registered node maps to a process the OS reports as dead, the PID is still surfaced with <code>is_dead = true</code> so the renderer can append <code>(dead)</code> and operators can spot stale on-disk service registrations left by crashed publishers. Zenoh entries always render <code>PID -</code> — Zenoh doesn't put a publisher PID on the wire and we don't (yet) stamp it into <code>Header.metadata</code>.</li>
+  <li><b>Merge + sort</b> alphabetically. Default table (the <code>[z]</code>/<code>[i]</code> tag is redundant with the <code>/zenoh/</code> or <code>/iox2/</code> segment in the path, but kept for at-a-glance scanning):
+    <pre>  - [z] {rate:&gt;6.1} Hz  {pid:&lt;18}  {schema:&lt;22}  {topic}
+  - [i]      - Hz  PID 12345           std::StringStamped      /dev01/ws/cam/iox2/image
+  - [i]      - Hz  PID 67890 (dead)    std/StringStamped       /dev01/ws/app1-1/iox2/hello
+  - [z]   10.0 Hz  -                   std/StringStamped       /dev01/ws/talker/zenoh/chatter</pre>
+  </li>
+  <li><code>--json</code> emits one JSON line per <code>TopicEntry</code> instead of the table. Field set is pinned (snapshot-tested in <code>level4_output_format</code>): <code>topic</code>, <code>transport</code>, <code>schema</code>, <code>hash</code>, <code>rate_hz</code>, <code>publisher_pid</code>, <code>is_dead</code>.</li>
+</ul>
+
+<h3><code>sb topic listen &lt;topic&gt;</code></h3>
+<ul>
+  <li>Bare <code>chatter</code> resolves to <code>/&lt;device&gt;/&lt;workspace&gt;/&lt;module&gt;/&lt;transport&gt;/chatter</code> via cwd's <code>sb.dev.yml</code> when there's exactly one matching subscriber/publisher (the transport segment comes from that entry's <code>--iox2</code>/<code>--zenoh</code>). Ambiguous or no-match → error. Fully-qualified path is passed through unchanged.</li>
+  <li>Default Zenoh: receive raw bytes; attempt protobuf decode against the schema in the cwd module's <code>sb.dev.yml</code>; emit JSON line per frame.</li>
+  <li>Default iceoryx2: subscribe via the <code>Service::list</code>-discovered type when it's one of the bundled <code>std/*</code> messages; otherwise error telling the user to pass <code>--raw</code>.</li>
+  <li>Output (one JSON line per frame): <code>{transport, topic, schema, hash, encoding, payload}</code> — identical envelope shape to the prototype's. Fields stay <code>null</code> when L4 can't infer them honestly.</li>
+  <li><code>--raw</code>: skip decode, payload is <code>{kind: "hex", bytes: "deadbeef…"}</code>.</li>
+  <li><code>-n N</code>: stop after N frames; <code>0</code> (default) runs until SIGINT.</li>
+</ul>
+
+<h3><code>sb topic pub &lt;topic&gt; '&lt;bytes-hex&gt;'</code></h3>
+<ul>
+  <li>Publishes raw bytes via the resolved transport. One-shot.</li>
+  <li>JSON-via-schema variant (<code>sb topic pub /chatter '{"data": "hi"}'</code>) — encode through vault, publish — added once a clean error message exists for foreign / un-decodable schemas. Stretch goal for L4; otherwise L5.</li>
+</ul>
+
+<h3><code>sb topic prune</code></h3>
+<ul>
+  <li>Cleans the stale on-disk registrations <code>sb topic list</code> flags with <code>(dead)</code>. Walks <code>Node::&lt;ipc::Service&gt;::list(Config::global_config(), …)</code>, and for every <code>NodeState::Dead(view)</code> calls <code>view.try_remove_stale_resources()</code>. iceoryx2-only — Zenoh has no on-disk state to prune.</li>
+  <li>iceoryx2's <code>ResourcesAlreadyCleanedUp</code> is treated as success — another instance got there first; the net state is what the caller asked for.</li>
+  <li>Default output: a <code>Pruned N dead iceoryx2 node(s):</code> block listing the cleaned PIDs, plus one <code>warning: failed to prune PID &lt;n&gt;: &lt;reason&gt;</code> per failure on stderr. Nothing stale → <code>No dead iceoryx2 nodes found.</code> Non-zero exit iff any node failed to clean.</li>
+  <li><code>--json</code> emits one <code>PruneReport</code> JSON object: <code>{cleaned_pids: [u32], failed: [[pid, reason], …]}</code>.</li>
+</ul>
+
+<h2>TDD plan</h2>
+
+<div class="test"><b>1. Live discovery — Zenoh</b><br>
+Integration harness spawns a Zenoh publisher in a thread on a known key. <code>sb topic list</code> finds it within the sleep window. Tagged <span class="tag">[z]</span>. <code>tests/integration/level4/discover_zenoh.rs</code>.
+</div>
+
+<div class="test"><b>2. Live discovery — iceoryx2</b><br>
+Same shape using <code>Service::list</code>. Tagged <span class="tag">[i]</span>. Schema column populated from <code>type_name()</code>. <code>#[ignore]</code>'d if shmem unavailable in CI (per <code>feedback_topic_discovery</code>).
+</div>
+
+<div class="test"><b>3. End-to-end against L3 publishers</b><br>
+Scaffold a Rust module (L2), <code>sb pub add -m std/StringStamped /hello --zenoh</code> (L3), spawn the module, then <code>sb topic list</code> shows the topic with schema <code>std/StringStamped</code> and rate matching the publisher's declared <code>msg_freq_desired</code>. This is the integration test the new ordering exists to enable.
+</div>
+
+<div class="test"><b>4. Keyword filter — ported from prototype</b><br>
+Port the <code>matches_keyword</code> tests from <code>swarmbotix_old/crates/sb-introspect/src/discover.rs</code> verbatim: case-insensitive by default, <code>--case-sensitive</code> flips it, empty keyword matches everything. Drift between prototype and rewrite is the bug this catches.
+</div>
+
+<div class="test"><b>5. Output-format snapshot — table + JSON</b><br>
+Given a fixed <code>Vec&lt;TopicEntry&gt;</code> (mix of <code>[z]</code> / <code>[i]</code> rows, some with schema, some with rate, some with neither), assert byte-identical table output AND <code>--json</code> output against checked-in fixtures via <code>insta</code>. This contract is what lets later levels enrich without breaking the CLI surface.
+</div>
+
+<div class="test"><b>6. Bare-topic resolution</b><br>
+<code>chatter</code> → fully-qualified when cwd's <code>sb.dev.yml</code> has exactly one publisher/subscriber of that name. Ambiguous → error lists candidates. No <code>sb.dev.yml</code> in cwd → require fully-qualified. Fully-qualified path passes through unchanged.
+</div>
+
+<div class="test"><b>7. <code>listen</code> decode against L3 publisher</b><br>
+Run an L3-scaffolded Rust publisher of <code>std/StringStamped</code>; <code>sb topic listen /hello</code> emits a JSON line with <code>schema: "std/StringStamped"</code> and decoded <code>payload</code>. <code>--raw</code> on the same topic emits hex.
+</div>
+
+<div class="test"><b>8. <code>pub</code> round-trip</b><br>
+Spawn subscriber in thread; CLI <code>sb topic pub /hello deadbeef</code> → subscriber sees the exact 4 bytes. One test per transport.
+</div>
+
+<div class="test"><b>9. Rate from single sample</b><br>
+L3-scaffolded publisher writes <code>msg_freq_desired: 10.0</code> in its Header. <code>sb topic list -t 0.2</code> (short window — could miss multiple samples) still reports <code>10.0 Hz</code>. Verifies the L1 design payoff: rate comes from the Header field, not sample counting.
+</div>
+
+<h2>Why this is L4</h2>
+<ul>
+  <li>L4 finally gets to test discovery against <em>real sb-generated publishers</em> (from L3) instead of throwaway Zenoh examples. The integration tests mean something now.</li>
+  <li>L1's <code>Header.metadata.msg_freq_desired</code> design becomes useful here — any L3 <code>*Stamped</code> publisher fills the rate column for L4 from one sample.</li>
+  <li>Topic introspection is the highest-leverage user-visible feature after pub/sub itself ("the <code>ros2 topic echo</code> ergonomics" from the requirements). Putting it here also means it ships before launch/orchestration (L5), so dev-loop visibility is in place before <code>sb up</code> exists.</li>
+</ul>
+
+<h2>Crate layout additions</h2>
+<pre>crates/
+  sb-discover/               ← Zenoh `**` enumeration + iceoryx2 Service::list
+                               (mirrors swarmbotix_old/crates/sb-introspect)
+  sb-listen/                 ← per-transport frame iterators
+  sb-topic-cli/              ← sb topic list/listen/pub command logic
+tests/integration/level4/
+  discover_zenoh.rs
+  discover_iceoryx.rs
+  end_to_end_l3.rs           ← uses L2 + L3 to set up real publishers
+  output_format_snapshot.rs
+  rate_from_header.rs
+</pre>
+
+<div class="done"><b>Done when</b>
+<ul>
+  <li><code>sb topic list</code> against a running L3 Rust publisher reports it within 2 seconds, schema column populated, rate column populated from Header.</li>
+  <li>Output-format snapshots stable; ported keyword-filter tests pass.</li>
+  <li><code>sb topic listen</code> decodes L3 publisher's <code>std/StringStamped</code> frames; <code>--raw</code> emits hex.</li>
+  <li><code>sb topic pub</code> round-trips on both transports (iceoryx2 may be <code>#[ignore]</code>'d on shmem-restricted CI).</li>
+</ul>
+</div>
+
+</body>
+</html>

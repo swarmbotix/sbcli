@@ -1,0 +1,15 @@
+// primitives/Vector4.proto — 4-component vector.
+//
+// For rotations use primitives/Quaternion instead — same layout, but the
+// distinct type keeps "this is a rotation" in the type system rather than
+// in a comment.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+message Vector4 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}

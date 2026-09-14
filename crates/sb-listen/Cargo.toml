@@ -1,0 +1,22 @@
+[package]
+name = "sb-listen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "L4 — per-transport frame iterators + one-shot raw publishers for `sb topic listen/pub`."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sb-core = { workspace = true }
+sb-discover = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost = { workspace = true }
+prost-reflect = { workspace = true }
+zenoh = { workspace = true }
+iceoryx2 = { workspace = true }

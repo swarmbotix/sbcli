@@ -1,0 +1,6 @@
+module: pubber
+publishers:
+- name: hello
+  topic: hello
+  type: std/StringStamped
+  transport: zenoh

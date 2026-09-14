@@ -1,0 +1,26 @@
+// sensors/Imu.proto — inertial measurement unit.
+//
+// Covariances are ROW-MAJOR 3x3 (see primitives/Mat33). An all-zero
+// covariance means "unknown"; a leading -1 means "this quantity is not
+// reported by the device" (ROS2 convention, kept deliberately).
+syntax = "proto3";
+
+package swarmbotix.sensors;
+
+import "header/Header.proto";
+import "primitives/Vector3.proto";
+import "primitives/Quaternion.proto";
+import "primitives/Mat33.proto";
+
+message Imu {
+  swarmbotix.header.Header header = 1;
+
+  swarmbotix.primitives.Quaternion orientation = 2;
+  swarmbotix.primitives.Mat33 orientation_covariance = 3;
+
+  swarmbotix.primitives.Vector3 angular_velocity = 4;         // rad/s
+  swarmbotix.primitives.Mat33 angular_velocity_covariance = 5;
+
+  swarmbotix.primitives.Vector3 linear_acceleration = 6;      // m/s^2
+  swarmbotix.primitives.Mat33 linear_acceleration_covariance = 7;
+}

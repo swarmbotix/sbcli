@@ -1,0 +1,20 @@
+[package]
+name = "sb-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Per-language pub/sub codegen for sb (L3). Renders minijinja templates against (language, transport) → file."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sb-core.workspace = true
+sb-vault.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+minijinja = { version = "2", default-features = false, features = ["builtins", "macros", "serde"] }
+include_dir.workspace = true
+serde.workspace = true

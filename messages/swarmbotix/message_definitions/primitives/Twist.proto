@@ -1,0 +1,11 @@
+// primitives/Twist.proto — linear + angular velocity.
+syntax = "proto3";
+
+package swarmbotix.primitives;
+
+import "primitives/Vector3.proto";
+
+message Twist {
+  Vector3 linear = 1;   // m/s
+  Vector3 angular = 2;  // rad/s
+}

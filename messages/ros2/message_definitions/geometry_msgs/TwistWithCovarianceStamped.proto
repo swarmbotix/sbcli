@@ -1,0 +1,13 @@
+// geometry_msgs/TwistWithCovarianceStamped.proto
+//  This represents an estimated twist with reference coordinate frame and timestamp.
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/TwistWithCovariance.proto";
+import "std_msgs/Header.proto";
+
+message TwistWithCovarianceStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.TwistWithCovariance twist = 2;
+}

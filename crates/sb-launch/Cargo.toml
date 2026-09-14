@@ -1,0 +1,23 @@
+[package]
+name = "sb-launch"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "L5 — launch modules in a tmux/psmux session (sb up/run/down/attach)."
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[dependencies]
+sb-core = { workspace = true }
+sb-workspace = { workspace = true }
+anyhow = { workspace = true }
+serde_yaml = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

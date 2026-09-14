@@ -1,0 +1,315 @@
+# Check, build and release swarmbotix for Linux and Windows.
+#
+#   v* tag            -> check, build every target, publish a GitHub Release
+#   manual dispatch   -> the same minus the Release: a full rehearsal
+#
+# Cutting a release is the ONLY thing that starts this workflow. A release
+# build of zenoh + iceoryx2 across four jobs is expensive, and on a private
+# repo Windows minutes bill at 2x, so it does not run per push. The trade is
+# that lint and tests give no feedback until you tag; run them locally
+# (`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --
+# -D warnings`, `cargo test --workspace`) or add a cheaper push-triggered
+# workflow if that becomes a problem.
+#
+# `check` gates `build`, which gates `release`: nothing is packaged unless fmt,
+# clippy and the tests pass, and nothing is published unless it packaged. A tag
+# that fails its own gates produces no Release at all.
+#
+# The packaging is not reimplemented here. Each platform's script under
+# platforms/<os>/dist-tooling/ is the same one a maintainer runs by hand, so
+# a CI zip and a hand-cut zip are the same zip. That extends to the Linux
+# architectures: one build.sh invocation per arch, `--arch` choosing which.
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Gate. Same three commands rust-toolchain.toml tells a maintainer to
+  # run before bumping the pin, on both shipped platforms — Windows
+  # because parts of the tree are cfg'd for it and a Linux-only lint run
+  # cannot see them.
+  # ────────────────────────────────────────────────────────────────
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+
+      # rustup honors rust-toolchain.toml, so the version lives in that file
+      # and not here. rustfmt and clippy come with it via `components`.
+      - name: Rust
+        shell: bash
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check
+
+      # The tag IS the release number, so a tag that disagrees with the tree is
+      # the one thing that must never reach a Release: the zip names, the
+      # binary's own `sb --version` and the Release title would be three
+      # different numbers. Cargo.toml owns the version and the tag mirrors it,
+      # exactly as the seven in-repo mirror sites do. Checked before the slow
+      # steps so a mistyped tag fails in seconds.
+      - name: Tag agrees with Cargo.toml
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tree_v=$(cargo metadata --format-version 1 --no-deps \
+                   | jq -r '.packages[]|select(.name=="sb-cli").version')
+          tag_v="${GITHUB_REF_NAME#v}"
+          if [ "$tag_v" != "$tree_v" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} but Cargo.toml says ${tree_v} — run /sb-release, then retag"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches Cargo.toml ${tree_v}"
+
+      - name: libclang
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (Test-Path "$llvm\libclang.dll") {
+            Add-Content $env:GITHUB_ENV "LIBCLANG_PATH=$llvm"
+          }
+
+      - name: rustfmt
+        shell: bash
+        run: cargo fmt --all --check
+
+      - name: clippy
+        shell: bash
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Everything needing protoc, a live transport or shared memory is
+      # already #[ignore]'d in-tree, so a bare runner is the right
+      # environment for this and nothing has to be installed to make it
+      # pass. Run the ignored ones by hand, per their doc comments.
+      - name: tests
+        shell: bash
+        run: cargo test --workspace
+
+  build:
+    needs: check
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One target failing must not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: linux-x86_64
+            triple: x86_64-unknown-linux-gnu
+          # Cross-compiled from the x86_64 runner: zig links against the
+          # target's glibc stubs, so no ARM runner is needed (this repo is
+          # private, where those are not free anyway).
+          - os: ubuntu-latest
+            platform: linux
+            arch: linux-aarch64
+            triple: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            platform: windows
+            arch: windows-x86_64
+            triple: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # zenoh + iceoryx2 in release outgrows what the image leaves spare.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+
+      # rustup honors rust-toolchain.toml, so the version lives in that file
+      # and not here.
+      - name: Rust
+        shell: bash
+        run: |
+          rustup show
+          rustup target add ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Two Linux jobs share a runner image but not a target triple;
+          # without this they would fight over one cache entry.
+          key: ${{ matrix.arch }}
+
+      # Every Linux binary is linked against an old glibc (glibc_floor in
+      # platforms/linux/version.json) so it loads on 20.04 / Debian 11 /
+      # JetPack 5, not just on whatever the runner image ships — and zig is
+      # also what makes the aarch64 cross-build work at all. Both it and
+      # cargo-zigbuild come from PyPI, so no apt work and no container.
+      # build.sh refuses to stage without them.
+      - name: cargo-zigbuild
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VENV="$HOME/.zigbuild"
+          python3 -m venv "$VENV"
+          "$VENV/bin/pip" install --quiet cargo-zigbuild ziglang
+          # The ziglang wheel ships no `zig` entry point of its own, and
+          # cargo-zigbuild looks for one on PATH.
+          printf '#!/bin/sh\nexec "%s/bin/python" -m ziglang "$@"\n' "$VENV" > "$VENV/bin/zig"
+          chmod +x "$VENV/bin/zig"
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+          "$VENV/bin/zig" version
+
+      # iceoryx2 runs bindgen on Windows only; clang-sys needs to be pointed
+      # at the image's LLVM. Set it only when the DLL is really there — a
+      # wrong value is worse than an unset one, because clang-sys stops
+      # searching once the variable exists.
+      - name: libclang
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (Test-Path "$llvm\libclang.dll") {
+            Add-Content $env:GITHUB_ENV "LIBCLANG_PATH=$llvm"
+          }
+
+      # The build scripts read the target platform from .env, never from
+      # `uname` / `$IsWindows`. It is gitignored, so CI writes its own.
+      - name: Select platform
+        shell: bash
+        run: printf 'OS="%s"\n' '${{ matrix.platform }}' > .env
+
+      # One arch per job, so the two Linux jobs run in parallel and neither
+      # clears the other's slot. build.sh with no --arch would cut both.
+      - name: Build and package
+        if: runner.os == 'Linux'
+        run: bash platforms/linux/dist-tooling/build.sh --arch ${{ matrix.arch }}
+
+      - name: Build and package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -File platforms\windows\dist-tooling\build.ps1
+
+      # Upload exactly what THIS job built, and nothing else.
+      #
+      # Globbing the dist directory reads like "whatever was just built", and
+      # is not. Every past release stays committed under platforms/*/dist/ as
+      # the record of what shipped (see .gitignore), so the runner has all of
+      # it on disk before the build even starts. A glob cannot tell those
+      # checked-out files apart from the ones the build just wrote, and v0.1.40
+      # was damaged twice over by that:
+      #
+      #  * `dist/*/*` matched every historical version directory, so the
+      #    Release carried eleven stale Windows zips, 110 MB, beside its own.
+      #
+      #  * Narrowing to one version is still not enough. `--arch` means each
+      #    Linux job rebuilds one architecture and leaves the OTHER one as the
+      #    committed copy, so both jobs uploaded both architectures at
+      #    different contents. download-artifact fetches artifacts in
+      #    parallel, and where two of them disagree on a path, the two writers
+      #    race. v0.1.40's aarch64 zip was published as a byte-level mix of a
+      #    fresh build and a committed one: right size, wrong bytes, and
+      #    `unzip -t` fails inside bin/sb.
+      #
+      # So name the files instead of globbing them. Each artifact then holds
+      # one architecture, no two artifacts share a path, and there is nothing
+      # left to race over. The installer and uninstaller are not listed here
+      # because they are not loose files any more: build.sh / build.ps1 stage
+      # them inside the package, so they arrive as part of the zip.
+      - name: Version being built
+        shell: bash
+        run: |
+          v=$(jq -r .version platforms/${{ matrix.platform }}/version.json)
+          echo "PKG_VERSION=$v" >> "$GITHUB_ENV"
+          echo "packaging $v"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarmbotix-${{ matrix.arch }}
+          path: |
+            platforms/${{ matrix.platform }}/dist/${{ env.PKG_VERSION }}/swarmbotix-${{ env.PKG_VERSION }}-${{ matrix.arch }}.zip
+            platforms/${{ matrix.platform }}/dist/${{ env.PKG_VERSION }}/swarmbotix-${{ env.PKG_VERSION }}-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+
+  # Publishes only on a tag. A manual dispatch still runs check + build and
+  # leaves the artifacts on the run, so a rehearsal costs the same minutes but
+  # cannot create a Release by accident.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # merge-multiple flattens the three artifacts into one tree. Each now
+      # carries only its own architecture's zip and checksum, so they share no
+      # filenames at all and nothing is overwritten.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # What a release carries: one zip + .sha256 per architecture, and
+      # nothing else — the installer and uninstaller ride inside each zip, so
+      # a user downloads one file. Named rather than globbed, in both directions:
+      # a missing artifact is a failed release instead of a quietly short one,
+      # and an artifact belonging to some other version is a failed release
+      # instead of a Release page full of stale downloads.
+      - name: What is being published
+        run: |
+          find artifacts -type f -printf '%P\t%s bytes\n' | sort
+          v="${GITHUB_REF_NAME#v}"
+          for want in linux-x86_64 linux-aarch64 windows-x86_64; do
+            find artifacts -name "swarmbotix-${v}-${want}.zip" | grep -q . || {
+              echo "::error::no ${want} zip for ${v} among the artifacts"; exit 1; }
+          done
+          stray=$(find artifacts -name 'swarmbotix-*.zip' \
+                  ! -name "swarmbotix-${v}-*.zip" -printf '%P ')
+          if [ -n "$stray" ]; then
+            echo "::error::artifacts carry zips from other versions: ${stray}"
+            exit 1
+          fi
+
+      # Every zip must match the .sha256 shipped beside it. This is the check
+      # that would have caught v0.1.40's aarch64 zip, which arrived the right
+      # size but with bytes from two different builds interleaved, and went
+      # out with a sidecar that described neither. A checksum users are told
+      # to verify against is worth verifying here first. `tr -d` because the
+      # Windows sidecar is CRLF and carries no filename, so `sha256sum -c`
+      # cannot read it.
+      - name: Checksums match
+        run: |
+          fail=0
+          while IFS= read -r z; do
+            want=$(tr -d '\r' < "${z}.sha256" 2>/dev/null | awk '{print $1}')
+            got=$(sha256sum "$z" | awk '{print $1}')
+            if [ -z "$want" ]; then
+              echo "::error::${z##*/} has no readable .sha256"; fail=1
+            elif [ "$want" != "$got" ]; then
+              echo "::error::${z##*/} does not match its .sha256 (says ${want}, is ${got})"
+              fail=1
+            else
+              echo "ok  ${z##*/}"
+            fi
+          done < <(find artifacts -name 'swarmbotix-*.zip' | sort)
+          [ "$fail" -eq 0 ]
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+          fail_on_unmatched_files: true

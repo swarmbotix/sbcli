@@ -1,0 +1,28 @@
+// nav_msgs/TrajectoryPoint.proto
+//  Trajectory point state
+syntax = "proto3";
+
+package nav_msgs;
+
+import "geometry_msgs/Accel.proto";
+import "geometry_msgs/Pose.proto";
+import "geometry_msgs/Twist.proto";
+import "geometry_msgs/Wrench.proto";
+import "std_msgs/Header.proto";
+
+message TrajectoryPoint {
+  //  Absolute time and frame of reference of the point along a trajectory
+  std_msgs.Header header = 1;
+
+  //  Pose of the trajectory sample.
+  geometry_msgs.Pose pose = 2;
+
+  //  Velocity of the trajectory sample.
+  geometry_msgs.Twist velocity = 3;
+
+  //  Acceleration of the trajectory (optional, linear.x component is NaN if not set).
+  geometry_msgs.Accel acceleration = 4;
+
+  //  Force/Torque to apply at trajectory sample (optional, force.x component is NaN if not set).
+  geometry_msgs.Wrench effort = 5;
+}

@@ -1,0 +1,19 @@
+[package]
+name = "sb-doctor"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Environment validation for the swarmbotix sb CLI."
+
+[dependencies]
+sb-core = { workspace = true }
+sb-config = { workspace = true }
+sb-vault = { workspace = true }
+libloading = { workspace = true }
+which = { workspace = true }
+anyhow = { workspace = true }
+anstyle = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

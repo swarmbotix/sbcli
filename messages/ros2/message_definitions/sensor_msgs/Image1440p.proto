@@ -1,0 +1,24 @@
+// sensor_msgs/Image1440p.proto
+// Fixed-resolution variant of Image.proto for 1440p (QHD / "2K") — 2560 × 1440.
+// (Cinema DCI 2K is 2048×1080; this uses the consumer QHD label.)
+// Suggested compile (RGB8, 3 bytes/pixel = 11059200):
+//   sb message compile --iox2 --bytes-cap 11059200 sensor_msgs/Image1440p
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image1440p {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 2560x1440 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 1440
+  uint32 width = 3;   // expected 2560
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

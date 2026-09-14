@@ -1,0 +1,11 @@
+// sensor_msgs/LaserEcho.proto
+//  This message is a submessage of MultiEchoLaserScan and is not intended
+//  to be used separately.
+syntax = "proto3";
+
+package sensor_msgs;
+
+message LaserEcho {
+  repeated float echoes = 1;  // Multiple values of ranges or intensities.
+  //  Each array represents data from the same angle increment.
+}

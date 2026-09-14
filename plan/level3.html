@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>L3 — Pub/Sub Management &amp; Codegen</title>
+<style>
+:root { --fg:#222; --muted:#666; --code:#f4f4f4; --accent:#0066cc; --warn:#d4a017; --ok:#2a8c2a; }
+body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1.5em; color: var(--fg); line-height: 1.55; }
+h1 { border-bottom: 2px solid var(--fg); padding-bottom: 0.3em; margin-top: 0; }
+h2 { margin-top: 1.8em; }
+h3 { color: var(--muted); margin-top: 1.3em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+pre { background: var(--code); padding: 0.9em; border-radius: 4px; overflow-x: auto; line-height: 1.4; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 3px; }
+.goal { font-size: 1.05em; color: var(--muted); margin: 0.5em 0 1.5em; }
+.test { background: #fffbe6; border-left: 3px solid var(--warn); padding: 0.7em 1em; margin: 0.7em 0; }
+.test b { color: #8a6b08; }
+.done { background: #eef9ee; border-left: 3px solid var(--ok); padding: 0.7em 1em; margin: 1.5em 0; }
+.done b { color: #1f6b1f; }
+.nav { font-size: 0.9em; color: var(--muted); margin-bottom: 1.5em; }
+.nav a { color: var(--accent); text-decoration: none; margin-right: 0.6em; }
+.nav a:hover { text-decoration: underline; }
+.nav .here { font-weight: 700; color: var(--fg); }
+ul, ol { padding-left: 1.6em; }
+li { margin: 0.25em 0; }
+.warn { background: #fff4e6; border-left: 3px solid #d4691a; padding: 0.7em 1em; margin: 1em 0; }
+table { border-collapse: collapse; margin: 0.6em 0; }
+td, th { border: 1px solid #ccc; padding: 0.4em 0.7em; }
+th { background: var(--code); text-align: left; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="./level1.html">L1</a>·
+<a href="./level2.html">L2</a>·
+<a href="./level3.html" class="here">L3</a>·
+<a href="./level4.html">L4</a>·
+<a href="./level5.html">L5</a>·
+<a href="./level6.html">L6</a>
+</div>
+
+<h1>L3 — Pub/Sub Management &amp; Codegen</h1>
+<p class="goal">After L3, inside a module directory (one the user adopted via <code>sb init</code> at L2) the user runs <code>sb pub add -m std/StringStamped /hello --zenoh</code> and a working publisher file appears under <code>swarmbotix_io/publishers/</code>. Two such modules can now exchange messages over a real transport. Five languages × two transports.</p>
+
+<div class="warn"><b>Largest level.</b> Recommend splitting per-language into separate PRs after the config-mutation half lands. Rust first (dogfood), then Python, C++, Flutter, Unity.</div>
+
+<h2>Scope</h2>
+
+<h3>Config mutation — <code>--module</code> is optional</h3>
+<pre>sb list           [--module &lt;name&gt;]                                   # all pubs + subs
+sb pub list       [--module &lt;name&gt;]
+sb pub add        -m &lt;MsgType&gt; &lt;topic&gt; [-n &lt;name&gt;] [--iceoryx | --zenoh] [--module &lt;name&gt;]
+sb pub edit &lt;name&gt;  [-m &lt;MsgType&gt;] [-t &lt;topic&gt;] [--module &lt;name&gt;]
+sb pub rm   &lt;name&gt;  [--module &lt;name&gt;]
+sb sub list       [--module &lt;name&gt;]
+sb sub add        -m &lt;MsgType&gt; &lt;topic&gt; [--iceoryx | --zenoh] [--module &lt;name&gt;]
+sb sub edit &lt;topic&gt; [--module &lt;name&gt;]
+sb sub rm   &lt;topic&gt; [--module &lt;name&gt;]</pre>
+
+<p><code>-m</code> is reserved for <code>MsgType</code> — module uses the long-only flag <code>--module &lt;name&gt;</code> to avoid the clash.</p>
+
+<h4>Module resolution at L3</h4>
+<ol>
+  <li><b>No <code>--module</code> flag</b> → operate on <code>./sb.dev.yml</code> in cwd. Error if absent.</li>
+  <li><b><code>--module &lt;name&gt;</code> given</b>: try, in order, (a) <code>./&lt;name&gt;/sb.dev.yml</code> as a direct child of cwd, then (b) the active workspace's <code>flow.yaml</code> (from L2). The first hit wins; error with the paths searched if both miss.</li>
+</ol>
+<p>The direct-child lookup is useful when the user is in a parent directory holding several module dirs side-by-side; the <code>flow.yaml</code> lookup makes the named form work from anywhere on disk once a workspace is active. Both layers are available at L3 because L2 ships workspaces.</p>
+
+<ul>
+  <li>Validates: <code>MsgType</code> exists in L1's vault; topic not duplicate; transport explicit, else defaulted from L1's <code>sb.config.yml</code> (<code>transport_on_device</code> / <code>transport_cross_device</code>).</li>
+  <li><code>edit</code> is a diff, not a replace — preserves field ordering and comments.</li>
+  <li>After every mutation: codegen runs and emits/updates/removes the language file under <code>&lt;io_dir&gt;/publishers/</code> or <code>subscribers/</code>.</li>
+</ul>
+
+<h3>Codegen — per-language templates</h3>
+<p>Engine: <code>minijinja</code> (templates live in <code>crates/sb-codegen/templates/</code>). Every template emits <b>raw transport API calls</b> against the protobuf-generated types from L1's vault — no Swarmbotix wrapper.</p>
+
+<table>
+<tr><th>Language</th><th>Zenoh API</th><th>Iceoryx2 API</th><th>File ext</th></tr>
+<tr><td>Rust</td><td><code>zenoh::open</code>, <code>session.declare_publisher</code></td><td><code>iceoryx2::node::NodeBuilder</code></td><td><code>.rs</code></td></tr>
+<tr><td>Python</td><td><code>zenoh.open</code>, <code>session.declare_publisher</code></td><td><code>iceoryx2.Node</code></td><td><code>.py</code></td></tr>
+<tr><td>C++</td><td><code>zenoh::Session::open</code></td><td><code>iox2::Node</code></td><td><code>.cpp/.hpp</code></td></tr>
+<tr><td>Flutter</td><td><code>zenoh_flutter</code></td><td>— (Zenoh only)</td><td><code>.dart</code></td></tr>
+<tr><td>Unity</td><td>P/Invoke <code>zenoh.dll</code></td><td>— (Zenoh only)</td><td><code>.cs</code></td></tr>
+</table>
+
+<p>The <code>language:</code> tag written to <code>sb.dev.yml</code> at L2 selects the template set. C++ codegen reads zenoh-cpp include / lib paths from <code>sb.config.yml</code> (see the commented <code>libzenohcpp_*</code> entries — L3 promotes them to first-class schema keys).</p>
+
+<h2>TDD plan</h2>
+
+<div class="test"><b>1. <code>pub add</code> golden file on sb.dev.yml</b><br>
+Empty <code>sb.dev.yml</code> → <code>sb pub add -m std/ImageStamped /image_raw --iceoryx</code> → produced file matches checked-in golden byte-for-byte. Repeat for <code>sub add</code>, <code>pub edit</code>, <code>pub rm</code>.
+</div>
+
+<div class="test"><b>2. Validation errors</b><br>
+<code>sb pub add -m Nonexistent /foo</code> → exits non-zero, message contains "Nonexistent" + "not in vault" + suggestion to run <code>sb message list</code>. <code>sb pub add -m std/String /existing-topic</code> → exits non-zero, "topic already used by &lt;publisher_name&gt;".
+</div>
+
+<div class="test"><b>3. Module resolution — cwd, sibling, and workspace</b><br>
+Tempdir layout: <code>parent/{pubber,subber}/sb.dev.yml</code>. From <code>parent/</code>: <code>sb pub list --module pubber</code> reads <code>pubber/sb.dev.yml</code>; bare <code>sb pub list</code> errors ("no sb.dev.yml in cwd"). From <code>parent/pubber/</code>: <code>sb pub list</code> works on cwd; <code>sb pub list --module subber</code> finds the sibling. Then with an active workspace registering <code>pubber</code> at an absolute path: from an unrelated cwd (<code>/tmp</code>), <code>sb pub list --module pubber</code> resolves via <code>flow.yaml</code>. Naming a non-existent module errors with all paths searched.
+</div>
+
+<div class="test"><b>4. Transport defaulting</b><br>
+With no <code>--iceoryx</code>/<code>--zenoh</code> flag, defaults from sb.config.yml (<code>transport_on_device: iceoryx2</code> → iceoryx2). <code>$SB_CONFIG</code> override flips it. Explicit flag always wins.
+</div>
+
+<div class="test"><b>4. Codegen snapshot — per (language, transport)</b><br>
+10 snapshot fixtures (5 languages × 2 transports, minus Flutter/Unity iceoryx). Each: known <code>sb.dev.yml</code> snippet → generated file matches golden. Run via <code>insta</code> for easy review.
+</div>
+
+<div class="test"><b>5. Generated Rust file compiles inside a real Rust crate</b><br>
+Test fixture: a minimal Rust crate with <code>zenoh = "1.9"</code> + <code>iceoryx2 = "0.9"</code> in <code>Cargo.toml</code>, adopted via <code>sb init --rust</code>. Run <code>sb pub add -m std/StringStamped /hello --zenoh</code>, then <code>cargo check</code> succeeds. Catches API drift in the pinned transport versions. (sb does not add the deps for the user — the fixture provides them, mirroring real usage where the user maintains their own <code>Cargo.toml</code>.)
+</div>
+
+<div class="test"><b>6. Generated Python file imports inside a real Python project</b><br>
+Test fixture: a Python project with <code>eclipse-zenoh</code> installed in the env, adopted via <code>sb init --python</code>. Run <code>sb sub add -m std/StringStamped /hello --zenoh</code>, then <code>python -c "import swarmbotix.subscribers.hello"</code> succeeds. (As above, the test env provides the dependency.)
+</div>
+
+<div class="test"><b>7. Mutation triggers file emit/update/rm</b><br>
+After <code>sb pub add</code>, the file exists under <code>swarmbotix_io/publishers/</code>. After <code>sb pub rm</code>, it's gone. After <code>sb pub edit -t /new_topic</code>, the file's key expression / service name updates.
+</div>
+
+<div class="test"><b>8. <code>sb list</code> rendering</b><br>
+Golden file. <code>sb pub list</code> filters to publishers only; columns: name / type / topic / transport.
+</div>
+
+<div class="test"><b>9. End-to-end Rust ↔ Python over Zenoh</b><br>
+Two fixture projects (a Rust crate + a Python project) adopted via <code>sb init</code>: <code>pubber</code> (Rust) publishes <code>std/StringStamped</code> on <code>/hello</code>; <code>subber</code> (Python) subscribes. Spawn both, publish from Rust, assert Python subscriber's stdout contains the expected payload. <code>tests/integration/level3/cross_lang_zenoh.rs</code>.
+</div>
+
+<div class="test"><b>10. End-to-end Rust ↔ Rust over iceoryx2</b><br>
+Two fixture Rust crates adopted via <code>sb init --rust</code> exchanging <code>std/ImageStamped</code> via iceoryx2. Verifies zero-copy path. <code>#[ignore]</code>'d if shmem unavailable in CI.
+</div>
+
+<h2>Why this is L3</h2>
+<ul>
+  <li>Needs the vault (L1) for <code>MsgType</code> validation and for codegen to template against the right field set.</li>
+  <li>Needs L2-adopted modules (with <code>sb.dev.yml</code> + <code>swarmbotix_io/</code> in place) so codegen has somewhere to drop generated files — and so integration tests can target realistic user projects, not handmade fixtures.</li>
+  <li>Pays off L1's <code>Header.metadata.msg_freq_desired</code> design: any <code>*Stamped</code> publisher generated at L3 writes its declared Hz into each frame, which L4's topic-list then reads from a single sample.</li>
+</ul>
+
+<h2>Crate layout additions</h2>
+<pre>crates/
+  sb-codegen/                ← minijinja templates + emit logic
+    templates/
+      rust/
+        publisher_zenoh.rs.j2
+        publisher_iceoryx.rs.j2
+        subscriber_zenoh.rs.j2
+        subscriber_iceoryx.rs.j2
+      python/
+      cpp/
+      flutter/
+      unity/
+  sb-pubsub/                 ← `sb pub/sub` command logic; mutates sb.dev.yml + invokes sb-codegen
+tests/integration/level3/
+  pub_add_golden.rs
+  codegen_snapshots.rs
+  validation_errors.rs
+  cross_lang_zenoh.rs
+  cross_lang_iceoryx.rs
+</pre>
+
+<div class="done"><b>Done when</b>
+<ul>
+  <li>All 5 languages can publish and subscribe <code>std/StringStamped</code> via Zenoh; generated code is golden-stable.</li>
+  <li>Rust + Python additionally round-trip <code>std/ImageStamped</code> via iceoryx2.</li>
+  <li>Every mutation command produces byte-identical golden output — no spurious diffs across runs.</li>
+  <li>Cross-language Rust ↔ Python integration test green in CI.</li>
+</ul>
+</div>
+
+</body>
+</html>

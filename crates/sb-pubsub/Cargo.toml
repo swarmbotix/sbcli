@@ -1,0 +1,23 @@
+[package]
+name = "sb-pubsub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "L3 — `sb pub/sub add/edit/rm/list` mutation + codegen invocation against ModuleDevConfig."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sb-core.workspace = true
+sb-config.workspace = true
+sb-vault.workspace = true
+sb-workspace.workspace = true
+sb-codegen = { path = "../sb-codegen" }
+
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+dirs = { workspace = true }

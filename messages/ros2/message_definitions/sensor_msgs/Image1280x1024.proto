@@ -1,0 +1,24 @@
+// custom/Image1280x1024.proto
+// Fixed-resolution variant of sensor_msgs/Image — 1280 × 1024.
+// Matches the native sensor output of the HuaTeng GigE camera (MONO8).
+// Suggested compile (MONO8, 1 byte/pixel = 1310720):
+//   sb message compile --iox2 --bytes-cap 1310720 custom/Image1280x1024
+syntax = "proto3";
+
+package sensor_msgs;
+
+import "std_msgs/Header.proto";
+
+message Image1280x1024 {
+  std_msgs.Header header = 1;
+
+  // Resolution is fixed at 1280x1024 by message type; kept here for
+  // consumer convenience and parity with sensor_msgs.Image.
+  uint32 height = 2;  // expected 1024
+  uint32 width = 3;   // expected 1280
+
+  string encoding = 4;
+  uint32 is_bigendian = 5;
+  uint32 step = 6;
+  bytes data = 7;
+}

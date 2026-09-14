@@ -1,0 +1,13 @@
+// geometry_msgs/InertiaStamped.proto
+//  An Inertia with a time stamp and reference frame.
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Inertia.proto";
+import "std_msgs/Header.proto";
+
+message InertiaStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.Inertia inertia = 2;
+}

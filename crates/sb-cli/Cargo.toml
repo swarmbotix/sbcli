@@ -1,0 +1,56 @@
+[package]
+name = "sb-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The sb command-line tool — the forge's user-facing binary."
+
+[[bin]]
+name = "sb"
+path = "src/main.rs"
+
+[dependencies]
+sb-core = { workspace = true }
+sb-config = { workspace = true }
+sb-vault = { workspace = true }
+sb-doctor = { workspace = true }
+sb-iox2-typegen = { workspace = true }
+sb-workspace = { workspace = true }
+sb-codegen = { workspace = true }
+sb-pubsub = { workspace = true }
+sb-discover = { workspace = true }
+sb-listen = { workspace = true }
+sb-launch = { workspace = true }
+sb-gopro = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+# Only for the startup log-level warm-up in main.rs — the actual iox2
+# work lives in sb-discover / sb-listen / sb-launch.
+iceoryx2 = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+prost-reflect = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+dirs = { workspace = true }
+serde_yaml = { workspace = true }
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+zenoh = { workspace = true }
+iceoryx2 = { workspace = true }
+which = { workspace = true }
+prost-reflect = { workspace = true }
+sb-codegen = { workspace = true }
+sb-vault = { workspace = true }
+sb-discover = { workspace = true }
+sb-listen = { workspace = true }
+sb-launch = { workspace = true }
+sb-gopro = { workspace = true }

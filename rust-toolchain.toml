@@ -1,0 +1,18 @@
+# Pinned, not "stable". `stable` is a moving target that resolves to whatever
+# each machine last downloaded: a dev box sitting on 1.94.0 and a fresh CI
+# runner pulling 1.97.1 are both "stable", and the newer one carries lints the
+# older one has never heard of. That is a lint gate that passes locally and
+# fails on push, for a reason nothing in the diff explains.
+#
+# Every cargo invocation in this directory honors this file, so CI needs no
+# version string of its own — pinning here pins both.
+#
+# To move: change the version, run `cargo clippy --workspace --all-targets --
+# -D warnings` locally, fix whatever the new release started warning about,
+# and commit the two together. Never bump it in a hurry to get CI green.
+#
+# Not the MSRV. That is `rust-version` in Cargo.toml (1.82) and is what a
+# consumer needs; this is what the gates run.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]

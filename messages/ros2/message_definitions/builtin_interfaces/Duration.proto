@@ -1,0 +1,9 @@
+// builtin_interfaces/Duration.proto — elapsed time (sec + nanosec).
+syntax = "proto3";
+
+package builtin_interfaces;
+
+message Duration {
+  int32 sec = 1;
+  uint32 nanosec = 2;
+}

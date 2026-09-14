@@ -1,0 +1,9 @@
+module: pubber_rust
+language: rust
+root: /home/el/Dropbox/Projects/swarmbotix/examples/rust_python_zenoh/pubber_rust
+io_dir: swarmbotix_io
+publishers:
+- name: hello
+  topic: hello
+  type: std/StringStamped
+  transport: zenoh

@@ -1,0 +1,13 @@
+// geometry_msgs/PoseStamped.proto
+//  A Pose with reference coordinate frame and timestamp
+syntax = "proto3";
+
+package geometry_msgs;
+
+import "geometry_msgs/Pose.proto";
+import "std_msgs/Header.proto";
+
+message PoseStamped {
+  std_msgs.Header header = 1;
+  geometry_msgs.Pose pose = 2;
+}

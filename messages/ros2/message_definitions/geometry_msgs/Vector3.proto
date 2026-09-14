@@ -1,0 +1,15 @@
+// geometry_msgs/Vector3.proto
+//  This represents a vector in free space.
+syntax = "proto3";
+
+package geometry_msgs;
+
+message Vector3 {
+  //  This is semantically different than a point.
+  //  A vector is always anchored at the origin.
+  //  When a transform is applied to a vector, only the rotational component is applied.
+
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
