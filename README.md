@@ -45,6 +45,7 @@ for zero-copy shared memory on one device.
 ## Table of Contents
 
 - [Features](#features)
+- [How Messages Travel](#how-messages-travel)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [CLI Commands](#cli-commands)
@@ -113,6 +114,146 @@ for zero-copy shared memory on one device.
 - **`sb topic listen`** -- decodes frames as JSON lines
 - **`sb topic pub`** -- one-shot raw publish for smoke tests
 - **`sb topic prune`** -- clears dead iceoryx2 registrations
+
+## How Messages Travel
+
+Every topic has one wire path, and the fourth segment says which transport
+carries it:
+
+```
+/<device>/<workspace>/<module>/<transport>/<topic>
+ dev01    ws          camera    iox2        imu
+```
+
+`sb` never puts anything on the wire itself. It compiles the schema, generates
+the publisher and subscriber files, and names the path; your process calls the
+transport directly through that generated code.
+
+### One schema, three bindings, two transports
+
+A message is one `.proto` in the vault. `sb message compile` emits up to three
+binding trees from it, and the transport decides which one a topic uses:
+iceoryx2 carries a typed, fixed-size struct with zero copies; Zenoh carries
+bytes, which you produce with protobuf, FlatBuffers, or any encoder of your own.
+
+```mermaid
+flowchart LR
+  P["sensors/Imu.proto<br/>one schema in the vault"]
+  P --> C{{"sb message compile"}}
+  C -->|"--iox2"| I["iox2/<br/>flattened fixed-size struct<br/>Rust · C++ · Python"]
+  C -->|"--proto"| PB["proto/<br/>protobuf bindings<br/>C++ · Python · C#"]
+  C -->|"--fb"| FB["fb/<br/>FlatBuffers bindings<br/>Rust · C++ · Python · C#"]
+  X["your own encoder<br/>JSON · CBOR · packed bytes"]
+  I -->|"typed payload, zero-copy"| IOX[("iceoryx2<br/>shared memory, one device")]
+  PB -->|"SerializeToString → bytes"| Z[("Zenoh<br/>network, any device")]
+  FB -->|"Finish → bytes"| Z
+  X -->|"bytes"| Z
+  classDef iox fill:#FBE6D2,stroke:#C9711F,color:#4A2A08
+  classDef zen fill:#DCE8FA,stroke:#2E6FD8,color:#0F2A5C
+  classDef src fill:#E9EDF1,stroke:#7B8A99,color:#18212B
+  class P,C,X src
+  class I,IOX iox
+  class PB,FB,Z zen
+```
+
+Custom **messages** work on both transports: add your own `.proto` to the vault
+with `sb message new` and compile it like any shipped one. A custom **encoding**
+is a Zenoh-only choice, because an iceoryx2 payload is always the typed struct.
+
+### Same device: iceoryx2, zero-copy
+
+```bash
+# on camera (Rust)                 # on detector (Python)
+sb pub add -m swarmbotix/sensors/Imu imu --iox2
+                                   sb sub add -m swarmbotix/sensors/Imu /dev01/ws/camera/iox2/imu --iox2
+```
+
+```mermaid
+flowchart LR
+  subgraph dev01["dev01 · one host"]
+    direction LR
+    subgraph cam["module camera · Rust"]
+      A["Imu struct<br/>from iox2/"] -->|"loan_uninit · write_payload · send"| PUB["ImuPublisher<br/>swarmbotix_io/publishers/imu.rs"]
+    end
+    PUB -->|"service<br/>dev01/ws/camera/iox2/imu"| SHM[("shared-memory segment")]
+    subgraph det["module detector · Python"]
+      SUB["ImuSubscriber<br/>swarmbotix_io/subscribers/imu.py"] -->|"try_recv_latest → Sample<br/>aliases the slot, no copy"| B["read the fields,<br/>drop the Sample"]
+    end
+    SHM -->|"same type_name Imu<br/>on both sides"| SUB
+  end
+  classDef iox fill:#FBE6D2,stroke:#C9711F,color:#4A2A08
+  classDef src fill:#E9EDF1,stroke:#7B8A99,color:#18212B
+  class PUB,SHM,SUB iox
+  class A,B src
+```
+
+The publisher loans a slot in shared memory, writes the struct in place, and
+sends. The subscriber receives a handle onto that same slot; nothing is
+serialized or copied. Both sides must agree on the type name, which the
+generated code pins per language, so a Rust publisher and a Python subscriber
+open the same service.
+
+### Across devices: Zenoh, bytes
+
+```bash
+# on gps (Python, dev01)           # on planner (Rust, dev02)
+sb pub add -m swarmbotix/sensors/GnssFix fix --zenoh
+                                   sb sub add -m swarmbotix/sensors/GnssFix /dev01/ws/gps/zenoh/fix --zenoh
+```
+
+```mermaid
+flowchart LR
+  subgraph d1["dev01 · Jetson"]
+    G["GnssFix message"] -->|"protobuf SerializeToString<br/>or FlatBuffers Finish<br/>or your own encoder"| BYTES["bytes"]
+    BYTES --> ZP["FixPublisher<br/>declare_publisher · put"]
+  end
+  ZP -->|"key expr<br/>dev01/ws/gps/zenoh/fix"| NET(("Zenoh<br/>peer or router"))
+  subgraph d2["dev02 · laptop"]
+    NET -->|"declare_subscriber"| ZS["FixSubscriber<br/>try_recv_latest → bytes"]
+    ZS -->|"the matching decoder"| D["GnssFix message"]
+  end
+  classDef zen fill:#DCE8FA,stroke:#2E6FD8,color:#0F2A5C
+  classDef src fill:#E9EDF1,stroke:#7B8A99,color:#18212B
+  class ZP,NET,ZS zen
+  class G,BYTES,D src
+```
+
+The generated Zenoh publisher and subscriber only move bytes and own the key
+expression. Encoding is yours: the protobuf or FlatBuffers bindings compiled
+from the same `.proto`, or anything else, as long as both ends agree.
+
+### Both at once: one message, two wire paths
+
+```bash
+sb pub add -m swarmbotix/images/Image1280x1024 image_raw --iox2
+sb pub add -m swarmbotix/images/Image1280x1024 image_raw --zenoh
+```
+
+```mermaid
+flowchart LR
+  CAM["module camera<br/>Image1280x1024"]
+  CAM -->|"--iox2"| P1["dev01/ws/camera/iox2/image_raw"]
+  CAM -->|"--zenoh"| P2["dev01/ws/camera/zenoh/image_raw"]
+  P1 -->|"zero-copy struct"| DET["detector · same host"]
+  P2 -->|"encoded bytes"| MON["monitor · another host"]
+  classDef iox fill:#FBE6D2,stroke:#C9711F,color:#4A2A08
+  classDef zen fill:#DCE8FA,stroke:#2E6FD8,color:#0F2A5C
+  classDef src fill:#E9EDF1,stroke:#7B8A99,color:#18212B
+  class P1,DET iox
+  class P2,MON zen
+  class CAM src
+```
+
+The transport segment keeps the two paths from ever colliding. `sb list` shows
+them as two entries, and `sb topic list` shows both live.
+
+| | iceoryx2 | Zenoh |
+|---|---|---|
+| Scope | processes on one device | any device on the network |
+| Payload | typed fixed-size struct from `iox2/` | raw bytes |
+| Encodings | the struct itself | protobuf, FlatBuffers, or your own |
+| Copies | zero; the subscriber reads the publisher's slot | serialize, send, deserialize |
+| Languages | Rust, C++, Python | Rust, C++, Python, Flutter, Unity |
 
 ## Installation
 
