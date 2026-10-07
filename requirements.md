@@ -136,6 +136,9 @@ The transport segment lets the same bare name (e.g. `image_raw`) coexist on both
     <workspace_name>/    ← one directory per workspace
       sb.config.yml      ← optional per-workspace override
       flow.yaml          ← module registry
+  apps.yml               ← installed app packages: name → path, source, commit, version
+  update-check.json      ← cache for the `sb --version` update notice: latest, checked_at
+  apps/<name>/           ← clones made by `sb install <git-url>`; sb owns and deletes these
 ```
 
 ### Per-app state — `<module_root>/`
@@ -515,6 +518,54 @@ Export `sb.dev.yml` + `<io_dir>/` to `sb.prd.yml` (sanitized, language-agnostic,
 - Default target: cwd's module.
 - `--module <name>` (default: cwd) — target module.
 - `--all` (default: single module) — export every module in the active workspace.
+
+---
+
+### App Packages
+
+An **app package** is a folder with an `sb.app.yml` at its root. It is not a module: it is a foreground tool (calibration, converter, generator) that users run as `sb <name> [args...]` after `sb install`, with no change to `PATH`. Apps are global to the host and independent of workspaces. Shipped doc: `documents/sbcli_app.md`.
+
+#### `sb app init [path] [--name <n>] [--entry <file>] [--kind docker|host|none] [--image <img>] [--description <t>] [--force]`
+Write a fully commented `sb.app.yml` into `path` (default cwd) plus executable stubs for a missing entry and, for `--kind host`, a missing `install.bash`. Prompts for name / entry / kind / image on a TTY when `--kind` is absent; otherwise kind defaults to `none` (or `docker` when `--image` is given). Name defaults to the sanitised folder name and must pass `validate_identifier` and not be an `sb` built-in. The manifest is validated before being written. Existing scripts are never overwritten; `sb.app.yml` only with `--force`.
+
+#### `sb install <url|path> [--prefetch]` (alias `sb app install`)
+- Source: git URL (`https://`, `http://`, `ssh://`, `git://`, `file://`, `git@…`, or anything ending in `.git`), optionally `@<branch-or-tag>`; else a local folder, tilde-expanded and canonicalised.
+- Git sources are shallow-cloned into `<sb_home>/apps/<manifest.name>/`; the same URL again fast-forwards, a different `@ref` replaces the clone. Local folders are registered in place: never copied, never deleted.
+- Steps: resolve source → load + validate `sb.app.yml` → claim name (built-in or taken by another folder = error) → kind step (`none`: nothing; `docker`: `docker pull <image>` only if `prefetch: true` or `--prefetch`; `host`: `bash <host.install>` from the package root, non-zero aborts) → check `requires` on PATH (warnings) → write `<sb_home>/apps.yml`.
+
+#### `sb <name> [args...]`
+clap `external_subcommand`: a name that is not a built-in is looked up in `apps.yml`. On Unix the `sb` process is replaced by the entry (`exec`); on Windows it is spawned via `bash` and its exit code returned. cwd = user's cwd, args verbatim, env `SB_HOME`, `SB_APP_DIR`, `SB_APP_NAME`. Unknown name: exit 1 with a did-you-mean against built-ins and installed apps.
+
+#### `sb app list | info <name> | update [name] | remove <name>`
+`update`: git sources `git pull --ff-only` (pinned tags stay), then the kind step reruns and `version` / `commit` are refreshed; no name = every app, stop at first failure. `remove`: unregister; delete the folder only when it lives under `<sb_home>/apps/`.
+
+#### `sb.app.yml` schema
+```yaml
+name: camcalib            # identifier, not a built-in
+version: 0.1.0
+description: …            # optional
+entry: ./camcalib         # relative, inside the package
+kind: docker              # docker | host | none
+docker: { image: swarmbotix/sb_kalibr:latest, prefetch: false }   # kind: docker
+host:   { install: ./install.bash }                               # kind: host
+requires: [docker]        # binaries checked on PATH by install and doctor
+```
+Unknown keys are rejected. `apps.yml` schema: `apps.<name>.{path, source: path|git, url, git_ref, commit, version, installed_at}`.
+
+---
+
+### Self-Update
+
+Releases live at `github.com/swarmbotix/sbcli`, tag `vX.Y.Z`, assets `swarmbotix-<ver>-<arch>.zip` + `.sha256`, installer inside the zip. `sb` resolves the latest version from the `releases/latest` redirect (no API, no token). Shipped doc: `documents/sbcli_update.md`.
+
+#### `sb --version` / `-V`
+Prints `sb <version>`; then, unless `SB_NO_UPDATE_CHECK` is set (non-empty, not `0`), prints a second line: `update available: X.Y.Z   run `sb update`` when a newer release exists, `(latest)` when equal; nothing when ahead or when the lookup fails. Lookup is cached 24 h in `<sb_home>/update-check.json`, hard 4 s limit including DNS, never affects the exit code.
+
+#### `sb update --check`
+Always fetches, refreshes the cache, prints `installed / latest / platform / asset / status`. Exit 0 for `up to date` or `ahead`, 10 for `update available`. Not combinable with `--version` / `--force`.
+
+#### `sb update [--version X.Y.Z] [-y|--yes] [--force]`
+Guard: `current_exe` must be `<sb_home>/bin/sb[.exe]` (`SB_UPDATE_ALLOW_ANY_EXE=1` for tests). Target = `--version` or latest; equal = refused unless `--force`; lower = downgrade warning. Confirm `sb <old> -> <new>` on a TTY unless `--yes`; no TTY without `--yes` = error. Download zip + sidecar to a temp dir outside `<sb_home>`, verify SHA-256, unpack, require one top folder `swarmbotix-<ver>-<arch>/` with the installer, run `bash install.sh --yes` / `powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Yes` with `SB_HOME` set, keep the last 20 output lines for the error path, then require `<sb_home>/bin/sb --version` == target. Windows: rename running `sb.exe` to `sb.exe.old` first, restore on failure; every `sb` start deletes a stale `.old`. Platform map: `x86_64-linux` → `linux-x86_64`, `aarch64-linux` → `linux-aarch64`, `x86_64-windows` → `windows-x86_64`. `SB_RELEASE_BASE` overrides the release location (`https://` fork or `file:///dir` with `latest.txt` + zips) for tests.
 
 ---
 

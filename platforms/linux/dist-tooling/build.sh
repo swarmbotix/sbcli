@@ -203,8 +203,11 @@ BIN_SRC="${ROOT}/target/${TRIPLE}/${PROFILE_DIR}/${BIN}"
 # have). Skipping is stated out loud rather than silently: it is the check that
 # catches a stale target/ under --skip-build, and on a cross target that guard
 # is simply absent.
-if "$BIN_SRC" --version >/dev/null 2>&1; then
-    BIN_V="$("$BIN_SRC" --version | awk '{print $NF}')"
+#
+# SB_NO_UPDATE_CHECK=1 and `NR == 1`: `sb --version` may print a second line
+# saying whether a newer release exists, and must not go online here anyway.
+if SB_NO_UPDATE_CHECK=1 "$BIN_SRC" --version >/dev/null 2>&1; then
+    BIN_V="$(SB_NO_UPDATE_CHECK=1 "$BIN_SRC" --version | awk 'NR == 1 {print $NF}')"
     [ "$BIN_V" = "$VERSION" ] || {
         echo "error: ${BIN_SRC} reports ${BIN_V}, descriptor says ${VERSION} — stale target/, rebuild" >&2
         exit 2; }

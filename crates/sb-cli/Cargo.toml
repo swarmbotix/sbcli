@@ -23,6 +23,8 @@ sb-discover = { workspace = true }
 sb-listen = { workspace = true }
 sb-launch = { workspace = true }
 sb-gopro = { workspace = true }
+sb-apps = { workspace = true }
+sb-update = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
@@ -54,3 +56,6 @@ sb-discover = { workspace = true }
 sb-listen = { workspace = true }
 sb-launch = { workspace = true }
 sb-gopro = { workspace = true }
+# update_offline.rs builds a release zip and its .sha256 sidecar.
+zip = { workspace = true }
+sha2 = { workspace = true }

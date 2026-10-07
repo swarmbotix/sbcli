@@ -18,15 +18,24 @@ use sb_pubsub::{
 use sb_vault::{MessageName, Vault};
 use sb_workspace::{InitOptions, SbHome, active_workspace};
 
+// `--version` is a plain flag rather than clap's built-in one, so it can add
+// the update notice. `arg_required_else_help` and `override_usage` keep a bare
+// `sb` (help on stderr, exit 2) and the usage line exactly as they were when
+// the subcommand was required.
 #[derive(Parser)]
 #[command(
     name = "sb",
     about = "swarmbotix — unified pub/sub tooling for Rust / Python / C++ / Flutter / Unity",
-    version
+    arg_required_else_help = true,
+    override_usage = "sb <COMMAND>"
 )]
 struct Cli {
+    /// Print version, and whether a newer release exists (set SB_NO_UPDATE_CHECK=1 to skip the check)
+    // Listed after `-h, --help`, where clap's built-in flag used to sit.
+    #[arg(long, short = 'V', global = false, display_order = 1000)]
+    version: bool,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -78,6 +87,249 @@ enum Cmd {
     Attach,
     /// Freeze a module for production — write sb.prd.yml next to sb.dev.yml.
     Gopro(GoproArgs),
+    /// Install an app package from a git URL or a local folder; then run it as `sb <name> ...`.
+    ///
+    /// The argument is either a git URL or a local folder that holds an
+    /// `sb.app.yml` manifest. Git URLs are anything starting with https://,
+    /// http://, ssh://, git://, file:// or git@ (as in git@github.com:org/repo.git),
+    /// plus any path ending in .git. Append @<branch-or-tag> to a git URL to pin
+    /// it (refs containing `/` cannot be pinned this way).
+    ///
+    /// A git package is cloned (shallow) into <sb_home>/apps/<name>/, where <name>
+    /// comes from its manifest. Installing the same URL again pulls that clone in
+    /// place; a different @<ref> replaces it. A local folder is registered where
+    /// it is: never copied, never deleted, and edits to it apply on the next run.
+    ///
+    /// The install step then depends on the manifest's `kind`: `none` does
+    /// nothing more; `docker` runs `docker pull <image>` when the manifest sets
+    /// `prefetch: true` or --prefetch is given (otherwise the app pulls on first
+    /// run); `host` runs the manifest's `host.install` script with bash from the
+    /// package folder, and a non-zero exit aborts the install. Binaries listed in
+    /// `requires` that are missing from PATH produce warnings, not errors.
+    ///
+    /// Finally the app is recorded in <sb_home>/apps.yml. From then on,
+    /// `sb <name> [args...]` runs the package's entry in your current directory
+    /// with your arguments, and exits with the app's exit code. No PATH change is
+    /// needed. An app name may not be an sb built-in command, and a name already
+    /// taken by another package must be freed first with `sb app remove <name>`.
+    #[command(after_long_help = INSTALL_EXAMPLES)]
+    Install(InstallArgs),
+    /// Create and manage app packages: init, install, list, info, update, remove.
+    ///
+    /// Package authors run `sb app init` once in their repository. Users run
+    /// `sb install <url|path>` and then `sb <name> [args...]`; the other verbs
+    /// manage what is installed (registry: <sb_home>/apps.yml).
+    #[command(subcommand)]
+    App(AppCmd),
+    /// Update sb itself to the latest release, or to the one given with --version.
+    ///
+    /// Looks up the latest release of github.com/swarmbotix/sbcli, downloads the
+    /// zip for this platform (swarmbotix-<version>-<platform>.zip) and its .sha256
+    /// into a temporary folder, verifies the checksum, unpacks the zip, and runs the
+    /// package's own installer (install.sh --yes on Linux, install.ps1 -Yes on
+    /// Windows) with SB_HOME set to this sb's home. The result is the same as
+    /// installing that zip by hand: bin/sb, documents/ and VERSION are replaced and
+    /// new bundled message files are added, while sb.config.yml, workspaces and
+    /// installed apps are kept. The new binary is then run once to confirm that it
+    /// reports the expected version.
+    ///
+    /// Only an installed sb updates itself: the running binary must be
+    /// <sb_home>/bin/sb. A development build (cargo run, target/...) is refused;
+    /// rebuild it with cargo instead.
+    ///
+    /// Without --yes, sb shows `sb <old> -> <new>` and asks before installing; when
+    /// stdin is not a terminal, --yes is required. Installing an older release with
+    /// --version is allowed, with a downgrade warning.
+    ///
+    /// --check changes nothing: it prints the installed and latest versions, the
+    /// platform, the download URL and a status, and exits 0 when sb is up to date
+    /// (or newer than the latest release) and 10 when an update is available, so
+    /// `sb update --check || sb update -y` updates only when there is something new.
+    ///
+    /// `sb --version` uses the same lookup, cached for 24 hours in
+    /// <sb_home>/update-check.json, to say whether an update exists. Set
+    /// SB_NO_UPDATE_CHECK=1 to turn that off.
+    #[command(after_long_help = UPDATE_EXAMPLES)]
+    Update(UpdateArgs),
+    // `sb <name> [args...]`: any other subcommand is an installed app. Clap hands
+    // over the raw words (name first), so app flags such as `--help` pass through.
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+const INSTALL_EXAMPLES: &str = "\
+Examples:
+  sb install https://github.com/swarmbotix/sb_kalibr.git        clone and install
+  sb install https://github.com/swarmbotix/sb_kalibr.git@v1.2   pin a tag or branch
+  sb install git@github.com:swarmbotix/sb_kalibr.git            clone over ssh
+  sb install ~/dev/sb_kalibr                                    use a local folder in place
+  sb install ~/dev/sb_kalibr --prefetch                         also docker pull the image now
+  sb camcalib --help                                            run the app it installed
+
+Manage installed apps with `sb app list`, `sb app info <name>`,
+`sb app update [name]` and `sb app remove <name>`.";
+
+const APP_INIT_EXAMPLES: &str = "\
+Examples:
+  sb app init                                        ask for name, entry, kind
+  sb app init --kind none --entry ./calib.py         wrap an existing script
+  sb app init --kind docker --image org/tool:1.0     app that runs a container
+  sb app init ~/dev/mytool --kind host --name mytool host install step + stubs
+  sb install . && sb mytool --help                   try the package locally
+
+Resulting sb.app.yml (comments abridged) in a folder named camcalib, after
+`sb app init --kind docker --image swarmbotix/sb_kalibr:latest`:
+  name: camcalib             # subcommand: `sb camcalib ...`
+  version: 0.1.0
+  entry: ./run.bash          # run with the user's args, from the user's cwd
+  kind: docker               # docker | host | none
+  docker:
+    image: swarmbotix/sb_kalibr:latest
+    prefetch: false          # true = pull at `sb install`
+  requires: [docker]         # binaries that must be on PATH";
+
+const UPDATE_EXAMPLES: &str = "\
+Examples:
+  sb update                            install the latest release (asks first)
+  sb update -y                         the same, without asking
+  sb update --check                    compare installed and latest; exit 10 if newer exists
+  sb update --check || sb update -y    update only when a newer release exists
+  sb update --version 0.2.1            install a specific release (older = downgrade)
+  sb update --force -y                 reinstall the current version
+  SB_NO_UPDATE_CHECK=1 sb --version    print the version without looking online";
+
+#[derive(clap::Args)]
+struct UpdateArgs {
+    /// Report the installed and latest versions and change nothing. Exit code 0:
+    /// up to date or newer than the latest release; 10: an update is available.
+    #[arg(long, conflicts_with_all = ["version", "force"])]
+    check: bool,
+    /// Install this release instead of the latest, e.g. 0.2.1 (a leading `v` is
+    /// accepted). A version older than the running one is a downgrade.
+    #[arg(long, value_name = "X.Y.Z")]
+    version: Option<String>,
+    /// Do not ask before installing. Required when stdin is not a terminal.
+    #[arg(long, short = 'y')]
+    yes: bool,
+    /// Reinstall even when the target version is the one already running.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args)]
+struct InstallArgs {
+    /// Git URL, optionally pinned as `<url>@<branch-or-tag>`, or the path of a
+    /// local package folder (one that contains sb.app.yml).
+    #[arg(value_name = "URL|PATH")]
+    source: String,
+    /// For `kind: docker` packages, run `docker pull <image>` now even when the
+    /// manifest says `prefetch: false`. No effect on other kinds.
+    #[arg(long)]
+    prefetch: bool,
+}
+
+#[derive(Subcommand)]
+enum AppCmd {
+    /// Make a folder an app package: write sb.app.yml and starter scripts.
+    ///
+    /// Writes a fully commented sb.app.yml in PATH (default: the current folder).
+    /// The app name defaults to the folder name, with characters other than
+    /// letters, digits and `_` turned into `_`. The entry defaults to ./<name>
+    /// when that file exists, else ./run.bash.
+    ///
+    /// Missing scripts are created as executable stubs: the entry (prints a TODO
+    /// and exits 1 until you put your command in it) and, for --kind host,
+    /// install.bash (exits 0 until you add setup steps). Existing scripts are
+    /// never overwritten; an existing sb.app.yml is replaced only with --force.
+    ///
+    /// Without --kind, on an interactive terminal, sb asks for the name, entry,
+    /// kind and (for docker) image, offering defaults in brackets. Without a
+    /// terminal, the kind defaults to `none`, or to `docker` when --image is given.
+    ///
+    /// The manifest is validated before it is written, so a fresh package always
+    /// installs. Commit the folder and share its git URL: users run
+    /// `sb install <url>` and then `sb <name> [args...]`.
+    #[command(after_long_help = APP_INIT_EXAMPLES)]
+    Init(AppInitArgs),
+    /// Install an app package (same as `sb install`).
+    #[command(after_long_help = INSTALL_EXAMPLES)]
+    Install(InstallArgs),
+    /// List installed apps: name, version, kind, source and folder.
+    #[command(alias = "ls")]
+    List,
+    /// Show one installed app: manifest, source, commit, and `requires` status.
+    Info {
+        /// Installed app name (see `sb app list`).
+        name: String,
+    },
+    /// Update one installed app, or all of them.
+    ///
+    /// Git-installed apps are fast-forwarded with `git pull --ff-only` (apps
+    /// pinned to a tag stay put); local-folder apps are used as they are. Then
+    /// the kind's install step runs again (`host.install`, or `docker pull` when
+    /// `prefetch: true`) and the recorded version and commit are refreshed.
+    Update {
+        /// App to update. Omit to update every installed app.
+        name: Option<String>,
+    },
+    /// Uninstall an app.
+    ///
+    /// Removes the app from <sb_home>/apps.yml. Its folder is deleted only if
+    /// sb cloned it (it lives under <sb_home>/apps/); a local folder installed
+    /// in place is left untouched.
+    #[command(alias = "rm")]
+    Remove {
+        /// Installed app name (see `sb app list`).
+        name: String,
+    },
+}
+
+#[derive(clap::Args)]
+struct AppInitArgs {
+    /// Package folder. Defaults to the current directory.
+    path: Option<PathBuf>,
+    /// App name, so the app runs as `sb <name>`: letters, digits and `_`, not
+    /// starting with a digit, and not an sb built-in. Default: the folder name.
+    #[arg(long)]
+    name: Option<String>,
+    /// File that `sb <name>` runs, relative to the package folder. Default:
+    /// ./<name> if that file exists, else ./run.bash (created as a stub).
+    #[arg(long)]
+    entry: Option<String>,
+    /// What `sb install` does besides registering the app. Asked for on an
+    /// interactive terminal; otherwise `none` (or `docker` with --image).
+    #[arg(long, value_enum)]
+    kind: Option<AppKindArg>,
+    /// Image for --kind docker, e.g. `swarmbotix/sb_kalibr:latest`.
+    #[arg(long)]
+    image: Option<String>,
+    /// One-line description, shown by `sb app info`.
+    #[arg(long)]
+    description: Option<String>,
+    /// Replace an existing sb.app.yml. Scripts are never overwritten.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+enum AppKindArg {
+    /// Only register the app; its entry runs as shipped.
+    None,
+    /// The app runs a container; `sb install` can pre-pull its image.
+    Docker,
+    /// `sb install` and `sb app update` run install.bash on this machine.
+    Host,
+}
+
+impl AppKindArg {
+    fn to_kind(self) -> sb_apps::AppKind {
+        match self {
+            AppKindArg::None => sb_apps::AppKind::None,
+            AppKindArg::Docker => sb_apps::AppKind::Docker,
+            AppKindArg::Host => sb_apps::AppKind::Host,
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -482,7 +734,7 @@ enum ConfigCmd {
 
 fn main() -> ExitCode {
     match real_main() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::from(1)
@@ -524,10 +776,28 @@ fn warm_iceoryx_global_config() {
     set_log_level_from_env_or_default();
 }
 
-fn real_main() -> Result<()> {
+/// Run the parsed command. Built-in commands exit 0 on success; an installed
+/// app (`sb <name> ...`) passes its own exit code through.
+fn real_main() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if cfg!(windows) {
+        // A Windows `sb update` leaves the replaced binary as sb.exe.old.
+        if let Ok(home) = sb_home() {
+            sb_update::cleanup_stale_binary(home.root());
+        }
+    }
+    if cli.version {
+        return Ok(cmd_version());
+    }
+    let Some(cmd) = cli.cmd else {
+        // `arg_required_else_help` answers a bare `sb` before this point; this
+        // is the same answer for anything else that parses to no command.
+        use clap::CommandFactory;
+        eprint!("{}", Cli::command().render_help());
+        return Ok(ExitCode::from(2));
+    };
     warm_iceoryx_global_config();
-    match cli.cmd {
+    match cmd {
         Cmd::Doctor => cmd_doctor(),
         Cmd::Message(m) => match m {
             MessageCmd::List => cmd_message_list(),
@@ -608,7 +878,111 @@ fn real_main() -> Result<()> {
         Cmd::Down => cmd_down(),
         Cmd::Attach => cmd_attach(),
         Cmd::Gopro(a) => cmd_gopro(a),
+        Cmd::Install(a) => cmd_install(&a),
+        Cmd::App(a) => match a {
+            AppCmd::Init(a) => cmd_app_init(a),
+            AppCmd::Install(a) => cmd_install(&a),
+            AppCmd::List => cmd_app_list(),
+            AppCmd::Info { name } => cmd_app_info(&name),
+            AppCmd::Update { name } => cmd_app_update(name.as_deref()),
+            AppCmd::Remove { name } => cmd_app_remove(&name),
+        },
+        Cmd::Update(a) => return cmd_update(&a),
+        Cmd::External(argv) => return cmd_external(&argv),
+    }?;
+    Ok(ExitCode::SUCCESS)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// self-update: `sb --version`, `sb update`
+// ─────────────────────────────────────────────────────────────────────
+
+/// Exit code of `sb update --check` when a newer release exists.
+const EXIT_UPDATE_AVAILABLE: u8 = 10;
+
+/// `sb --version`: `sb X.Y.Z`, then one line saying whether a newer release
+/// exists. The version line is printed first, so it shows even while the
+/// (short, cached, silent-on-failure) lookup runs.
+fn cmd_version() -> ExitCode {
+    println!("sb {}", env!("CARGO_PKG_VERSION"));
+    if let Ok(home) = sb_home() {
+        if let Some(notice) = sb_update::version_notice(home.root()) {
+            println!("{notice}");
+        }
     }
+    ExitCode::SUCCESS
+}
+
+fn cmd_update(a: &UpdateArgs) -> Result<ExitCode> {
+    use std::io::IsTerminal;
+    let home = sb_home()?;
+    let fetcher = sb_update::fetcher_from_env()?;
+    if a.check {
+        let out = sb_update::check(home.root(), fetcher.as_ref())?;
+        let status = match out.status {
+            sb_update::Status::UpdateAvailable => "update available   run `sb update`",
+            sb_update::Status::UpToDate => "up to date",
+            sb_update::Status::Ahead => "ahead (newer than the latest release)",
+        };
+        println!("installed : {}", out.installed);
+        println!("latest    : {}", out.latest);
+        println!("platform  : {}", out.platform);
+        println!("asset     : {}", out.asset_url);
+        println!("status    : {status}");
+        return Ok(if out.status == sb_update::Status::UpdateAvailable {
+            ExitCode::from(EXIT_UPDATE_AVAILABLE)
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
+
+    let opts = sb_update::UpdateOptions {
+        version: a
+            .version
+            .as_deref()
+            .map(sb_update::parse_version)
+            .transpose()?,
+        force: a.force,
+    };
+    let plan = sb_update::plan(home.root(), fetcher.as_ref(), &opts)?;
+    let reinstall = if plan.from == plan.to {
+        " (reinstall)"
+    } else {
+        ""
+    };
+    println!("sb {} -> {}{reinstall}", plan.from, plan.to);
+    if plan.downgrade {
+        eprintln!(
+            "warning: {} is older than the running {}; this is a downgrade",
+            plan.to, plan.from
+        );
+    }
+    if !a.yes {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("not a terminal; pass --yes");
+        }
+        if !confirm("Proceed? [y/N] ")? {
+            anyhow::bail!("cancelled");
+        }
+    }
+    eprintln!("downloading {} ...", plan.asset_url);
+    let out = sb_update::apply(home.root(), fetcher.as_ref(), &plan)?;
+    println!("updated: sb {}", out.to);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Ask a yes/no question on stdin; only `y` or `yes` (any case) is yes.
+fn confirm(question: &str) -> Result<bool> {
+    print!("{question}");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading stdin")?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -941,6 +1315,432 @@ fn init_args_language(a: &InitArgs) -> Result<Option<Language>> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// app packages: `sb install`, `sb app *`, `sb <name> ...`
+// ─────────────────────────────────────────────────────────────────────
+
+/// `sb <name> [args...]`: run an installed app and pass its exit code on.
+fn cmd_external(argv: &[String]) -> Result<ExitCode> {
+    let (name, args) = argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("missing app name"))?;
+    let home = sb_home()?;
+    let code = sb_apps::exec_app(home.root(), name, args)?;
+    // Reached only where exec_app returns (non-Unix): codes outside 0..=255 become 1.
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+fn cmd_install(a: &InstallArgs) -> Result<()> {
+    let home = sb_home()?;
+    if matches!(
+        sb_apps::classify(&a.source),
+        Ok(sb_apps::Source::Git { .. })
+    ) {
+        eprintln!("fetching {} ...", a.source);
+    }
+    let opts = sb_apps::InstallOptions {
+        prefetch_override: a.prefetch.then_some(true),
+    };
+    let out = sb_apps::install(home.root(), &a.source, &opts)?;
+    let verb = if out.reinstalled {
+        "reinstalled"
+    } else {
+        "installed"
+    };
+    println!(
+        "{verb} app {} {} (kind: {}, source: {})",
+        out.name, out.version, out.kind, out.source
+    );
+    println!("  path: {}", out.path.display());
+    if let Some(c) = &out.commit {
+        println!("  commit: {}", short_commit(c));
+    }
+    for s in &out.steps_run {
+        println!("  ran: {s}");
+    }
+    for n in &out.notes {
+        println!("  note: {n}");
+    }
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    println!("run it: sb {} [args...]", out.name);
+    Ok(())
+}
+
+fn cmd_app_init(a: AppInitArgs) -> Result<()> {
+    use std::io::IsTerminal;
+    let dir = a.path.clone().unwrap_or_else(|| PathBuf::from("."));
+    if !dir.is_dir() {
+        anyhow::bail!("{} is not an existing folder", dir.display());
+    }
+    // Fail before any prompt rather than after the user has answered them.
+    let manifest = dir.join(sb_apps::MANIFEST_FILE);
+    if manifest.exists() && !a.force {
+        anyhow::bail!(
+            "{} already exists; pass --force to overwrite it (scripts are never overwritten)",
+            manifest.display()
+        );
+    }
+    let tty = std::io::stdin().is_terminal();
+    let mut name = a.name;
+    let mut entry = a.entry;
+    let mut image = a.image;
+    let flag_kind = a.kind.map(AppKindArg::to_kind);
+    let implied = if image.is_some() {
+        sb_apps::AppKind::Docker
+    } else {
+        sb_apps::AppKind::None
+    };
+    let kind = match flag_kind {
+        Some(k) => k,
+        None if tty => {
+            println!("sb app init: press Enter to accept the [default].");
+            let n = match name.take() {
+                Some(n) => n,
+                None => prompt_valid(
+                    "app name (run as `sb <name>`)",
+                    &sb_apps::default_name(&dir)?,
+                    |s| sb_apps::validate_app_name(s).map(|()| s.to_owned()),
+                )?,
+            };
+            if entry.is_none() {
+                entry = Some(prompt_valid(
+                    "entry (file to run, relative to the package)",
+                    &sb_apps::default_entry(&dir, &n),
+                    |s| Ok(s.to_owned()),
+                )?);
+            }
+            name = Some(n);
+            prompt_valid(
+                "kind (none | docker | host)",
+                implied.as_str(),
+                parse_app_kind,
+            )?
+        }
+        None => implied,
+    };
+    if kind == sb_apps::AppKind::Docker && image.is_none() && tty {
+        image = Some(prompt_valid("docker image (e.g. org/name:tag)", "", |s| {
+            if s.is_empty() {
+                Err("an image is required for kind docker".to_owned())
+            } else {
+                Ok(s.to_owned())
+            }
+        })?);
+    }
+    let opts = sb_apps::InitAppOptions {
+        name,
+        entry,
+        kind,
+        image,
+        description: a.description,
+        force: a.force,
+    };
+    let out = sb_apps::init_app(&dir, &opts)?;
+    println!(
+        "created app package {} (kind: {}, root: {})",
+        out.name,
+        out.kind,
+        out.root_abs.display()
+    );
+    if out.manifest_written {
+        println!("  wrote {}", sb_apps::MANIFEST_FILE);
+    }
+    if out.entry_stub_written {
+        println!(
+            "  wrote {} (executable stub): replace its TODO lines with your command",
+            out.entry
+        );
+    } else {
+        println!("  entry {} (existing file, left as is)", out.entry);
+    }
+    if out.install_stub_written {
+        println!("  wrote install.bash (executable stub): add host setup steps");
+    }
+    println!("next:");
+    println!(
+        "  sb install {}   then run: sb {} [args...]",
+        out.root_abs.display(),
+        out.name
+    );
+    println!("  commit and push; others run: sb install <git-url>");
+    Ok(())
+}
+
+fn parse_app_kind(s: &str) -> std::result::Result<sb_apps::AppKind, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" => Ok(sb_apps::AppKind::None),
+        "docker" => Ok(sb_apps::AppKind::Docker),
+        "host" => Ok(sb_apps::AppKind::Host),
+        other => Err(format!(
+            "{other:?} is not a kind; type none, docker or host"
+        )),
+    }
+}
+
+/// Ask `label [default]: ` on stdin until `parse` accepts the answer. An
+/// empty answer means the default; end of input takes the default if it
+/// parses and fails otherwise.
+fn prompt_valid<T>(
+    label: &str,
+    default: &str,
+    parse: impl Fn(&str) -> std::result::Result<T, String>,
+) -> Result<T> {
+    loop {
+        if default.is_empty() {
+            print!("{label}: ");
+        } else {
+            print!("{label} [{default}]: ");
+        }
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut line = String::new();
+        let read = std::io::stdin()
+            .read_line(&mut line)
+            .context("reading stdin")?;
+        let answer = match line.trim() {
+            "" => default,
+            t => t,
+        };
+        match parse(answer) {
+            Ok(v) => return Ok(v),
+            Err(e) if read == 0 => anyhow::bail!("no answer for {label}: {e}"),
+            Err(e) => println!("  {e}"),
+        }
+    }
+}
+
+fn cmd_app_list() -> Result<()> {
+    let home = sb_home()?;
+    let apps = sb_apps::list(home.root())?;
+    if apps.is_empty() {
+        println!("(no apps installed; run `sb install <url|path>`)");
+        return Ok(());
+    }
+    let rows: Vec<[String; 5]> = apps
+        .iter()
+        .map(|a| {
+            let kind = a
+                .manifest
+                .as_ref()
+                .map_or("?", |m| m.kind.as_str())
+                .to_owned();
+            let path = if a.path_exists {
+                a.record.path.display().to_string()
+            } else {
+                format!("{} (missing)", a.record.path.display())
+            };
+            [
+                a.name.clone(),
+                a.record.version.clone(),
+                kind,
+                a.record.source.as_str().to_owned(),
+                path,
+            ]
+        })
+        .collect();
+    let header = ["NAME", "VERSION", "KIND", "SOURCE", "PATH"].map(str::to_owned);
+    let mut widths = header.clone().map(|h| h.len());
+    for row in &rows {
+        for (w, cell) in widths.iter_mut().zip(row) {
+            *w = (*w).max(cell.len());
+        }
+    }
+    for row in std::iter::once(&header).chain(&rows) {
+        let line = format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+        );
+        println!("{}", line.trim_end());
+    }
+    Ok(())
+}
+
+fn cmd_app_info(name: &str) -> Result<()> {
+    let home = sb_home()?;
+    let a = sb_apps::info(home.root(), name)?;
+    let r = &a.record;
+    println!("name:         {}", a.name);
+    if let Some(d) = a.manifest.as_ref().and_then(|m| m.description.as_deref()) {
+        println!("description:  {d}");
+    }
+    println!("version:      {} (installed {})", r.version, r.installed_at);
+    let missing = if a.path_exists { "" } else { " (missing)" };
+    println!("path:         {}{missing}", r.path.display());
+    match (&r.url, r.source) {
+        (Some(url), sb_apps::SourceKind::Git) => {
+            let pin = r
+                .git_ref
+                .as_deref()
+                .map_or(String::new(), |g| format!(" @ {g}"));
+            let commit = r
+                .commit
+                .as_deref()
+                .map_or(String::new(), |c| format!(" (commit {})", short_commit(c)));
+            println!("source:       git {url}{pin}{commit}");
+        }
+        _ => println!("source:       local folder (installed in place)"),
+    }
+    if let Some(m) = &a.manifest {
+        match (&m.kind, &m.docker) {
+            (sb_apps::AppKind::Docker, Some(d)) => println!(
+                "kind:         docker (image {}, prefetch {})",
+                d.image, d.prefetch
+            ),
+            (sb_apps::AppKind::Host, _) => println!(
+                "kind:         host (install {})",
+                m.host.as_ref().map_or("?", |h| h.install.as_str())
+            ),
+            (k, _) => println!("kind:         {k}"),
+        }
+        println!("entry:        {}", m.entry);
+    }
+    if !a.requires.is_empty() {
+        let reqs: Vec<String> = a
+            .requires
+            .iter()
+            .map(|q| match &q.found {
+                Some(p) => format!("{} ({})", q.bin, p.display()),
+                None => format!("{} (NOT on PATH)", q.bin),
+            })
+            .collect();
+        println!("requires:     {}", reqs.join(", "));
+    }
+    if let Some(e) = &a.manifest_error {
+        println!("problem:      {e}");
+    }
+    println!("run:          sb {} [args...]", a.name);
+    Ok(())
+}
+
+fn cmd_app_update(name: Option<&str>) -> Result<()> {
+    let home = sb_home()?;
+    let outs = sb_apps::update(home.root(), name)?;
+    if outs.is_empty() {
+        println!("(no apps installed; run `sb install <url|path>`)");
+        return Ok(());
+    }
+    for o in outs {
+        let how = match o.pull {
+            Some(sb_apps::PullStatus::Pulled) if o.old_commit != o.new_commit => format!(
+                "pulled {} -> {}",
+                o.old_commit.as_deref().map_or("?", short_commit),
+                o.new_commit.as_deref().map_or("?", short_commit)
+            ),
+            Some(sb_apps::PullStatus::Pulled) => "already up to date".to_owned(),
+            Some(sb_apps::PullStatus::Pinned) => "pinned".to_owned(),
+            None => "local folder".to_owned(),
+        };
+        if o.old_version == o.new_version {
+            println!("updated {} {} ({how})", o.name, o.new_version);
+        } else {
+            println!(
+                "updated {} {} -> {} ({how})",
+                o.name, o.old_version, o.new_version
+            );
+        }
+        for s in &o.steps_run {
+            println!("  ran: {s}");
+        }
+        for n in &o.notes {
+            println!("  note: {n}");
+        }
+        for w in &o.warnings {
+            eprintln!("warning: {w}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_app_remove(name: &str) -> Result<()> {
+    let home = sb_home()?;
+    let out = sb_apps::remove(home.root(), name)?;
+    println!("removed app {}", out.name);
+    if out.deleted_dir {
+        println!("  deleted {}", out.path.display());
+    } else {
+        println!(
+            "  left {} in place (installed from a local folder)",
+            out.path.display()
+        );
+    }
+    Ok(())
+}
+
+/// First 12 hex digits of a commit hash.
+fn short_commit(c: &str) -> &str {
+    c.get(..12).unwrap_or(c)
+}
+
+/// One `app` line per installed app for `sb doctor`: kind, whether its
+/// folder exists, and whether each `requires` binary is on PATH. Problems
+/// are `[WARN]`, never `[FAIL]`: an app is the package author's concern and
+/// must not fail `sb doctor` itself.
+fn doctor_app_checks(cfg: &SbCliConfig) -> sb_doctor::Report {
+    use sb_doctor::{CheckResult, CheckStatus};
+    let apps = sb_config::resolve_sb_home_dir(cfg).and_then(|h| sb_apps::list(&h));
+    let checks = match apps {
+        Err(e) => vec![CheckResult {
+            name: "app",
+            status: CheckStatus::Warn(format!("cannot read the app registry: {e:#}")),
+        }],
+        Ok(apps) => apps
+            .iter()
+            .map(|a| {
+                let kind = a.manifest.as_ref().map_or("?", |m| m.kind.as_str());
+                let path = if a.path_exists {
+                    "path ok".to_owned()
+                } else {
+                    format!(
+                        "path {} MISSING (`sb app remove {}`, then reinstall)",
+                        a.record.path.display(),
+                        a.name
+                    )
+                };
+                let requires = if a.requires.is_empty() {
+                    "requires nothing".to_owned()
+                } else {
+                    let each: Vec<String> = a
+                        .requires
+                        .iter()
+                        .map(|q| {
+                            let state = if q.found.is_some() { "ok" } else { "MISSING" };
+                            format!("{} {state}", q.bin)
+                        })
+                        .collect();
+                    format!("requires {}", each.join(", "))
+                };
+                let mut msg = format!("{}: kind {kind}, {path}, {requires}", a.name);
+                let healthy = a.path_exists
+                    && a.manifest_error.is_none()
+                    && a.requires.iter().all(|q| q.found.is_some());
+                if a.path_exists {
+                    if let Some(e) = &a.manifest_error {
+                        msg.push_str(&format!(", sb.app.yml unreadable: {e}"));
+                    }
+                }
+                CheckResult {
+                    name: "app",
+                    status: if healthy {
+                        CheckStatus::Ok(msg)
+                    } else {
+                        CheckStatus::Warn(msg)
+                    },
+                }
+            })
+            .collect(),
+    };
+    sb_doctor::Report { checks }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1129,6 +1929,8 @@ fn cmd_doctor() -> Result<()> {
         && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     println!("sb {}", env!("CARGO_PKG_VERSION"));
     print!("{}", report.render(color));
+    // Installed apps: warnings only, so they never change doctor's exit code.
+    print!("{}", doctor_app_checks(&cfg).render(color));
     if report.all_ok() {
         Ok(())
     } else {
@@ -2951,5 +3753,59 @@ mod backend_tests {
             sb_vault::unity_project_root(&deep).as_deref(),
             Some(unity.as_path())
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// App dispatch
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod app_dispatch_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// `sb_apps::BUILTIN_NAMES` decides which app names are refused. It must
+    /// list exactly the top-level subcommands (plus aliases and `help`), or an
+    /// app could shadow a new built-in or be refused for a name nothing uses.
+    #[test]
+    fn builtin_names_match_the_command_tree() {
+        let cli = Cli::command();
+        let mut names: Vec<String> = cli
+            .get_subcommands()
+            .flat_map(|c| {
+                std::iter::once(c.get_name().to_owned())
+                    .chain(c.get_all_aliases().map(str::to_owned))
+            })
+            .collect();
+        names.push("help".to_owned());
+        for n in &names {
+            assert!(
+                sb_apps::is_builtin(n),
+                "`sb {n}` is missing from sb_apps::BUILTIN_NAMES"
+            );
+        }
+        for b in sb_apps::BUILTIN_NAMES {
+            assert!(
+                names.iter().any(|n| n == b),
+                "sb_apps::BUILTIN_NAMES lists `{b}`, which is not an sb subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_subcommand_parses_as_an_app_with_raw_args() {
+        let cli = Cli::try_parse_from(["sb", "camcalib", "--help", "-x", "a b"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::External(argv)) => assert_eq!(argv, ["camcalib", "--help", "-x", "a b"]),
+            _ => panic!("expected an external app subcommand"),
+        }
+    }
+
+    #[test]
+    fn app_kind_answers_parse() {
+        assert_eq!(parse_app_kind("Docker"), Ok(sb_apps::AppKind::Docker));
+        assert_eq!(parse_app_kind("none"), Ok(sb_apps::AppKind::None));
+        assert!(parse_app_kind("vm").is_err());
     }
 }

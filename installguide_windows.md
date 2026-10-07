@@ -144,8 +144,8 @@ Everything the tooling needs, derived from `OS` alone:
 | `windows` | `x86_64-pc-windows-msvc` | `sb.exe` | `windows-x86_64` | `platforms/windows/dist/<ver>/` | `install.ps1` | `%USERPROFILE%\.swarmbotix` |
 | `mac` | `aarch64-apple-darwin` | `sb` | `macos-arm64` | `platforms/mac/dist/<ver>/` | `install.sh` | `$HOME/.swarmbotix` |
 
-Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.1.41 is
-`swarmbotix-0.1.41-windows-x86_64`.
+Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.2.1 is
+`swarmbotix-0.2.1-windows-x86_64`.
 
 `%USERPROFILE%\.swarmbotix` is not a free choice — it is what
 `dirs::home_dir()` returns on Windows, which is what `sb` itself uses to find
@@ -252,9 +252,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.sh
 │   │   └── sb.config.yml.template                    ← .so paths
 │   └── dist/                                         ← release OUTPUT, one dir per version
-│       ├── 0.1.41/
-│       │   ├── swarmbotix-0.1.41-linux-x86_64.zip
-│       │   ├── swarmbotix-0.1.41-linux-x86_64.zip.sha256
+│       ├── 0.2.1/
+│       │   ├── swarmbotix-0.2.1-linux-x86_64.zip
+│       │   ├── swarmbotix-0.2.1-linux-x86_64.zip.sha256
 │       │   └── install.sh                            ← verbatim from dist-tooling/
 │       └── 0.1.28/ …                                 ← previous cuts kept side by side
 │
@@ -264,9 +264,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.ps1
 │   │   └── sb.config.win.yml.template                ← .dll paths
 │   └── dist/
-│       └── 0.1.41/
-│           ├── swarmbotix-0.1.41-windows-x86_64.zip  ← the payload
-│           ├── swarmbotix-0.1.41-windows-x86_64.zip.sha256
+│       └── 0.2.1/
+│           ├── swarmbotix-0.2.1-windows-x86_64.zip  ← the payload
+│           ├── swarmbotix-0.2.1-windows-x86_64.zip.sha256
 │           └── install.ps1                           ← verbatim from dist-tooling/
 │
 └── mac/                                              ← not created yet; add as a sibling
@@ -295,7 +295,7 @@ Identical shape to Linux — one top-level dir named after the package stem, whi
 is what `install.ps1` asserts on:
 
 ```
-swarmbotix-0.1.41-windows-x86_64/
+swarmbotix-0.2.1-windows-x86_64/
 ├── bin/
 │   └── sb.exe                        ← from target/x86_64-pc-windows-msvc/release/
 ├── messages/                         ← one subdir per style; minus .cache/, targets/, message_targets/
@@ -624,7 +624,7 @@ Run on this box (Windows 11, rustc 1.89.0, host `x86_64-pc-windows-msvc`):
   all 26 zenoh 1.9 crates, `iceoryx2 0.9`, and every `sb-*` crate.
 - `cargo build --release --bin sb` → **links**, 2m16s cold, producing
   `target\release\sb.exe` (27.2 MB) + `sb.pdb` (9.8 MB).
-- `sb.exe --version` → `sb 0.1.41`.
+- `sb.exe --version` → `sb 0.2.1`.
 - `sb.exe doctor` → runs, correctly reports the four unset tool paths, and
   **auto-detects psmux**: `[OK] tmux  …\WinGet\Links\tmux.exe (tmux 3.3.4)`.
   The `which`-based resolution in `sb-launch` works exactly as its comment
@@ -649,13 +649,13 @@ It is now split per platform, next to that platform's tooling:
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.1.41",
+  "version": "0.2.1",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.1.41-windows-x86_64"
+  "package_stem": "swarmbotix-0.2.1-windows-x86_64"
 }
 ```
 
@@ -831,7 +831,7 @@ Windows analogue of installguide_ubuntu.md §"Smoke testing before release" — 
 Linux smoke test covers have an equivalent:
 
 ```powershell
-$Dist = "platforms\windows\dist\0.1.41"
+$Dist = "platforms\windows\dist\0.2.1"
 
 $Sandbox = Join-Path $env:TEMP "sb-smoke-$(Get-Random)"
 New-Item -ItemType Directory -Force $Sandbox | Out-Null
@@ -841,7 +841,7 @@ $env:SB_HOME = "$Sandbox\.swarmbotix"
 & "$Dist\install.ps1" -Yes
 
 # Verify
-& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.1.41
+& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.2.1
 Get-ChildItem "$env:SB_HOME\messages"
 & "$env:SB_HOME\bin\sb.exe" doctor                 # lists what's missing
 

@@ -106,6 +106,12 @@ for zero-copy shared memory on one device.
   `sb.prd.yml` that ships with the binary
 - **Request/response** -- `sb service init` drops a REST-style router over
   Zenoh queryables into a Rust or Python module, independent of pub/sub
+- **Self-update** -- `sb --version` says when a newer release exists;
+  `sb update --check` compares, `sb update` downloads, verifies and installs
+  it in place, keeping config, workspaces and apps
+- **App packages** -- `sb install <git-url | path>` installs any repository
+  that carries an `sb.app.yml` and runs it as `sb <name> [args...]`, with no
+  `PATH` change; `sb app init` writes that manifest for package authors
 
 ### Introspection
 
@@ -443,6 +449,23 @@ iceoryx2, while `sb topic listen` and `sb topic pub` default to Zenoh.
 | `sb attach` | Attach to the workspace's tmux session |
 | `sb down` | Kill the session |
 
+### App packages
+
+| Command | Purpose |
+|---|---|
+| `sb app init [path] [--name] [--entry] [--kind docker\|host\|none] [--image]` | Make a folder an installable package (writes `sb.app.yml`) |
+| `sb install <url\|path> [--prefetch]` | Install a package from a git URL (cloned under `~/.swarmbotix/apps/`) or a local folder (used in place) |
+| `sb <name> [args...]` | Run an installed app in the current directory, args and exit code passed through |
+| `sb app <list\|info\|update\|remove>` | Manage installed apps (`~/.swarmbotix/apps.yml`) |
+
+### Self-update
+
+| Command | Purpose |
+|---|---|
+| `sb --version` | Print the version; adds `update available: X.Y.Z` when a newer release exists (cached 24 h; `SB_NO_UPDATE_CHECK=1` skips) |
+| `sb update --check` | Compare installed and latest release; exit 10 when an update exists |
+| `sb update [--version X.Y.Z] [-y] [--force]` | Download, verify and install a release in place |
+
 ## On-Disk Layout
 
 Every `sb` invocation reads from and writes to one of three roots:
@@ -492,6 +515,8 @@ Rust source is not split per OS.
 | [sb-listen](crates/sb-listen) | Per-transport frame iterators and one-shot raw publishers |
 | [sb-launch](crates/sb-launch) | tmux session launch (`sb up` / `run` / `stop` / `down` / `attach`) |
 | [sb-gopro](crates/sb-gopro) | Production export to `sb.prd.yml` |
+| [sb-apps](crates/sb-apps) | App packages: `sb.app.yml` manifest, `sb install`, registry, `sb <name>` dispatch |
+| [sb-update](crates/sb-update) | Self-update: release lookup, cached `--version` notice, download, checksum, installer run |
 | [sb-cli](crates/sb-cli) | The `sb` binary itself |
 
 Top-level directories:
@@ -583,6 +608,8 @@ release. Start with [sbcli.md](documents/sbcli.md).
 | [sbcli_launch.md](documents/sbcli_launch.md) | `sb up` / `run` / `stop` / `down` / `attach`: the tmux session and lifecycle scripts |
 | [sbcli_reqres.md](documents/sbcli_reqres.md) | `sb service`: request/response over Zenoh queryables |
 | [sbcli_docker_runscript.md](documents/sbcli_docker_runscript.md) | `sb init --docker`: `flow.yaml` instances and docker dispatch |
+| [sbcli_app.md](documents/sbcli_app.md) | `sb app` / `sb install`: app packages, `sb.app.yml`, running `sb <name>` |
+| [sbcli_update.md](documents/sbcli_update.md) | `sb update` / `sb --version`: update notice, `--check`, in-place self-update |
 
 Maintainer docs that stay in the repo: [installguide_ubuntu.md](installguide_ubuntu.md),
 [installguide_windows.md](installguide_windows.md), [requirements.md](requirements.md),

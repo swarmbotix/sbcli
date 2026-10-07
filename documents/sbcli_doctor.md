@@ -69,6 +69,7 @@ list. Each entry corresponds to one dependency.
 | 8 | `unity targets` | Scans each style's `message_targets/` that sits inside a Unity project and counts generated `.cs` files a current `sb` would not have written. **Warns, never fails** — the breakage is in the host project, not in `sb`. | `messages_root:` |
 | 9 | `config keys` | Reports `message_style` / `message_definitions` / `message_targets` if still present. They parse but do nothing, which is the combination that silently misleads. | any stale `sb.config.yml` |
 | 10 | `std vault` | Walks `<messages_root>/ros2/message_definitions/std/` and confirms the expected forge files are present. Always the ros2 style — that is where `std/` lives. | `messages_root:` |
+| 11 | `app` | One line per installed app package (`sb 0.2.1+`): its kind, whether its folder still exists, and whether each binary in its `requires` list is on `PATH`. **Warns, never fails**, and prints nothing when no apps are installed. Details in [sbcli_app.md](sbcli_app.md) §9. | `<sb_home>/apps.yml` |
 
 Checks 1, 2, 4, 5 and 6 share the same structure (`CheckResult` from
 `sb_doctor`). Checks 7, 8 and 9 have their own logic because they don't
@@ -158,6 +159,8 @@ Field widths:
 - Line 1 is not a check: `sb doctor` prints `sb <version>` — the literal
   string `sb ` followed by the same `CARGO_PKG_VERSION` that
   `sb --version` reports — before the checklist. Skip it when parsing.
+  (`sb --version` itself may add a second `update available` line, see
+  [sbcli_update.md](sbcli_update.md) §2; `sb doctor` never does.)
   (It is written as a placeholder here on purpose: this document does
   not mirror the current release number.)
 - Column 1: tag in brackets (`[OK]`, `[FAIL]`, `[SKIP]`, `[WARN]`),

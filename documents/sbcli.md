@@ -56,6 +56,9 @@ Knowing which root holds which file is the fastest way to navigate.
 ~/.swarmbotix/                       ← (1) the swarmbotix home
 ├── sb.config.yml                    ←     host-wide config (tool paths, defaults)
 ├── active                           ←     name of the active workspace
+├── apps.yml                         ←     installed app packages (sb 0.2.1+)
+├── apps/<name>/                     ←       clones made by `sb install <git-url>`
+├── update-check.json                ←     latest release seen by `sb --version` (sb 0.2.1+)
 ├── messages/                        ←     (2) message styles — one subdir per style
 │   ├── ros2/                        ←       shipped style
 │   │   ├── message_definitions/     ←         source .proto files
@@ -121,7 +124,7 @@ legacy ROS2 topics. See [sbcli_pubsub.md](sbcli_pubsub.md) §13.7.
 
 ## 4. Command groups
 
-The `sb` binary exposes **ten** verb groups today. The table below is
+The `sb` binary exposes **twelve** verb groups today. The table below is
 the index; detailed behavior, flag-by-flag semantics, error catalogue,
 and edge cases live in the per-group reference. The last row (`sb ui`,
 L6) is a roadmap entry and is **not** in `sb --help` yet — `sb --help`
@@ -129,7 +132,7 @@ is always the authority on what this build actually accepts.
 
 | Group | What it does | Reference doc | Build level |
 |---|---|---|---|
-| `sb doctor` | Validate this host's tooling and vault — `protoc` / `flatc` / `libzenohc` / `libiceoryx2` / `tmux`, the zenoh + iceoryx2 versions this `sb` links and whether the installed libraries match them, plus the resolved message styles, stale Unity C#, dead config keys, and the `std/` bundle. Ten checks; `[FAIL]` alone sets the exit code. | [sbcli_doctor.md](sbcli_doctor.md) | L1 |
+| `sb doctor` | Validate this host's tooling and vault — `protoc` / `flatc` / `libzenohc` / `libiceoryx2` / `tmux`, the zenoh + iceoryx2 versions this `sb` links and whether the installed libraries match them, plus the resolved message styles, stale Unity C#, dead config keys, and the `std/` bundle. Ten checks plus one `app` line per installed app package; `[FAIL]` alone sets the exit code. | [sbcli_doctor.md](sbcli_doctor.md) | L1 |
 | `sb config *` | Read, write, and inspect the layered `sb.config.yml` (env override → workspace → global → built-in). `show` / `get` expose the merged result to downstream LLMs and build scripts. | [sbcli_config.md](sbcli_config.md) | L1 (`open`/`set`/`show`/`get`); L5 (`--workspace`) |
 | `sb message *` | Manage the vault: list, create, edit, remove `.proto` files; compile to per-language bindings. | [sbcli_messages.md](sbcli_messages.md) | L1 |
 | `sb ws *` | Workspace lifecycle — create, set-active, list, delete. The active workspace's `flow.yaml` is the module registry every other verb reads. | [sbcli_ws.md](sbcli_ws.md) | L2 |
@@ -138,6 +141,8 @@ is always the authority on what this build actually accepts.
 | `sb service *` | REST-style request/response over Zenoh queryables, JSON payloads, independent of pub/sub. `init` drops a self-contained router (`service.py` / `service.rs`) into the module's io dir with its namespace baked in; you write the routes. Rust and Python only. | [sbcli_reqres.md](sbcli_reqres.md) | L4 |
 | `sb topic *` | Introspect the live swarm. `list` enumerates active topics on either transport; `listen` decodes frames as JSON lines; `pub` does a one-shot raw publish; `prune` clears iceoryx2 registrations left behind by dead publishers (the `(dead)` rows in `list`). | (ref TBD — see `requirements.md` §"Topic Introspection") | L4 |
 | `sb up` / `sb run` / `sb stop` / `sb down` / `sb attach` | Launch every module in the active workspace under tmux, or a single module, or kill the session. `up` / `run` execute a module's `runscript.bash`; `stop` is `run`'s symmetric counterpart and executes its `stopscript.bash` in the same window. | [sbcli_launch.md](sbcli_launch.md) | L5 |
+| `sb install` / `sb app *` | Install app packages from a git URL or a local folder and run them as `sb <name> [args...]`, with no `PATH` change. `app init` makes any folder a package by writing `sb.app.yml`; `list` / `info` / `update` / `remove` manage what is installed. Global to the host, independent of workspaces. | [sbcli_app.md](sbcli_app.md) | `sb 0.2.1+` |
+| `sb update` / `sb --version` | Self-update from the GitHub release page: `--version` adds an `update available` line (cached 24 h, silent offline, `SB_NO_UPDATE_CHECK=1` to skip); `update --check` compares and exits 10 when newer exists; `update` downloads, verifies the checksum and runs the package installer in place. | [sbcli_update.md](sbcli_update.md) | `sb 0.2.1+` |
 | `sb gopro` | Freeze a module for production. Reads `sb.dev.yml` + `swarmbotix_io/` and writes a sanitized, language-agnostic `sb.prd.yml` that ships with the binary. | (ref TBD — see `requirements.md` §"Production") | L5 |
 | `sb ui` *(not shipped)* | Start `swarmctl` (REST + MCP server + visual flow editor) in a tmux pane and open the browser. | (ref TBD — `requirements.md` §"Web UI" + `plan/level6.html`, both in the source repo) | L6 |
 
@@ -257,6 +262,8 @@ second thin wrapper around the same core, exposing REST + MCP.
 | "What does `sb init --python` actually write?" | [sbcli_init.md](sbcli_init.md) §4 + §5 |
 | "Why does `sb stop` need a `stopscript.bash` I have to write myself?" | [sbcli_launch.md](sbcli_launch.md) §4.2 |
 | "Why is my module still running after `sb stop`?" | [sbcli_launch.md](sbcli_launch.md) §4.1 + §8 |
+| "How do I ship a tool so users run it as `sb <name>` without touching `PATH`?" | [sbcli_app.md](sbcli_app.md) §3 + §4 |
+| "Is there a newer `sb`, and how do I get it without redownloading by hand?" | [sbcli_update.md](sbcli_update.md) §2 + §4 |
 | "Authoritative spec for any flag, file, or path" | `requirements.md` (sbcli source repo — not shipped) |
 | "When does feature X land?" | `plan/levelN.html` (same repo) |
 

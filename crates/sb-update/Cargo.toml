@@ -1,0 +1,23 @@
+[package]
+name = "sb-update"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "`sb update` and the `sb --version` notice: find, verify, and install the newest sb release."
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+ureq = { workspace = true }
+semver = { workspace = true }
+sha2 = { workspace = true }
+zip = { workspace = true }

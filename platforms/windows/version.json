@@ -1,11 +1,11 @@
 {
   "product": "swarmbotix",
-  "version": "0.1.41",
+  "version": "0.2.1",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.1.41-windows-x86_64",
+  "package_stem": "swarmbotix-0.2.1-windows-x86_64",
   "_generated_fields": "version and package_stem are WRITTEN BY `/sb-release`, not by hand. Canonical version lives in the workspace Cargo.toml; this file mirrors it. Run `/sb-release --verify-only` after editing anything here."
 }

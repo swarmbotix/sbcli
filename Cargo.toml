@@ -13,12 +13,14 @@ members = [
     "crates/sb-listen",
     "crates/sb-launch",
     "crates/sb-gopro",
+    "crates/sb-apps",
+    "crates/sb-update",
     "crates/sb-cli",
 ]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.41"
+version = "0.2.1"
 license = "Apache-2.0"
 rust-version = "1.82"
 
@@ -35,6 +37,8 @@ sb-discover = { path = "crates/sb-discover" }
 sb-listen = { path = "crates/sb-listen" }
 sb-launch = { path = "crates/sb-launch" }
 sb-gopro = { path = "crates/sb-gopro" }
+sb-apps = { path = "crates/sb-apps" }
+sb-update = { path = "crates/sb-update" }
 
 anyhow = "1"
 thiserror = "2"
@@ -55,3 +59,10 @@ prost-build = "0.13"
 prost-reflect = { version = "0.16", features = ["serde"] }
 zenoh = "=1.9.0"
 iceoryx2 = "=0.9.3"
+# `sb update`. ureq's `tls` is rustls with bundled webpki roots: no
+# native-tls/openssl, so the glibc-floor Linux builds stay self-contained.
+# zip reads deflate only; the default bzip2/lzma/zstd/aes stack is dropped.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+semver = "1"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }

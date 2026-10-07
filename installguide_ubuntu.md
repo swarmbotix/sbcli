@@ -20,11 +20,11 @@ pattern — the `.env` switch, `target/` and `dist/` layouts, `build.ps1` /
 plus a checksum beside it, in a per-version, per-platform directory:
 
 ```
-platforms/linux/dist/0.1.41/
-  swarmbotix-0.1.41-linux-x86_64.zip           ← the payload, installer included
-  swarmbotix-0.1.41-linux-x86_64.zip.sha256    ← checksum (sha256sum -c)
-  swarmbotix-0.1.41-linux-aarch64.zip
-  swarmbotix-0.1.41-linux-aarch64.zip.sha256
+platforms/linux/dist/0.2.1/
+  swarmbotix-0.2.1-linux-x86_64.zip           ← the payload, installer included
+  swarmbotix-0.2.1-linux-x86_64.zip.sha256    ← checksum (sha256sum -c)
+  swarmbotix-0.2.1-linux-aarch64.zip
+  swarmbotix-0.2.1-linux-aarch64.zip.sha256
 ```
 
 **The installer is inside the zip**, not beside it. One download is the whole
@@ -79,13 +79,13 @@ of these you actually need — `sb doctor` will tell you what's missing:
 
 ### One-line install
 
-Download the zip for your machine from `platforms/linux/dist/0.1.41/`
+Download the zip for your machine from `platforms/linux/dist/0.2.1/`
 (`uname -m` tells you which; the `.sha256` too if you want to verify), then:
 
 ```bash
-sha256sum -c swarmbotix-0.1.41-linux-x86_64.zip.sha256   # optional
-unzip swarmbotix-0.1.41-linux-x86_64.zip
-./swarmbotix-0.1.41-linux-x86_64/install.sh
+sha256sum -c swarmbotix-0.2.1-linux-x86_64.zip.sha256   # optional
+unzip swarmbotix-0.2.1-linux-x86_64.zip
+./swarmbotix-0.2.1-linux-x86_64/install.sh
 ```
 
 Unzip anywhere except inside `~/.swarmbotix` itself — the installer refuses
@@ -112,7 +112,7 @@ Verify after install:
 
 ```bash
 source ~/.bashrc      # or open a new terminal
-sb --version          # → sb 0.1.41
+sb --version          # → sb 0.2.1
 sb doctor             # lists what's missing on your system
 ```
 
@@ -157,7 +157,7 @@ layout on the target machine".
 For CI, scripts, or anyone tired of being prompted:
 
 ```bash
-./swarmbotix-0.1.41-linux-x86_64/install.sh --yes
+./swarmbotix-0.2.1-linux-x86_64/install.sh --yes
 ```
 
 Auto-accepts the bashrc edit. Everything else is unchanged.
@@ -165,7 +165,7 @@ Auto-accepts the bashrc edit. Everything else is unchanged.
 ### Custom install prefix
 
 ```bash
-SB_HOME=/opt/swarmbotix ./swarmbotix-0.1.41-linux-x86_64/install.sh
+SB_HOME=/opt/swarmbotix ./swarmbotix-0.2.1-linux-x86_64/install.sh
 ```
 
 Installs under `$SB_HOME` instead of `~/.swarmbotix`. You're responsible for
@@ -174,9 +174,19 @@ the bashrc prompt for non-default prefixes).
 
 ### Upgrading
 
-Unzip the newer package and run its `install.sh`. The binary is overwritten;
-your config and edited message files are preserved. Nothing needs uninstalling
-first.
+From `sb 0.2.1` on, `sb` upgrades itself:
+
+```bash
+sb update --check      # installed vs latest release; exit 10 when newer exists
+sb update              # download, verify sha256, run the package's install.sh
+```
+
+`sb --version` also prints `update available: X.Y.Z` when the release page has
+something newer (checked at most once a day; `SB_NO_UPDATE_CHECK=1` disables it).
+
+By hand, same result: unzip the newer package and run its `install.sh`. The
+binary is overwritten; your config, workspaces, installed apps and edited
+message files are preserved. Nothing needs uninstalling first.
 
 ### Uninstalling
 
@@ -246,11 +256,11 @@ platforms/
       uninstall.sh                 ← ditto; also placed in $SB_HOME at install time
       sb.config.yml.template       ← seeded into new installs
     dist/                          ← release output (one dir per version)
-      0.1.41/
-        swarmbotix-0.1.41-linux-x86_64.zip
-        swarmbotix-0.1.41-linux-x86_64.zip.sha256
-        swarmbotix-0.1.41-linux-aarch64.zip
-        swarmbotix-0.1.41-linux-aarch64.zip.sha256
+      0.2.1/
+        swarmbotix-0.2.1-linux-x86_64.zip
+        swarmbotix-0.2.1-linux-x86_64.zip.sha256
+        swarmbotix-0.2.1-linux-aarch64.zip
+        swarmbotix-0.2.1-linux-aarch64.zip.sha256
   windows/                         ← see installguide_windows.md
   mac/                             ← future: when a macOS build exists
 ```
@@ -453,13 +463,13 @@ and [platforms/windows/version.json](platforms/windows/version.json):
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.1.41",
+  "version": "0.2.1",
   "os": "linux",
   "binary": "sb",
   "arch": "linux-x86_64",
   "triple": "x86_64-unknown-linux-gnu",
   "installer": "install.sh",
-  "package_stem": "swarmbotix-0.1.41-linux-x86_64"
+  "package_stem": "swarmbotix-0.2.1-linux-x86_64"
 }
 ```
 
@@ -472,7 +482,7 @@ The seven mirror sites:
 | # | Site | Field |
 |---|---|---|
 | 1 | `Cargo.toml` | `[workspace.package] version` — **canonical** |
-| 2 | `Cargo.lock` | 13 `sb-*` entries — refreshed by `cargo update --workspace` |
+| 2 | `Cargo.lock` | 15 `sb-*` entries — refreshed by `cargo update --workspace` |
 | 3 | `platforms/linux/version.json` | `version`, `package_stem` |
 | 4 | `platforms/windows/version.json` | `version`, `package_stem` |
 | 5 | this file | the Part 1 example paths + expected `sb --version` output |
@@ -498,8 +508,8 @@ besides, since the installer travels inside each zip:
 
 ```bash
 /sb-release                     # bumps all seven mirror sites
-git commit -am "release 0.1.41"
-git tag v0.1.41                 # must match Cargo.toml; CI checks it first
+git commit -am "release 0.2.1"
+git tag v0.2.1                 # must match Cargo.toml; CI checks it first
 git push --follow-tags
 ```
 
