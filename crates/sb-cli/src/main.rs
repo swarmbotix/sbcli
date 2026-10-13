@@ -2366,18 +2366,17 @@ fn compile_style_pass(
             codegen_cfg.string_array_capacity = c;
         }
         let flats = sb_iox2_typegen::flatten(&fds, &codegen_cfg).map_err(anyhow::Error::msg)?;
-        let filtered: Vec<&sb_iox2_typegen::FlatStruct> = match name_filter {
-            Some(n) => {
-                let v: Vec<_> = flats.iter().filter(|s| s.qualified_name() == n).collect();
-                if v.is_empty() {
-                    anyhow::bail!("no message {n} in vault");
-                }
-                v
+        // No output filter: the descriptor set is already the import closure
+        // (protoc ran with --include_imports), and a message's struct can
+        // reference its dependencies' structs (`repeated Vec3` → `[Vec3; N]`),
+        // so every struct in the set must be written.
+        if let Some(n) = name_filter {
+            if !flats.iter().any(|s| s.qualified_name() == n) {
+                anyhow::bail!("no message {n} in vault");
             }
-            None => flats.iter().collect(),
-        };
+        }
         let mut n = 0usize;
-        for s in &filtered {
+        for s in &flats {
             let mut modules: Vec<sb_iox2_typegen::GeneratedModule> = [
                 sb_iox2_typegen::rust::emit as fn(&_) -> _,
                 sb_iox2_typegen::cpp::emit,
@@ -2407,12 +2406,23 @@ fn compile_style_pass(
         println!("iox2: wrote {n} file(s) under {}", out.display());
     }
 
-    // Resolve the .proto source files we'll feed to protoc/flatc.
-    let sources: Vec<PathBuf> = resolve_proto_sources(vault, style, name_filter)?;
     // protoc / flatc get THIS style's definitions dir as the include root —
     // the same one `compile_style` used — so an `import "std/Header.proto"`
     // resolves inside the style that wrote it.
     let defs_root = vault.defs_dir(style);
+    // The .proto files protoc/flatc consume come from the descriptor set, not
+    // from the name filter: protoc ran with --include_imports, so `fds.file`
+    // is already the transitive import closure (one message plus everything
+    // it imports, or the whole style). A single-message compile therefore
+    // stages every dependency too, which is what flatc's `include` needs.
+    // A bundled import (google/protobuf/*.proto) has no file in the vault
+    // and is skipped.
+    let sources: Vec<PathBuf> = fds
+        .file
+        .iter()
+        .map(|f| defs_root.join(f.name().split('/').collect::<PathBuf>()))
+        .filter(|p| p.is_file())
+        .collect();
 
     // ── 4. proto (standard protoc native plugins: --cpp_out + --python_out) ──
     if want_proto {
@@ -2574,33 +2584,6 @@ fn resolve_backends(
         backends,
         note: None,
     })
-}
-
-/// Collect the absolute `.proto` paths the codegen helpers should consume.
-/// Honors the optional fully-qualified `<name>` filter
-/// (e.g. `ros2/std/Header` → one file); otherwise every `.proto` in the
-/// style being compiled.
-fn resolve_proto_sources(
-    vault: &Vault,
-    style: &str,
-    name_filter: Option<&str>,
-) -> Result<Vec<PathBuf>> {
-    if let Some(n) = name_filter {
-        let parsed = MessageName::parse(n).map_err(anyhow::Error::msg)?;
-        let p = vault.path_of(&parsed);
-        if !p.exists() {
-            anyhow::bail!("no message {n} in vault ({})", p.display());
-        }
-        return Ok(vec![p]);
-    }
-    let mut out = Vec::new();
-    for n in vault.list_style(style)? {
-        let p = vault.path_of(&n);
-        if p.exists() {
-            out.push(p);
-        }
-    }
-    Ok(out)
 }
 
 /// `protoc --cpp_out=<out> --python_out=<out> <proto>` per file.
