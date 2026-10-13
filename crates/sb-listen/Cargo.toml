@@ -22,3 +22,5 @@ prost-reflect = { workspace = true }
 zenoh = { workspace = true }
 iceoryx2 = { workspace = true }
 tempfile = { workspace = true }
+minifb = { workspace = true }
+image = { workspace = true }

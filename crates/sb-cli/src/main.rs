@@ -539,6 +539,18 @@ struct TopicListenCli {
     /// Stop after N frames. `0` (default) runs until SIGINT / EOF.
     #[arg(short = 'n', long = "count", default_value_t = 0)]
     count: u64,
+    /// Decode every frame as this vault message (`<style>/<ns>/<Leaf>`),
+    /// overriding the schema the transport or the Header carries.
+    #[arg(long = "type", value_name = "STYLE/NS/LEAF")]
+    type_name: Option<String>,
+    /// Omit `bytes` field contents; print only their `<name>_len`.
+    #[arg(long)]
+    no_data: bool,
+    /// Also draw image frames (`Image` / `CompressedImage`-shaped messages)
+    /// in a window titled with the topic; stdout is unchanged. Closing the
+    /// window or pressing Escape ends the listen. Needs a display.
+    #[arg(long, conflicts_with = "raw")]
+    show: bool,
 }
 
 #[derive(clap::Args)]
@@ -2243,6 +2255,30 @@ fn cmd_message_compile(
     Ok(())
 }
 
+/// iox2 flattening config for `style` as sb.config.yml sets it: what
+/// `sb message compile --iox2` starts from before applying its CLI cap
+/// flags, and what `sb topic listen` uses to rebuild the same layouts.
+fn iox2_codegen_config(cfg: &SbCliConfig, style: &str) -> sb_iox2_typegen::CodegenConfig {
+    let mut codegen_cfg = sb_iox2_typegen::CodegenConfig::default();
+    if let Some(c) = cfg.string_array_cap {
+        codegen_cfg.string_array_capacity = c;
+    }
+    if let Some(map) = cfg.string_array_caps.as_ref() {
+        codegen_cfg.string_array_overrides = map.clone();
+    }
+    if let Some(map) = cfg.bytes_caps.as_ref() {
+        codegen_cfg.bytes_overrides = map.clone();
+    }
+    if let Some(map) = cfg.vec_caps.as_ref() {
+        codegen_cfg.vec_overrides = map.clone();
+    }
+    if let Some(map) = cfg.iox2_variants.as_ref() {
+        codegen_cfg.variants = map.clone();
+    }
+    codegen_cfg.style = style.to_owned();
+    codegen_cfg
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_style_pass(
     cfg: &SbCliConfig,
@@ -2336,23 +2372,7 @@ fn compile_style_pass(
     // ── 3. iox2 (sb-iox2-typegen) ──
     if want_iox2 {
         // Precedence per cap: CLI flag > sb.config.yml > built-in default.
-        let mut codegen_cfg = sb_iox2_typegen::CodegenConfig::default();
-        if let Some(c) = cfg.string_array_cap {
-            codegen_cfg.string_array_capacity = c;
-        }
-        if let Some(map) = cfg.string_array_caps.as_ref() {
-            codegen_cfg.string_array_overrides = map.clone();
-        }
-        if let Some(map) = cfg.bytes_caps.as_ref() {
-            codegen_cfg.bytes_overrides = map.clone();
-        }
-        if let Some(map) = cfg.vec_caps.as_ref() {
-            codegen_cfg.vec_overrides = map.clone();
-        }
-        if let Some(map) = cfg.iox2_variants.as_ref() {
-            codegen_cfg.variants = map.clone();
-        }
-        codegen_cfg.style = style.to_owned();
+        let mut codegen_cfg = iox2_codegen_config(cfg, style);
         if let Some(c) = string_cap {
             codegen_cfg.string_capacity = c;
         }
@@ -3088,72 +3108,338 @@ fn cmd_topic_list(a: TopicListCli) -> Result<()> {
 }
 
 fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
-    use sb_listen::FrameIter;
+    use sb_listen::{FrameIter, FramePoll};
     let resolved = resolve_topic_for_runtime(&a.topic)?;
     let transport_tag = match a.transport {
         TransportArg::Zenoh => "zenoh",
         TransportArg::Iceoryx2 => "iceoryx2",
     };
-    // Best-effort: build a dynamic-decode pool from the vault's
-    // FileDescriptorSet so payload bodies render as decoded JSON. The
-    // failure path (no protoc, vault empty, etc.) is non-fatal — we
-    // just fall back to the hex-only `decode_frame`. The warning lands
-    // on stderr so users know why they're getting hex instead of JSON.
-    let pool = match build_descriptor_pool() {
-        Ok(p) => Some(p),
+    // Best-effort: compile the vault so payload bodies render as decoded
+    // JSON (protobuf descriptors; plus the iox2 flat layouts when listening
+    // on iceoryx2). The failure path (no protoc, vault empty, etc.) is
+    // non-fatal — frames then render as hex, still with whatever schema
+    // the flag, the wire, or the Header names. The warning lands on stderr
+    // so users know why they're getting hex instead of JSON.
+    let decoders = match ListenDecoders::build(matches!(a.transport, TransportArg::Iceoryx2)) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("warning: dynamic decode disabled ({e:#}); rendering payload as hex");
-            None
+            ListenDecoders::default()
         }
     };
-    let mut iter: Box<dyn FrameIter> = match a.transport {
-        TransportArg::Zenoh => Box::new(sb_listen::listen_zenoh(&resolved.full_topic)?),
-        TransportArg::Iceoryx2 => Box::new(sb_listen::listen_iceoryx(&resolved.full_topic)?),
+    // No display (headless box) is fatal for `--show`, and is reported
+    // before anything subscribes.
+    let mut view = if a.show {
+        Some(sb_listen::view::ImageView::open(&resolved.full_topic)?)
+    } else {
+        None
     };
+    let (mut iter, payload): (Box<dyn FrameIter>, Option<sb_listen::Iox2PayloadDetail>) =
+        match a.transport {
+            TransportArg::Zenoh => (
+                Box::new(sb_listen::listen_zenoh(&resolved.full_topic)?),
+                None,
+            ),
+            TransportArg::Iceoryx2 => {
+                let frames = sb_listen::listen_iceoryx(&resolved.full_topic)?;
+                let payload = frames.payload_detail().clone();
+                (Box::new(frames), Some(payload))
+            }
+        };
+    // `--show` decodes with `bytes` fields whole so the viewer gets the
+    // pixels; `summarize_bytes` below then applies the stdout rules, so the
+    // printed line is the same with or without the window.
+    let ctx = sb_listen::DecodeContext {
+        pool: decoders.pool.as_ref(),
+        iox2: sb_listen::Iox2Lookup {
+            structs: &decoders.iox2,
+            payload: payload.as_ref(),
+        },
+        no_data: a.no_data,
+        keep_bytes: a.show,
+    };
+    let mut warned_no_schema = false;
+    let mut warned_view = false;
     let mut emitted: u64 = 0;
     loop {
         if a.count != 0 && emitted >= a.count {
             return Ok(());
         }
-        match iter.next_frame()? {
-            None => return Ok(()),
-            Some(bytes) => {
-                let frame = match &pool {
-                    Some(pool) => sb_listen::decode_frame_dynamic(
-                        transport_tag,
-                        &resolved.full_topic,
-                        &bytes,
-                        a.raw,
-                        pool,
-                    ),
-                    None => {
-                        sb_listen::decode_frame(transport_tag, &resolved.full_topic, &bytes, a.raw)
+        let frame = match view.as_mut() {
+            None => match iter.next_frame()? {
+                Some(frame) => frame,
+                None => return Ok(()),
+            },
+            // Keep the window handling its events between samples.
+            Some(view) => match iter.poll_frame(VIEW_IDLE_POLL)? {
+                FramePoll::Frame(frame) => frame,
+                FramePoll::Timeout => {
+                    if !view.pump()? {
+                        return Ok(());
                     }
-                };
-                println!("{}", sb_listen::render_decoded_json_line(&frame));
-                emitted += 1;
-            }
+                    continue;
+                }
+                FramePoll::Closed => return Ok(()),
+            },
+        };
+        let mut decoded = sb_listen::decode_frame_dynamic(
+            transport_tag,
+            &resolved.full_topic,
+            &frame,
+            a.raw,
+            a.type_name.as_deref(),
+            &ctx,
+        );
+        if !a.raw && decoded.schema.is_none() && !warned_no_schema {
+            warned_no_schema = true;
+            eprintln!(
+                "warning: no schema on the wire for {}; re-render the publisher with \
+                 `sb pub edit <name> -m <type>` or pass --type <style>/<ns>/<Leaf>",
+                resolved.full_topic
+            );
+        }
+        let window_open = match view.as_mut() {
+            Some(view) => show_decoded(view, &decoded, &mut warned_view)?,
+            None => true,
+        };
+        decoded.summarize_bytes(a.no_data);
+        println!("{}", sb_listen::render_decoded_json_line(&decoded));
+        emitted += 1;
+        if !window_open {
+            return Ok(());
         }
     }
 }
 
-/// Build a [`DescriptorPool`] from the vault for `sb topic listen`.
-/// Compiles lazily on each call — fast enough for the one-shot `sb topic
-/// listen` invocation, and keeps the cache invariant of "always reflects
-/// what's in the vault NOW". Returns an error when:
-///   - `protoc` is missing from sb.config.yml,
-///   - the vault is empty (no `.proto` files),
-///   - no style in the vault compiled (per-style failures are warned
-///     on stderr by [`sb_listen::build_pool`] and skipped).
-fn build_descriptor_pool() -> Result<prost_reflect::DescriptorPool> {
-    let cfg = load_config()?;
-    let vctx = vault_for(&cfg)?;
-    vctx.ensure_installed()?;
-    let protoc = cfg
-        .protoc
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("no protoc in sb.config.yml"))?;
-    sb_listen::build_pool(vctx.vault(), protoc)
+/// How long `sb topic listen --show` waits for a frame before pumping the
+/// window's events again (about one 60 Hz refresh).
+const VIEW_IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Draw one decoded frame in the `--show` window if it carries an image
+/// (at the top level or one level down, see [`sb_listen::image_fields`]),
+/// else just pump the window. Returns `Ok(false)` once the window was
+/// closed.
+///
+/// A frame the viewer cannot draw (unknown encoding, data shorter than the
+/// geometry, an undecodable compressed payload) is not fatal: the first such
+/// failure is reported on stderr, later ones are not, and the window keeps
+/// the last good frame.
+fn show_decoded(
+    view: &mut sb_listen::view::ImageView,
+    decoded: &sb_listen::DecodedFrame<'_>,
+    warned: &mut bool,
+) -> Result<bool> {
+    let sb_listen::FramePayload::Json {
+        json: serde_json::Value::Object(obj),
+    } = &decoded.payload
+    else {
+        return view.pump();
+    };
+    let shown = if let Some(img) = sb_listen::extract_image(obj) {
+        view.show_raw(img.width, img.height, &img.encoding, img.step, &img.data)
+    } else if let Some((format, data)) = sb_listen::extract_compressed(obj) {
+        view.show_compressed(&format, &data)
+    } else {
+        return view.pump();
+    };
+    match shown {
+        Ok(open) => Ok(open),
+        Err(e) => {
+            if !*warned {
+                *warned = true;
+                eprintln!(
+                    "warning: --show cannot draw a frame of {}: {e:#} (further draw errors \
+                     are not reported)",
+                    decoded.topic
+                );
+            }
+            view.pump()
+        }
+    }
+}
+
+/// What `sb topic listen` decodes payload bodies with, compiled from the
+/// vault. `Default` is the empty set (every body renders as hex).
+#[derive(Default)]
+struct ListenDecoders {
+    /// Protobuf descriptors for every style that compiled.
+    pool: Option<prost_reflect::DescriptorPool>,
+    /// iox2 flat layouts for every style that flattened. Empty unless
+    /// requested.
+    iox2: Vec<sb_listen::Iox2Struct>,
+}
+
+impl ListenDecoders {
+    /// Compile each vault style once (`protoc`) and build the protobuf pool
+    /// from it, plus the iox2 layouts when `with_iox2`. Errors when:
+    ///   - `protoc` is missing from sb.config.yml,
+    ///   - the vault is empty (no `.proto` files),
+    ///   - no style in the vault compiled (per-style failures are warned
+    ///     on stderr by [`sb_listen::compile_styles`] and skipped).
+    fn build(with_iox2: bool) -> Result<Self> {
+        let cfg = load_config()?;
+        let vctx = vault_for(&cfg)?;
+        vctx.ensure_installed()?;
+        let protoc = cfg
+            .protoc
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no protoc in sb.config.yml"))?;
+        let styles = sb_listen::compile_styles(vctx.vault(), protoc)?;
+        let pool = sb_listen::pool_from_styles(&styles)?;
+        let iox2 = if with_iox2 {
+            iox2_layouts_for_styles(&cfg, &styles)
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            pool: Some(pool),
+            iox2,
+        })
+    }
+}
+
+/// Flatten each compiled style exactly as `sb message compile --iox2` does
+/// (sb.config.yml caps; CLI cap flags given at compile time are not known
+/// here, and a layout built with other caps simply fails the size match
+/// against the live payload). A style that does not flatten is warned
+/// about and skipped. Sorted by vault name so ties resolve the same way
+/// every run.
+fn iox2_layouts_for_styles(
+    cfg: &SbCliConfig,
+    styles: &[sb_listen::CompiledStyle],
+) -> Vec<sb_listen::Iox2Struct> {
+    use prost::Message;
+
+    let mut out = Vec::new();
+    for compiled in styles {
+        let flats = prost_types::FileDescriptorSet::decode(compiled.descriptor_set.as_slice())
+            .map_err(|e| e.to_string())
+            .and_then(|fds| {
+                sb_iox2_typegen::flatten(&fds, &iox2_codegen_config(cfg, &compiled.style))
+                    .map_err(|e| e.to_string())
+            });
+        match flats {
+            Ok(flats) => out.extend(iox2_layouts(&flats)),
+            Err(e) => eprintln!(
+                "warning: iceoryx2 decode skipped for style {} ({e})",
+                compiled.style
+            ),
+        }
+    }
+    out.sort_by(|a, b| {
+        (a.qualified_name.as_str(), a.leaf.as_str()).cmp(&(&b.qualified_name, &b.leaf))
+    });
+    out
+}
+
+/// Translate one style's flattened structs into the layouts sb-listen
+/// decodes with, resolving each `repeated <Message>` element to its own
+/// layout. A struct whose element type is missing from `flats` (or that
+/// reaches itself) is dropped: the emitted code could not compile either.
+fn iox2_layouts(flats: &[sb_iox2_typegen::FlatStruct]) -> Vec<sb_listen::Iox2Struct> {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    use sb_iox2_typegen::{FlatStruct, FlatType, ScalarTy};
+    use sb_listen::{Iox2Field, Iox2Scalar, Iox2Struct, Iox2Type};
+
+    type Key<'f> = (&'f str, &'f str);
+
+    struct Resolver<'f> {
+        by_key: HashMap<Key<'f>, &'f FlatStruct>,
+        done: HashMap<Key<'f>, Option<Arc<Iox2Struct>>>,
+        visiting: HashSet<Key<'f>>,
+    }
+
+    fn scalar(s: ScalarTy) -> Iox2Scalar {
+        match s {
+            ScalarTy::Bool => Iox2Scalar::Bool,
+            ScalarTy::I32 => Iox2Scalar::I32,
+            ScalarTy::I64 => Iox2Scalar::I64,
+            ScalarTy::U32 => Iox2Scalar::U32,
+            ScalarTy::U64 => Iox2Scalar::U64,
+            ScalarTy::F32 => Iox2Scalar::F32,
+            ScalarTy::F64 => Iox2Scalar::F64,
+        }
+    }
+
+    fn cap(n: u32) -> usize {
+        usize::try_from(n).unwrap_or(usize::MAX)
+    }
+
+    impl<'f> Resolver<'f> {
+        fn resolve(&mut self, key: Key<'f>) -> Option<Arc<Iox2Struct>> {
+            if let Some(hit) = self.done.get(&key) {
+                return hit.clone();
+            }
+            let flat = *self.by_key.get(&key)?;
+            if !self.visiting.insert(key) {
+                return None;
+            }
+            let fields = flat
+                .fields
+                .iter()
+                .map(|f| {
+                    let ty = match &f.ty {
+                        FlatType::Scalar(s) => Iox2Type::Scalar(scalar(*s)),
+                        FlatType::String { capacity } => Iox2Type::String {
+                            capacity: cap(*capacity),
+                        },
+                        FlatType::Bytes { capacity } => Iox2Type::Bytes {
+                            capacity: cap(*capacity),
+                        },
+                        FlatType::RepeatedScalar { elem, capacity } => Iox2Type::RepeatedScalar {
+                            elem: scalar(*elem),
+                            capacity: cap(*capacity),
+                        },
+                        FlatType::RepeatedString {
+                            string_capacity,
+                            capacity,
+                        } => Iox2Type::RepeatedString {
+                            string_capacity: cap(*string_capacity),
+                            capacity: cap(*capacity),
+                        },
+                        FlatType::RepeatedStruct {
+                            target_leaf,
+                            target_package,
+                            capacity,
+                        } => Iox2Type::RepeatedStruct {
+                            elem: self.resolve((target_package, target_leaf))?,
+                            capacity: cap(*capacity),
+                        },
+                    };
+                    Some(Iox2Field {
+                        name: f.name.clone(),
+                        ty,
+                    })
+                })
+                .collect::<Option<Vec<_>>>();
+            self.visiting.remove(&key);
+            let layout = fields.map(|fields| {
+                Arc::new(Iox2Struct {
+                    qualified_name: flat.qualified_name(),
+                    leaf: flat.leaf.clone(),
+                    fields,
+                })
+            });
+            self.done.insert(key, layout.clone());
+            layout
+        }
+    }
+
+    let mut resolver = Resolver {
+        by_key: flats
+            .iter()
+            .map(|s| ((s.package.as_str(), s.leaf.as_str()), s))
+            .collect(),
+        done: HashMap::new(),
+        visiting: HashSet::new(),
+    };
+    flats
+        .iter()
+        .filter_map(|s| resolver.resolve((&s.package, &s.leaf)))
+        .map(|layout| (*layout).clone())
+        .collect()
 }
 
 fn cmd_topic_prune(a: TopicPruneCli) -> Result<()> {

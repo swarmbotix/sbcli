@@ -48,5 +48,5 @@ fn sb_topic_pub_round_trips_through_zenoh() {
         .expect("subscriber did not receive frame in 5 s");
     let _ = sub_handle.join();
 
-    assert_eq!(frame, Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    assert_eq!(frame.map(|f| f.bytes), Some(vec![0xde, 0xad, 0xbe, 0xef]));
 }

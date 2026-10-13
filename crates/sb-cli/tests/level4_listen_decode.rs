@@ -8,6 +8,10 @@
 //! subprocess for the unit-of-decode contract — the end-to-end CLI path
 //! is covered by [level4_e2e_rust_stamped.rs](level4_e2e_rust_stamped.rs).
 //!
+//! A third test publishes a plain (Header-less) protobuf with the vault
+//! name in the Zenoh encoding schema, the way regenerated publishers do,
+//! and checks the decoder takes the schema from the wire.
+//!
 //! `#[ignore]`'d because building the pool runs `protoc`.
 
 mod common;
@@ -21,8 +25,9 @@ use std::time::Duration;
 use prost::Message;
 use prost_reflect::DescriptorPool;
 use sb_discover::{HeaderProbe, MetadataProbe, StampedProbe};
-use sb_listen::{FrameIter, FramePayload, decode_frame_dynamic, listen_zenoh};
+use sb_listen::{DecodeContext, FrameIter, FramePayload, decode_frame_dynamic, listen_zenoh};
 use zenoh::Wait;
+use zenoh::bytes::Encoding;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -112,14 +117,18 @@ fn listen_dynamic_decodes_stringstamped_data_field_to_json() {
 
     // Listen for one frame.
     let mut sub = listen_zenoh(key).expect("listen_zenoh");
-    let bytes = sub
+    let received = sub
         .next_frame()
         .expect("next_frame")
         .expect("subscriber should receive at least one sample");
     stop.store(true, Ordering::Relaxed);
     let _ = pub_handle.join();
 
-    let frame = decode_frame_dynamic("zenoh", key, &bytes, false, &pool);
+    let ctx = DecodeContext {
+        pool: Some(&pool),
+        ..DecodeContext::default()
+    };
+    let frame = decode_frame_dynamic("zenoh", key, &received, false, None, &ctx);
     assert_eq!(frame.schema.as_deref(), Some("ros2/std/StringStamped"));
     assert_eq!(frame.encoding, Some("protobuf"));
     let json = match &frame.payload {
@@ -159,10 +168,14 @@ fn listen_dynamic_falls_back_to_hex_for_foreign_bytes() {
     });
     thread::sleep(Duration::from_millis(300));
     let mut sub = listen_zenoh(key).expect("listen_zenoh");
-    let bytes = sub.next_frame().unwrap().unwrap();
+    let received = sub.next_frame().unwrap().unwrap();
     stop.store(true, Ordering::Relaxed);
     let _ = h.join();
-    let frame = decode_frame_dynamic("zenoh", key, &bytes, false, &pool);
+    let ctx = DecodeContext {
+        pool: Some(&pool),
+        ..DecodeContext::default()
+    };
+    let frame = decode_frame_dynamic("zenoh", key, &received, false, None, &ctx);
     assert!(
         frame.schema.is_none(),
         "foreign bytes should leave schema null"
@@ -171,4 +184,55 @@ fn listen_dynamic_falls_back_to_hex_for_foreign_bytes() {
         FramePayload::Hex { .. } => {}
         other => panic!("expected Hex fallback, got {other:?}"),
     }
+}
+
+/// A Header-less `std/String` carries its vault name only in the Zenoh
+/// encoding schema (`application/protobuf;ros2/std/String`). The listener
+/// must surface that schema on the frame and decode with it.
+#[test]
+#[ignore = "live zenoh + protoc — run with --ignored"]
+fn listen_dynamic_takes_schema_from_zenoh_encoding() {
+    let key = "test/lvl4/listen_decode/wire_schema";
+    let pool = build_pool();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_t = Arc::clone(&stop);
+    let h = thread::spawn(move || {
+        let session = zenoh::open(zenoh::Config::default()).wait().unwrap();
+        let pubr = session
+            .declare_publisher(key)
+            .encoding(Encoding::APPLICATION_PROTOBUF.with_schema("ros2/std/String"))
+            .wait()
+            .unwrap();
+        // std/String: field 1 `data` (length-delimited). No Header, so
+        // only the encoding schema can name the type.
+        let data = b"hello-from-wire";
+        let mut wire = vec![0x0a];
+        prost::encoding::encode_varint(data.len() as u64, &mut wire);
+        wire.extend_from_slice(data);
+        while !stop_t.load(Ordering::Relaxed) {
+            let _ = pubr.put(wire.clone()).wait();
+            thread::sleep(Duration::from_millis(100));
+        }
+        let _ = pubr.undeclare().wait();
+        let _ = session.close().wait();
+    });
+    thread::sleep(Duration::from_millis(300));
+    let mut sub = listen_zenoh(key).expect("listen_zenoh");
+    let received = sub.next_frame().unwrap().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let _ = h.join();
+    assert_eq!(received.wire_schema.as_deref(), Some("ros2/std/String"));
+
+    let ctx = DecodeContext {
+        pool: Some(&pool),
+        ..DecodeContext::default()
+    };
+    let frame = decode_frame_dynamic("zenoh", key, &received, false, None, &ctx);
+    assert_eq!(frame.schema.as_deref(), Some("ros2/std/String"));
+    assert_eq!(frame.schema_source, Some("wire"));
+    let json = match &frame.payload {
+        FramePayload::Json { json } => json.clone(),
+        other => panic!("expected Json payload, got {other:?}"),
+    };
+    assert_eq!(json["data"], "hello-from-wire", "decoded payload: {json}");
 }

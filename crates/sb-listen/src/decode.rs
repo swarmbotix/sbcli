@@ -5,20 +5,77 @@
 //! - [`decode_frame`] — Header-probe-only. Lifts `schema` and tags
 //!   `encoding: "protobuf"` for any Header-leading `*Stamped` payload,
 //!   but always renders the body as hex. Used when the caller has no
-//!   FileDescriptorPool handy.
-//! - [`decode_frame_dynamic`] — same shape, but consumes a
-//!   [`prost_reflect::DescriptorPool`] (typically built from the vault's
-//!   FileDescriptorSet) and decodes the payload into a JSON object using
-//!   the schema named by the Header probe. Falls back to hex on any
-//!   miss (schema unknown to the pool, decode error, etc.) so the CLI
-//!   surface never silently lies about what's on the wire.
+//!   decode resources handy.
+//! - [`decode_frame_dynamic`] — resolves the schema, then decodes the body
+//!   into a JSON object. Falls back to hex on any miss (schema unknown,
+//!   decode error, layout size mismatch) so the CLI surface never silently
+//!   lies about what's on the wire.
+//!
+//! Schema resolution order in [`decode_frame_dynamic`], first hit wins; the
+//! winner is reported in the `schema_source` column:
+//!
+//! 1. `"flag"`   — `--type <style>/<ns>/<Leaf>` from the command line.
+//! 2. `"wire"`   — what the transport carried: Zenoh's encoding schema (a
+//!    vault name) or the iceoryx2 service's payload type name (a
+//!    language-native name, mapped to a vault iox2 struct by leaf + size).
+//! 3. `"header"` — the swarmbotix `Header.metadata.msg_type` probe.
+//!
+//! Nothing resolved → hex with a null schema.
+//!
+//! Protobuf bodies decode through a [`DescriptorPool`]; iceoryx2 bodies are
+//! `#[repr(C)]` structs and decode through [`crate::iox2_decode`]. `bytes`
+//! fields render the same way on both paths: inline when at most
+//! [`BYTES_INLINE_MAX`] bytes, otherwise as `{"len": N, "head_hex": …}`, and
+//! dropped (only `<name>_len` kept) under `no_data`. With
+//! [`DecodeContext::keep_bytes`] the body keeps every `bytes` field whole (for
+//! `sb topic listen --show`), and [`DecodedFrame::summarize_bytes`] applies
+//! those rules afterwards, so stdout is the same either way.
 //!
 //! `--raw` short-circuits BOTH paths to hex + null schema.
 
-use prost_reflect::{DescriptorPool, DynamicMessage};
+use prost_reflect::{DescriptorPool, DynamicMessage, Kind, ReflectMessage, Value as ProtoValue};
 use sb_discover::probe_header;
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::Frame;
+use crate::iceoryx::Iox2PayloadDetail;
+use crate::iox2_decode::{
+    Iox2DecodeOptions, Iox2Packing, Iox2Struct, decode_iox2_struct, summarize_iox2_bytes,
+};
+
+/// Transport tag that selects iceoryx2 `#[repr(C)]` decoding for flag and
+/// wire schemas. Matches what `sb topic listen` passes as `transport`.
+const TRANSPORT_ICEORYX2: &str = "iceoryx2";
+
+const ENCODING_PROTOBUF: &str = "protobuf";
+/// Body is an iceoryx2 flat `#[repr(C)]` struct (the `--iox2` backend).
+const ENCODING_IOX2: &str = "iox2";
+
+/// A `bytes` field longer than this renders as a summary object instead of
+/// its full contents.
+pub(crate) const BYTES_INLINE_MAX: usize = 64;
+/// How many leading bytes a summary object shows in `head_hex`.
+pub(crate) const BYTES_HEAD_LEN: usize = 16;
+
+/// Where [`decode_frame_dynamic`] found the schema. Serialized into the
+/// `schema_source` column via [`SchemaSource::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaSource {
+    Flag,
+    Wire,
+    Header,
+}
+
+impl SchemaSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Wire => "wire",
+            Self::Header => "header",
+        }
+    }
+}
 
 /// One frame as the CLI hands it to stdout. Field order is pinned —
 /// snapshot tests assert against it, and downstream tooling (swarmctl)
@@ -28,9 +85,45 @@ pub struct DecodedFrame<'a> {
     pub transport: &'a str,
     pub topic: &'a str,
     pub schema: Option<String>,
+    /// `"flag"` | `"wire"` | `"header"`: which source supplied `schema`.
+    /// `None` whenever `schema` is `None`.
+    pub schema_source: Option<&'static str>,
     pub hash: Option<String>,
     pub encoding: Option<&'static str>,
     pub payload: FramePayload,
+    /// Set when the body was decoded with [`DecodeContext::keep_bytes`]:
+    /// what [`Self::summarize_bytes`] needs to find the `bytes` fields.
+    #[serde(skip)]
+    unsummarized: Option<BytesSchema<'a>>,
+}
+
+/// Schema of a body whose `bytes` fields are still whole. The JSON alone
+/// cannot say which fields are `bytes`: protobuf renders them as base64
+/// strings (indistinguishable from text) and iox2 as number arrays
+/// (indistinguishable from a repeated integer).
+#[derive(Debug, Clone)]
+enum BytesSchema<'a> {
+    Protobuf(DynamicMessage),
+    Iox2(&'a Iox2Struct),
+}
+
+impl DecodedFrame<'_> {
+    /// Apply the `bytes` rendering rules (summary above
+    /// [`BYTES_INLINE_MAX`], `no_data`) to a body decoded with
+    /// [`DecodeContext::keep_bytes`], producing exactly what a decode
+    /// without it would have printed. A no-op for every other frame.
+    pub fn summarize_bytes(&mut self, no_data: bool) {
+        let Some(schema) = self.unsummarized.take() else {
+            return;
+        };
+        let FramePayload::Json { json } = &mut self.payload else {
+            return;
+        };
+        match schema {
+            BytesSchema::Protobuf(msg) => shape_proto_bytes(&msg, json, no_data),
+            BytesSchema::Iox2(layout) => summarize_iox2_bytes(layout, json, no_data),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +131,36 @@ pub struct DecodedFrame<'a> {
 pub enum FramePayload {
     Hex { bytes: String },
     Json { json: Value },
+}
+
+/// Everything [`decode_frame_dynamic`] needs beyond the frame itself. Built
+/// once per listen session; every member is optional, and a missing one only
+/// narrows which bodies can be decoded (the rest fall back to hex).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecodeContext<'a> {
+    /// Protobuf descriptors for the vault, see [`crate::build_pool`].
+    pub pool: Option<&'a DescriptorPool>,
+    /// iceoryx2 layouts plus the live service's payload type.
+    pub iox2: Iox2Lookup<'a>,
+    /// Drop `bytes` field contents and keep only their `<name>_len`.
+    pub no_data: bool,
+    /// Keep every `bytes` field whole in the decoded body, ignoring the
+    /// summary rule and `no_data`, for a consumer that needs the data (the
+    /// `--show` viewer). Call [`DecodedFrame::summarize_bytes`] before
+    /// printing.
+    pub keep_bytes: bool,
+}
+
+/// What maps an iceoryx2 payload to a vault message.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Iox2Lookup<'a> {
+    /// Every vault message flattened for iceoryx2, as `sb message compile
+    /// --iox2` would emit it.
+    pub structs: &'a [Iox2Struct],
+    /// The live service's payload type ([`crate::IceoryxFrames::payload_detail`]).
+    /// Its `size` picks between same-leaf candidates and between the natural
+    /// and packed layouts; without it the frame length stands in.
+    pub payload: Option<&'a Iox2PayloadDetail>,
 }
 
 /// Decode `bytes` into a [`DecodedFrame`]. `raw=true` short-circuits the
@@ -56,77 +179,297 @@ pub fn decode_frame<'a>(
             .map(|m| m.msg_type)
             .filter(|s| !s.is_empty())
     };
-    DecodedFrame {
-        transport,
-        topic,
-        schema: schema.clone(),
-        hash: None,
-        encoding: if schema.is_some() {
-            Some("protobuf")
-        } else {
-            None
-        },
-        payload: FramePayload::Hex {
-            bytes: hex_string(bytes),
-        },
-    }
+    let (source, encoding) = if schema.is_some() {
+        (Some(SchemaSource::Header), Some(ENCODING_PROTOBUF))
+    } else {
+        (None, None)
+    };
+    hex_frame(transport, topic, schema, source, encoding, bytes)
 }
 
-/// Decode + dynamically deserialize the payload if the pool knows the
-/// schema. Falls back to [`decode_frame`]'s hex when:
-///   - `raw=true` (forced hex),
-///   - Header probe failed (foreign payload),
-///   - the schema name doesn't resolve in the pool,
-///   - or the dynamic decode failed (corrupt / wrong-schema bytes).
+/// Resolve the schema (`type_override` > `frame.wire_schema` > Header
+/// probe) and decode the body with it.
+///
+/// - `transport == "iceoryx2"` with a flag or wire schema decodes the body
+///   as a `#[repr(C)]` struct from `ctx.iox2`. A wire type name maps to the
+///   vault struct with the same leaf (last `::` / `.` segment) whose layout
+///   size equals the payload's; no match renders hex with the native name
+///   as `schema`. A `--type` that matches no iox2 layout is tried as
+///   protobuf next (a `[u8]` slab may carry protobuf bytes).
+/// - Everything else decodes as protobuf through `ctx.pool`.
+///
+/// Falls back to hex when `raw` is set, nothing resolved the schema, the
+/// schema is unknown, or the body does not decode with it.
 pub fn decode_frame_dynamic<'a>(
     transport: &'a str,
     topic: &'a str,
-    bytes: &[u8],
+    frame: &Frame,
     raw: bool,
-    pool: &DescriptorPool,
+    type_override: Option<&str>,
+    ctx: &DecodeContext<'a>,
 ) -> DecodedFrame<'a> {
     if raw {
-        return decode_frame(transport, topic, bytes, raw);
+        return decode_frame(transport, topic, &frame.bytes, true);
     }
-    let Some(schema) = probe_header(bytes)
+    let Some((schema, source)) = resolve_schema(type_override, frame) else {
+        return hex_frame(transport, topic, None, None, None, &frame.bytes);
+    };
+    if transport == TRANSPORT_ICEORYX2 && source != SchemaSource::Header {
+        if let Some((layout, decoded)) = decode_iox2(&schema, source, &frame.bytes, ctx) {
+            let name = layout.qualified_name.clone();
+            return match decoded {
+                Some(json) => DecodedFrame {
+                    transport,
+                    topic,
+                    schema: Some(name),
+                    schema_source: Some(source.as_str()),
+                    hash: None,
+                    encoding: Some(ENCODING_IOX2),
+                    payload: FramePayload::Json { json },
+                    unsummarized: ctx.keep_bytes.then_some(BytesSchema::Iox2(layout)),
+                },
+                None => hex_frame(
+                    transport,
+                    topic,
+                    Some(name),
+                    Some(source),
+                    Some(ENCODING_IOX2),
+                    &frame.bytes,
+                ),
+            };
+        }
+        if source == SchemaSource::Wire {
+            // A typed service whose type maps to no vault layout: keep the
+            // native name so the user sees what is on the wire.
+            return hex_frame(
+                transport,
+                topic,
+                Some(schema),
+                Some(source),
+                Some(ENCODING_IOX2),
+                &frame.bytes,
+            );
+        }
+    }
+    decode_protobuf(transport, topic, schema, source, &frame.bytes, ctx)
+}
+
+/// First hit of `type_override`, `frame.wire_schema`, Header probe.
+fn resolve_schema(type_override: Option<&str>, frame: &Frame) -> Option<(String, SchemaSource)> {
+    if let Some(t) = type_override.map(str::trim).filter(|t| !t.is_empty()) {
+        return Some((t.to_owned(), SchemaSource::Flag));
+    }
+    if let Some(w) = frame.wire_schema.as_deref().filter(|w| !w.is_empty()) {
+        return Some((w.to_owned(), SchemaSource::Wire));
+    }
+    probe_header(&frame.bytes)
         .map(|m| m.msg_type)
         .filter(|s| !s.is_empty())
-    else {
-        return decode_frame(transport, topic, bytes, raw);
+        .map(|s| (s, SchemaSource::Header))
+}
+
+/// Pick the vault iox2 layout for `schema` and decode `bytes` with it.
+///
+/// `None` when no layout matches. Otherwise the chosen layout, plus the
+/// decoded body (`None` if the bytes do not fit it).
+fn decode_iox2<'a>(
+    schema: &str,
+    source: SchemaSource,
+    bytes: &[u8],
+    ctx: &DecodeContext<'a>,
+) -> Option<(&'a Iox2Struct, Option<Value>)> {
+    let payload = ctx.iox2.payload;
+    let elem_size = payload
+        .map(|p| p.size)
+        .filter(|&n| n > 0)
+        .unwrap_or(bytes.len());
+    let candidates: Vec<&'a Iox2Struct> = match source {
+        SchemaSource::Wire => {
+            let leaf = native_leaf(schema);
+            ctx.iox2.structs.iter().filter(|s| s.leaf == leaf).collect()
+        }
+        _ => ctx
+            .iox2
+            .structs
+            .iter()
+            .filter(|s| matches_vault_name(s, schema))
+            .collect(),
     };
-    let Some(desc) = protobuf_name_candidates(&schema)
-        .iter()
-        .find_map(|n| pool.get_message_by_name(n))
-    else {
+    // Natural (Rust / C++) first; packed covers Python ctypes and C#.
+    let (layout, packing) = [Iox2Packing::Natural, Iox2Packing::Packed]
+        .into_iter()
+        .find_map(|p| {
+            candidates
+                .iter()
+                .find(|s| s.size(p) == elem_size)
+                .map(|s| (*s, p))
+        })?;
+    let opts = Iox2DecodeOptions {
+        packing,
+        no_data: ctx.no_data,
+        keep_bytes: ctx.keep_bytes,
+    };
+    let is_slice = payload.is_some_and(|p| p.is_slice);
+    let decoded = if is_slice && elem_size > 0 && bytes.len() % elem_size == 0 {
+        bytes
+            .chunks_exact(elem_size)
+            .map(|chunk| decode_iox2_struct(layout, chunk, opts))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+            .map(Value::Array)
+    } else {
+        decode_iox2_struct(layout, bytes, opts).ok()
+    };
+    Some((layout, decoded))
+}
+
+/// Leaf of a language-native type name: the last `::` (Rust, C++) or `.`
+/// (Python, C#) segment. `my_crate::iox2_types::std::StringStamped` →
+/// `StringStamped`.
+fn native_leaf(type_name: &str) -> &str {
+    let tail = type_name.rsplit("::").next().unwrap_or(type_name);
+    tail.rsplit('.').next().unwrap_or(tail)
+}
+
+/// Whether `name` (from `--type`) names `layout`: the full
+/// `<style>/<ns>/<Leaf>`, the same with a variant's struct name as leaf, or
+/// the legacy two-segment `<ns>/<Leaf>`.
+fn matches_vault_name(layout: &Iox2Struct, name: &str) -> bool {
+    let name = name.trim_matches('/');
+    let qualified = layout.qualified_name.as_str();
+    if qualified == name || qualified.ends_with(&format!("/{name}")) {
+        return true;
+    }
+    qualified
+        .rsplit_once('/')
+        .is_some_and(|(dir, _)| name == format!("{dir}/{}", layout.leaf))
+}
+
+/// Protobuf half of [`decode_frame_dynamic`].
+fn decode_protobuf<'a>(
+    transport: &'a str,
+    topic: &'a str,
+    schema: String,
+    source: SchemaSource,
+    bytes: &[u8],
+    ctx: &DecodeContext<'_>,
+) -> DecodedFrame<'a> {
+    let desc = ctx.pool.and_then(|pool| {
+        protobuf_name_candidates(&schema)
+            .iter()
+            .find_map(|n| pool.get_message_by_name(n))
+    });
+    let Some(desc) = desc else {
         // Schema known to publisher but not in the consumer's pool —
         // fall through to hex with a populated schema column so the
-        // user knows what they're missing.
-        return DecodedFrame {
+        // user knows what they're missing. Only a Header probe proves
+        // the body is protobuf; a flag or wire name alone does not.
+        let encoding = (source == SchemaSource::Header).then_some(ENCODING_PROTOBUF);
+        return hex_frame(
             transport,
             topic,
-            schema: Some(schema),
-            hash: None,
-            encoding: Some("protobuf"),
-            payload: FramePayload::Hex {
-                bytes: hex_string(bytes),
-            },
-        };
+            Some(schema),
+            Some(source),
+            encoding,
+            bytes,
+        );
     };
-    let json = match DynamicMessage::decode(desc, bytes) {
-        Ok(msg) => match serde_json::to_value(&msg) {
-            Ok(v) => v,
-            Err(_) => return hex_with_schema(transport, topic, &schema, bytes),
-        },
-        Err(_) => return hex_with_schema(transport, topic, &schema, bytes),
+    let decoded = DynamicMessage::decode(desc, bytes).ok().and_then(|msg| {
+        let mut json = serde_json::to_value(&msg).ok()?;
+        if ctx.keep_bytes {
+            return Some((json, Some(BytesSchema::Protobuf(msg))));
+        }
+        shape_proto_bytes(&msg, &mut json, ctx.no_data);
+        Some((json, None))
+    });
+    let Some((json, unsummarized)) = decoded else {
+        return hex_frame(
+            transport,
+            topic,
+            Some(schema),
+            Some(source),
+            Some(ENCODING_PROTOBUF),
+            bytes,
+        );
     };
     DecodedFrame {
         transport,
         topic,
         schema: Some(schema),
+        schema_source: Some(source.as_str()),
         hash: None,
-        encoding: Some("protobuf"),
+        encoding: Some(ENCODING_PROTOBUF),
         payload: FramePayload::Json { json },
+        unsummarized,
     }
+}
+
+/// Apply the `bytes` rendering rules to a serialized protobuf message, in
+/// place: a field over [`BYTES_INLINE_MAX`] becomes a [`bytes_summary`];
+/// under `no_data` the field is replaced by `<key>_len`. Recurses into
+/// singular and repeated message fields. Keys absent from `json` (default
+/// values the serializer skipped) are left alone.
+fn shape_proto_bytes(msg: &DynamicMessage, json: &mut Value, no_data: bool) {
+    let Value::Object(obj) = json else {
+        return;
+    };
+    for field in msg.descriptor().fields() {
+        let key = field.json_name();
+        if !obj.contains_key(key) {
+            continue;
+        }
+        let value = msg.get_field(&field);
+        match (field.kind(), &*value) {
+            (Kind::Bytes, ProtoValue::Bytes(data)) => {
+                if no_data {
+                    obj.remove(key);
+                    obj.insert(format!("{key}_len"), Value::from(data.len()));
+                } else if data.len() > BYTES_INLINE_MAX {
+                    obj.insert(key.to_owned(), bytes_summary(data.len(), data));
+                }
+            }
+            (Kind::Bytes, ProtoValue::List(items)) => {
+                if no_data {
+                    obj.remove(key);
+                    let lens = items
+                        .iter()
+                        .map(|item| Value::from(item.as_bytes().map_or(0, |b| b.len())))
+                        .collect();
+                    obj.insert(format!("{key}_len"), Value::Array(lens));
+                } else if let Some(Value::Array(slots)) = obj.get_mut(key) {
+                    for (slot, item) in slots.iter_mut().zip(items) {
+                        if let Some(data) = item.as_bytes().filter(|b| b.len() > BYTES_INLINE_MAX) {
+                            *slot = bytes_summary(data.len(), data);
+                        }
+                    }
+                }
+            }
+            (Kind::Message(_), ProtoValue::Message(child)) => {
+                if let Some(slot) = obj.get_mut(key) {
+                    shape_proto_bytes(child, slot, no_data);
+                }
+            }
+            (Kind::Message(_), ProtoValue::List(items)) => {
+                if let Some(Value::Array(slots)) = obj.get_mut(key) {
+                    for (slot, item) in slots.iter_mut().zip(items) {
+                        if let ProtoValue::Message(child) = item {
+                            shape_proto_bytes(child, slot, no_data);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Summary object for a `bytes` value of `len` bytes too long to inline.
+/// `head` holds its leading bytes; at most [`BYTES_HEAD_LEN`] are shown.
+pub(crate) fn bytes_summary(len: usize, head: &[u8]) -> Value {
+    serde_json::json!({
+        "len": len,
+        "head_hex": hex_string(&head[..head.len().min(BYTES_HEAD_LEN)]),
+    })
 }
 
 /// Candidate protobuf full names for a vault message name, most qualified
@@ -155,21 +498,26 @@ fn protobuf_name_candidates(schema: &str) -> Vec<String> {
     }
 }
 
-fn hex_with_schema<'a>(
+/// A hex-body frame. `schema_source` follows `schema`: both or neither.
+fn hex_frame<'a>(
     transport: &'a str,
     topic: &'a str,
-    schema: &str,
+    schema: Option<String>,
+    source: Option<SchemaSource>,
+    encoding: Option<&'static str>,
     bytes: &[u8],
 ) -> DecodedFrame<'a> {
     DecodedFrame {
         transport,
         topic,
-        schema: Some(schema.to_string()),
+        schema_source: schema.as_ref().and(source).map(SchemaSource::as_str),
+        schema,
         hash: None,
-        encoding: Some("protobuf"),
+        encoding,
         payload: FramePayload::Hex {
             bytes: hex_string(bytes),
         },
+        unsummarized: None,
     }
 }
 
@@ -179,7 +527,7 @@ pub fn render_decoded_json_line(frame: &DecodedFrame<'_>) -> String {
     serde_json::to_string(frame).unwrap_or_else(|_| "{}".into())
 }
 
-fn hex_string(bytes: &[u8]) -> String {
+pub(crate) fn hex_string(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         use std::fmt::Write;
@@ -225,6 +573,38 @@ mod tests {
         let frame = decode_frame("zenoh", "/x", &bytes, true);
         assert!(frame.schema.is_none());
         assert!(frame.encoding.is_none());
+    }
+
+    /// `--type` beats the transport's schema, which beats the Header probe,
+    /// and the winner is named in the rendered `schema_source` column.
+    #[test]
+    fn schema_precedence_is_flag_then_wire_then_header() {
+        let ctx = DecodeContext::default();
+        let header_only = Frame::from(synthetic_stamped("ros2/std/StringStamped", 5.0));
+        let with_wire = Frame {
+            wire_schema: Some("ros2/std/String".into()),
+            ..header_only.clone()
+        };
+
+        let flag = decode_frame_dynamic(
+            "zenoh",
+            "/x",
+            &with_wire,
+            false,
+            Some("ros2/std/Vector3"),
+            &ctx,
+        );
+        assert_eq!(flag.schema.as_deref(), Some("ros2/std/Vector3"));
+        assert_eq!(flag.schema_source, Some("flag"));
+        assert!(render_decoded_json_line(&flag).contains("\"schema_source\":\"flag\""));
+
+        let wire = decode_frame_dynamic("zenoh", "/x", &with_wire, false, None, &ctx);
+        assert_eq!(wire.schema.as_deref(), Some("ros2/std/String"));
+        assert_eq!(wire.schema_source, Some("wire"));
+
+        let header = decode_frame_dynamic("zenoh", "/x", &header_only, false, None, &ctx);
+        assert_eq!(header.schema.as_deref(), Some("ros2/std/StringStamped"));
+        assert_eq!(header.schema_source, Some("header"));
     }
 
     #[test]

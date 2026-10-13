@@ -1,17 +1,20 @@
 //! Zenoh-backed frame iterator + one-shot raw publisher.
 //!
 //! `listen_zenoh` opens a short-lived session and a typed subscriber on
-//! the exact full-path topic; each sample's payload bytes come back as-is.
-//! Decoding is the caller's job (`sb-listen::decode::decode_frame`).
+//! the exact full-path topic; each sample's payload bytes come back as-is,
+//! together with the schema half of its encoding (see [`wire_schema`]).
+//! Decoding is the caller's job (`sb-listen::decode::decode_frame_dynamic`).
 //!
 //! `publish_zenoh_raw` is one-and-done: open session → declare publisher →
 //! put bytes → close. Used by `sb topic pub <topic> <hex>`; not on a hot
 //! path so the per-call setup cost is fine.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use zenoh::Wait;
 
-use crate::FrameIter;
+use crate::{Frame, FrameIter, FramePoll};
 
 pub struct ZenohFrames {
     _session: zenoh::Session,
@@ -37,13 +40,46 @@ pub fn listen_zenoh(topic_full_name: &str) -> Result<ZenohFrames> {
 }
 
 impl FrameIter for ZenohFrames {
-    fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
+    fn next_frame(&mut self) -> Result<Option<Frame>> {
         match self.sub.recv() {
-            Ok(sample) => Ok(Some(sample.payload().to_bytes().to_vec())),
+            Ok(sample) => Ok(Some(to_frame(&sample))),
             // Disconnected handler — treat as graceful end-of-stream.
             Err(_) => Ok(None),
         }
     }
+
+    fn poll_frame(&mut self, timeout: Duration) -> Result<FramePoll> {
+        match self.sub.recv_timeout(timeout) {
+            Ok(Some(sample)) => Ok(FramePoll::Frame(to_frame(&sample))),
+            Ok(None) => Ok(FramePoll::Timeout),
+            // Disconnected handler, as in `next_frame`.
+            Err(_) => Ok(FramePoll::Closed),
+        }
+    }
+}
+
+fn to_frame(sample: &zenoh::sample::Sample) -> Frame {
+    Frame {
+        bytes: sample.payload().to_bytes().to_vec(),
+        wire_schema: wire_schema(sample.encoding()),
+    }
+}
+
+/// Schema half of a protobuf sample's encoding:
+/// `application/protobuf;ros2/std/Header` → `ros2/std/Header`. sb-generated
+/// publishers put the vault name there.
+///
+/// Read from the encoding's string form because `Encoding::schema()` is
+/// behind zenoh's `internal` feature. Zenoh renders an encoding as
+/// `<mime>;<schema>`. Only a MIME of exactly `application/protobuf` counts:
+/// any other encoding's schema (`text/plain;utf-8`) names no vault message.
+/// No `;`, another MIME, or an empty schema all mean none. Kept identical to
+/// `sb_discover::probe::encoding_schema`, so `sb topic list` and
+/// `sb topic listen` agree on a topic's type.
+fn wire_schema(encoding: &zenoh::bytes::Encoding) -> Option<String> {
+    let rendered = encoding.to_string();
+    let (mime, schema) = rendered.split_once(';')?;
+    (mime.trim() == "application/protobuf" && !schema.is_empty()).then(|| schema.to_owned())
 }
 
 /// Publish `bytes` on `topic_full_name` exactly once. Synchronous: by

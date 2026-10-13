@@ -12,6 +12,10 @@
 //!
 //! Defined locally rather than imported from `sb-vault`'s generated
 //! bindings so this crate stays trivial (no build script, no proto deps).
+//!
+//! [`encoding_schema`] is the fallback for payloads without a Header: it
+//! reads the schema half of the Zenoh sample encoding that generated
+//! publishers stamp (`application/protobuf;<style>/<ns>/<Leaf>`).
 
 use prost::Message;
 
@@ -53,6 +57,21 @@ pub fn probe_header(payload: &[u8]) -> Option<MetadataProbe> {
         .ok()
         .and_then(|sp| sp.header)
         .and_then(|h| h.metadata)
+}
+
+/// Schema half of a rendered Zenoh encoding: everything after the first
+/// `;` (`"application/protobuf;ros2/std/StringStamped"` yields
+/// `"ros2/std/StringStamped"`). `None` when the MIME half is not
+/// `application/protobuf`, when there is no `;`, or when nothing follows
+/// it, so a `text/plain;utf-8` sample never lands in the type column.
+/// Works on the `Display` string because `Encoding::schema()` sits behind
+/// zenoh's `internal` feature.
+pub(crate) fn encoding_schema(encoding: &str) -> Option<&str> {
+    encoding
+        .split_once(';')
+        .filter(|(mime, _)| mime.trim() == "application/protobuf")
+        .map(|(_, schema)| schema)
+        .filter(|schema| !schema.is_empty())
 }
 
 #[cfg(test)]

@@ -184,7 +184,12 @@ Order of operations from a fresh host to a running swarm:
 │ sb up                    # tmux session sb-my_project comes up      │
 │ sb attach                # attach to the tmux session               │
 │ sb topic list            # enumerate live topics                    │
-│ sb topic listen /dev01/my_project/camera_app/iox2/image_raw         │
+│ sb topic listen /dev01/my_project/camera_app/iox2/image_raw \       │
+│     --transport iceoryx2 # JSON lines; listen defaults to zenoh     │
+│   # sb 0.4.0+ flags:                                                │
+│   #   --type <style>/<ns>/<Leaf>  decode as this vault message      │
+│   #   --no-data                   omit bytes data, keep <name>_len  │
+│   #   --show                      open a window for image frames    │
 │ sb run camera_app --id 2 # restart one module with passthrough args  │
 │ sb stop camera_app       # run its stopscript.bash (teardown)        │
 └─────────────────────────────────────────────────────────────────────┘

@@ -392,6 +392,18 @@ publish path — that's the zenoh route. (This was a Python iceoryx2
 template bug in slice C; it's fixed and re-verified — see
 plan/lv3_report.md "Bug fix" section.)
 
+**Zenoh publishers tag the encoding (sb 0.4.0+).** The Rust, Python, and
+C++ Zenoh publisher templates declare the publisher with the encoding
+`application/protobuf;<style>/<ns>/<Leaf>` (the entry's `msg_type`), so
+every sample names its vault message. The payload bytes are unchanged:
+`publish()` still takes the serialized message. `sb topic listen` reads
+this tag before the Header probe ([sbcli_messages.md](sbcli_messages.md)
+§1.1). The Flutter and Unity Zenoh templates are unchanged and set no
+encoding. A publisher file generated before 0.4.0 carries no tag until it
+is re-rendered, for example with `sb pub edit <name> -m <its current type>`
+(§9.2); `sb message compile` does not rewrite publisher files. Until then,
+`sb topic listen` types its frames by the Header probe or `--type`.
+
 Each generated file leads with an **Example usage** block showing how
 to import the class from the user's `main` and how to populate the
 payload. The example doubles as documentation; users can copy-paste

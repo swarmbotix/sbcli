@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use sb_discover::{DEFAULT_DISCOVERY_WINDOW, Transport, discover_zenoh};
+use sb_discover::{DEFAULT_DISCOVERY_WINDOW, Transport, discover_zenoh, probe_header};
 use zenoh::Wait;
+use zenoh::bytes::Encoding;
 
 /// Spawn a Zenoh publisher that puts `payload` on `key` every 50 ms
 /// until the returned flag flips. Caller owns the lifetime — flip the
@@ -22,6 +23,16 @@ use zenoh::Wait;
 fn spawn_publisher(
     key: &'static str,
     payload: Vec<u8>,
+) -> (Arc<AtomicBool>, thread::JoinHandle<()>) {
+    spawn_publisher_with_encoding(key, payload, Encoding::default())
+}
+
+/// [`spawn_publisher`] with an explicit publisher encoding, the way
+/// generated publishers stamp `application/protobuf;<schema>`.
+fn spawn_publisher_with_encoding(
+    key: &'static str,
+    payload: Vec<u8>,
+    encoding: Encoding,
 ) -> (Arc<AtomicBool>, thread::JoinHandle<()>) {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_t = Arc::clone(&stop);
@@ -33,7 +44,7 @@ fn spawn_publisher(
                 return;
             }
         };
-        let pubr = match session.declare_publisher(key).wait() {
+        let pubr = match session.declare_publisher(key).encoding(encoding).wait() {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("declare_publisher failed: {e}");
@@ -70,6 +81,37 @@ fn discover_zenoh_finds_live_publisher() {
     // Raw bytes → Header probe fails → schema and rate stay null.
     assert!(found.schema.is_none(), "raw bytes should leave schema null");
     assert!(found.rate_hz.is_none(), "raw bytes should leave rate null");
+}
+
+#[test]
+#[ignore = "live zenoh: run with --ignored"]
+fn discover_zenoh_schema_from_encoding_without_header() {
+    let payload = b"raw-bytes-payload".to_vec();
+    // Premise: no Header in the payload, so only the encoding can type the row.
+    assert!(
+        probe_header(&payload).is_none(),
+        "payload must not carry a Header"
+    );
+    let (stop, handle) = spawn_publisher_with_encoding(
+        "test/lvl4/discover/encoded",
+        payload,
+        Encoding::APPLICATION_PROTOBUF.with_schema("ros2/std/StringStamped"),
+    );
+    thread::sleep(Duration::from_millis(150));
+
+    let entries = discover_zenoh(DEFAULT_DISCOVERY_WINDOW, None, false)
+        .expect("discover_zenoh should succeed");
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+
+    let found = entries
+        .iter()
+        .find(|e| e.topic == "test/lvl4/discover/encoded")
+        .unwrap_or_else(|| panic!("publisher not found, saw: {entries:#?}"));
+    assert_eq!(found.transport, Transport::Zenoh);
+    assert_eq!(found.schema.as_deref(), Some("ros2/std/StringStamped"));
+    // Rate only comes from the Header, which this payload lacks.
+    assert!(found.rate_hz.is_none(), "no Header should leave rate null");
 }
 
 #[test]

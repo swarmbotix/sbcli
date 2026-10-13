@@ -90,6 +90,7 @@ from the vault root, which made any such import unresolvable and printed
 style that still fails to compile is now skipped with
 `warning: dynamic decode skipped for style <style>` and the other styles keep
 decoding.
+How `sb topic listen` picks the message for each frame: §1.1.
 
 `std/` — including the load-bearing `std/Header` — ships in the **ros2**
 style. The embedded first-run bundle installs into that style only; a
@@ -122,6 +123,68 @@ naturally for the source-of-truth tree. Every `sb message *` subcommand
 reads from `<defs>` and writes generated artifacts to `<targets>`
 (with the one exception called out in §3: `.cache/descriptor.bin`
 lives under `<defs>`).
+
+### 1.1 How `sb topic listen` finds the type (sb 0.4.0+)
+
+`sb topic listen` decodes each frame against one vault message. The first
+source that names one wins, and the JSON line reports which in
+`schema_source`:
+
+1. **`--type <style>/<ns>/<Leaf>`** (`"flag"`): overrides the other two.
+2. **The transport's wire schema** (`"wire"`).
+   - Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`.
+     Generated Rust, Python, and C++ Zenoh publishers set it
+     ([sbcli_pubsub.md](sbcli_pubsub.md) §6.4).
+   - iceoryx2: the payload type the service was created with. That name is
+     language-native (`StringStamped`, `my_crate::StringStamped`), so it
+     maps to the vault iox2 struct with the same leaf whose size matches the
+     live payload. Two such structs of equal size: the first vault name in
+     sort order wins.
+3. **The Header probe** (`"header"`): `metadata.msg_type` of a payload that
+   leads with the swarmbotix `Header`.
+
+When nothing names a type, the body prints as hex with `schema` and
+`schema_source` both `null`, and stderr gets a one-time hint to regenerate
+the publisher or pass `--type`. A named type that does not decode (not in
+the vault, or bytes that do not parse) also prints hex, with `schema` and
+`schema_source` filled in so the expected type is visible. `--raw` skips
+all three sources.
+
+**iceoryx2 services open typed.** Before 0.4.0, `--transport iceoryx2`
+attached only to `[u8]` byte-slab services; a typed sb-generated publisher
+failed with `IncompatibleTypes`. `sb topic listen` now reads the service's
+payload type from the iceoryx2 registry and opens the service with it. It
+never creates the service: until one exists it waits, printing
+`waiting for iox2 service <name>...` once on stderr, so a typed publisher
+that starts later still owns the type. Bodies decode against the structs
+`sb message compile --iox2` would emit from the current vault and the
+`sb.config.yml` caps (§6), natural layout (Rust, C++) first, then packed
+(Python, C#). Such a frame reports `encoding: "iox2"` and `schema` set to
+the vault name; for an `iox2_variants` type that is the base message
+(`Image480pMono8` reports `swarmbotix/images/Image`). Caps given only as
+`sb message compile` flags are unknown here, so a struct built with them
+fails the size match and prints as hex with the native type name as
+`schema`. On iceoryx2, `--type` also accepts a variant name; a `--type`
+that names no iox2 struct is tried as protobuf.
+
+**`bytes` fields**, both transports: up to 64 bytes print inline (a base64
+string for protobuf, a number array for iox2); longer values print as
+`{"len": N, "head_hex": "<first 16 bytes>"}`. `--no-data` drops the field
+and keeps only `<name>_len`.
+
+**`--show`** opens a window titled with the topic and draws image frames on
+either transport: a decoded body whose fields, at the top level or one
+level down, are `width`, `height`, `encoding`, `step`, `data`
+(`sensor_msgs/Image` shape; encodings `mono8`, `mono16`, `rgb8`, `bgr8`,
+`rgba8`, `bgra8`, `8UC1`, `8UC3`, `16UC1`), or `format` + `data`
+(`CompressedImage`; JPEG or PNG). One level down means a nested message
+such as the `image` field of `ros2/std/ImageStamped`; nothing deeper is
+searched. JSON lines still print for every frame, unchanged, so `--show --no-data` keeps
+stdout small. A frame that cannot be drawn is skipped with one stderr
+warning and the window keeps the last good frame. Escape or `q` or closing the
+window ends the command with exit 0. `--show` cannot be combined with
+`--raw`. On a machine with no display it fails with
+`no display available for --show` before subscribing.
 
 ---
 

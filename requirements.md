@@ -464,6 +464,24 @@ Subscribe and print frames as JSON lines.
 - `--transport zenoh | iceoryx2` (default: `zenoh`) — which transport to subscribe on.
 - `--raw` (default: decode via vault) — emit hex bytes; payload becomes `{kind: "hex", bytes: "…"}`.
 - `-n, --count <N>` (default: `0` — run until SIGINT) — stop after N frames.
+- `--type <style>/<ns>/<Leaf>` (default: none): decode every frame as this vault message, overriding the wire schema and the Header probe.
+- `--no-data` (default: off): drop `bytes` field contents and keep only `<name>_len`.
+- `--show` (default: off): open a window and draw image frames (below). Conflicts with `--raw`.
+
+`--type`, `--no-data`, `--show`, the `schema_source` key, the `bytes` summary, the wire-schema source, and typed iceoryx2 opens are `sb 0.4.0+`.
+
+Output: one JSON line per frame, keys in this order: `transport`, `topic`, `schema`, `schema_source`, `hash`, `encoding`, `payload`. `schema_source` is `"flag"`, `"wire"`, `"header"`, or `null` (exactly when `schema` is `null`). `encoding` is `"protobuf"`, `"iox2"` (an iceoryx2 `#[repr(C)]` struct), or `null`. `payload` is `{kind: "json", json: {…}}` or `{kind: "hex", bytes: "…"}`. `hash` is reserved and always `null`. A `bytes` field longer than 64 bytes prints as `{len, head_hex}` (first 16 bytes).
+
+Type resolution, per frame, first hit wins:
+1. `--type` → `"flag"`.
+2. The transport's wire schema → `"wire"`. Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`, set by generated Rust, Python, and C++ Zenoh publishers (Flutter and Unity set none). iceoryx2: the payload type name the service was registered with, mapped to the vault iox2 struct with the same leaf and the live payload's size.
+3. The swarmbotix Header probe (`metadata.msg_type`) → `"header"`.
+
+No hit: hex, `schema: null`, and a one-time stderr hint to re-render the publisher (`sb pub edit <name> -m <type>`) or pass `--type`. A resolved type that does not decode prints hex with `schema` kept. `--raw` skips resolution entirely.
+
+iceoryx2: the service is opened with its own registered payload type (read via `Service::list`, opened over `CustomPayloadMarker`), so typed sb-generated publishers are readable. The pre-0.4.0 `[u8]`-only open and its `IncompatibleTypes` failure are gone. The listener never creates the service; until it exists it waits, printing `waiting for iox2 service <name>...` once on stderr. Bodies decode against layouts flattened from the same per-style descriptor sets with the `sb.config.yml` caps (`string_array_cap`, `string_array_caps`, `bytes_caps`, `vec_caps`, `iox2_variants`), natural layout first, then packed. `schema` is the vault name (the base message for an `iox2_variants` type).
+
+`--show`: built-in viewer (`sb_listen::view`; `minifb` + `image`). Nothing is linked from the system at build time: on Linux, libX11, libwayland-client and libxkbcommon are loaded at runtime; Windows uses user32 / gdi32. Draws frames whose decoded body has, at the top level or one level down (a nested message such as the `image` field of `ros2/std/ImageStamped`; nothing deeper), `width`, `height`, `encoding`, `step`, `data` (encodings `mono8`, `mono16`, `rgb8`, `bgr8`, `rgba8`, `bgra8`, `8UC1`, `8UC3`, `16UC1`) or `format` + `data` (JPEG, PNG). Works on both transports. The body is decoded with `bytes` whole for the viewer, then summarized for stdout, so JSON lines are unchanged (including under `--no-data`). An undrawable frame is skipped with one stderr warning. Escape or `q` or closing the window ends the command with exit 0. No display: fails with `no display available for --show` before subscribing.
 
 Decoding uses a `DescriptorPool` built from the vault at startup, one `protoc` run per style with that style's `message_definitions/` as the include root (`sb_listen::build_pool`), so intra-style imports resolve exactly as they do for `sb message compile`. A style that fails to compile prints `warning: dynamic decode skipped for style <style> (<protoc error>)` on stderr and is left out; the pool is only abandoned (`warning: dynamic decode disabled`, hex payloads) when `protoc` is unconfigured, the vault is empty, or no style compiled.
 

@@ -1,6 +1,6 @@
 # L4 — Topic Introspection (running report)
 
-Last updated: 2026-05-28
+Last updated: 2026-10-12
 
 ---
 
@@ -79,6 +79,16 @@ subscriber can race ahead of any publisher (matches Zenoh's
 `declare_subscriber` semantics). The publisher path adds a 200 ms
 post-send settle window so the publisher port doesn't drop before
 the subscriber polls — needed for the one-shot CLI invocation case.
+
+> **Resolved in 0.4.0.** At L4 the listener opened every service as a
+> `[u8]` slab, so a typed sb-generated publisher made it fail with
+> `IncompatibleTypes` (the scope cut was recorded in the `iceoryx.rs` module
+> doc). 0.4.0 reads the live payload type from `Service::list`, opens the
+> service with it over `CustomPayloadMarker`, and decodes against vault iox2
+> layouts. The `open_or_create()` race-ahead above is reversed for the
+> listener: a `[u8]` service it created would make the typed publisher that
+> starts later fail the same way, so it never creates the service and waits
+> for it instead. `sb topic pub` still uses `open_or_create()` as `[u8]`.
 
 ### 2. True L3 → discovery end-to-end example
 

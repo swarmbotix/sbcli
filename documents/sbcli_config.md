@@ -742,7 +742,7 @@ or "where does this filename come from?".
 | `sb list` / `sb pub list` / `sb sub list` | `sb_home_dir`, `device` (only used by topic-prefix derivation in subcommands that re-emit files) |
 | `sb service init` | `sb_home_dir`, `messages_root`, `device` — the router's namespace is `<device>/<workspace>/<module>/zenoh/service/**`, resolved through the same chain as `sb pub/sub` |
 | `sb topic list` / `pub` | `sb_home_dir`, `device` — needed only to expand a **bare** topic against cwd's module + the active workspace. A leading-`/` topic short-circuits before the config is even loaded |
-| `sb topic listen` | same as above |
+| `sb topic listen` | `sb_home_dir`, `device` for a bare topic, as above. Always `messages_root` (or a `messages/` tree found from cwd) and `protoc`: every vault style is compiled so payloads decode. With `--transport iceoryx2` (sb 0.4.0+), also the iox2 flatten settings `string_array_cap`, `string_array_caps`, `bytes_caps`, `vec_caps`, `iox2_variants`, to rebuild the structs it decodes against |
 | `sb topic prune` | nothing from `sb.config.yml` — it walks iceoryx2's own global node registry |
 | `sb up` / `run` / `stop` / `down` / `attach` | `sb_home_dir` (to find the active workspace's `flow.yaml`) and `tmux` (falls back to `tmux` on `PATH` when unset). Module paths come from `flow.yaml`, never from config |
 | `sb gopro` | `sb_home_dir`, `messages_root`, `device` (module resolution, same chain as `sb pub/sub`) |

@@ -117,7 +117,9 @@ for zero-copy shared memory on one device.
 
 - **`sb topic list`** -- enumerates live topics on both transports, marking
   iceoryx2 registrations left behind by dead publishers
-- **`sb topic listen`** -- decodes frames as JSON lines
+- **`sb topic listen`** -- decodes frames as JSON lines on either transport,
+  typed by `--type`, the publisher's wire schema, or the Header; `--show`
+  opens a window for image topics
 - **`sb topic pub`** -- one-shot raw publish for smoke tests
 - **`sb topic prune`** -- clears dead iceoryx2 registrations
 
@@ -384,7 +386,7 @@ build as described in
 # edit each module's runscript.bash so it actually launches the app, then:
 sb up                                                    # tmux session comes up
 sb attach                                                # look inside
-sb topic list                                            # what is live, on both transports
+sb topic listen --transport iceoryx2 /dev01/my_project/camera_app/iox2/image_raw   # add --show for images
 sb topic listen /dev01/my_project/camera_app/iox2/image_raw
 sb run camera_app --id 2                                 # restart one module with args
 sb stop camera_app                                       # run its stopscript.bash
@@ -407,7 +409,7 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | Command | Purpose |
 |---|---|
 | `sb topic list` | Enumerate live topics on both transports |
-| `sb topic listen <topic>` | Decode frames as JSON lines |
+| `sb topic listen <topic>` | Decode frames as JSON lines; `--show` displays image frames in a window |
 | `sb topic pub <topic> <bytes-hex>` | One-shot raw publish |
 | `sb topic prune` | Clear iceoryx2 registrations left by dead publishers |
 

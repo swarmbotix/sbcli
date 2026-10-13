@@ -8,7 +8,10 @@
 //!   `Header`-leading `*Stamped` message; on success, the topic's
 //!   `schema` (= `header.metadata.msg_type`) and `rate_hz`
 //!   (= `header.metadata.msg_freq_desired`) populate from that one
-//!   frame. Foreign / non-Stamped payloads stay `None`.
+//!   frame. When the probe yields no `msg_type`, `schema` falls back to
+//!   the schema half of the sample encoding
+//!   (`application/protobuf;<style>/<ns>/<Leaf>`, stamped by generated
+//!   publishers). Payloads with neither stay `None`.
 //! - **iceoryx2** — `Service::list(Config::global_config(), ...)`. The
 //!   schema column comes free from `static_details.message_type_details()
 //!   .payload.type_name()` (e.g. `"swarmbotix_std::StringStamped"`). No
@@ -22,6 +25,7 @@ mod probe;
 mod render;
 mod resolve;
 
+use probe::encoding_schema;
 pub use probe::{HeaderProbe, MetadataProbe, StampedProbe, probe_header};
 pub use render::{TableLayout, render_json_lines, render_table};
 pub use resolve::{ResolveError, ResolveOutcome, resolve_bare_topic};
@@ -61,9 +65,11 @@ impl Transport {
 pub struct TopicEntry {
     pub topic: String,
     pub transport: Transport,
-    /// Schema name — `"std/StringStamped"` for Zenoh-probed `*Stamped`
-    /// payloads, `"swarmbotix_std::StringStamped"` (the iox2 typed-tag
-    /// form) for iceoryx2 services. `None` for foreign / unknown.
+    /// Schema name: `"std/StringStamped"` for Zenoh-probed `*Stamped`
+    /// payloads, the encoding schema (e.g. `"ros2/std/StringStamped"`) for
+    /// Zenoh samples without a Header, `"swarmbotix_std::StringStamped"`
+    /// (the iox2 typed-tag form) for iceoryx2 services. `None` for
+    /// foreign / unknown.
     pub schema: Option<String>,
     /// Reserved for future envelope hashing. Always `None` at L4 —
     /// kept on the wire so later levels can populate without breaking
@@ -137,6 +143,11 @@ pub fn discover_zenoh(
                 if meta.msg_freq_desired.is_finite() && meta.msg_freq_desired > 0.0 {
                     entry.rate_hz = Some(meta.msg_freq_desired);
                 }
+            }
+            // Header `msg_type` wins. Without it, fall back to the schema
+            // half of the sample encoding stamped by generated publishers.
+            if entry.schema.is_none() {
+                entry.schema = encoding_schema(&sample.encoding().to_string()).map(str::to_owned);
             }
         })
         .wait()
