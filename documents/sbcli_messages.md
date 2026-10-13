@@ -130,7 +130,7 @@ lives under `<defs>`).
 source that names one wins, and the JSON line reports which in
 `schema_source`:
 
-1. **`--type <style>/<ns>/<Leaf>`** (`"flag"`): overrides the other two.
+1. **`--type <style>/<ns>/<Leaf>`** (`"flag"`): overrides the other three.
 2. **The transport's wire schema** (`"wire"`).
    - Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`.
      Generated Rust, Python, and C++ Zenoh publishers set it
@@ -142,13 +142,35 @@ source that names one wins, and the JSON line reports which in
      sort order wins.
 3. **The Header probe** (`"header"`): `metadata.msg_type` of a payload that
    leads with the swarmbotix `Header`.
+4. **The module's `sb.dev.yml`** (`"config"`, sb 0.4.1+): the `type` of the
+   publisher or subscriber entry for this topic, used exactly as written.
+   It types frames from publishers that stamp neither an encoding nor a
+   Header type, such as ones rendered by older templates.
+   - Bare topic: the cwd module's entry the name resolved to.
+   - Fully-qualified `/<device>/<workspace>/<module>/<zenoh|iox2>/<topic>`:
+     `<module>` is looked up in the active workspace's `flow.yaml`, first as
+     written, then without its instance suffix (`ips_track-sb00` is found
+     as `ips_track`). In that module's `sb.dev.yml`, publishers are searched
+     before subscribers for an entry whose `topic` is the path's last
+     segment (or the whole path) and whose transport is the path's. The
+     cwd `sb.dev.yml` is not consulted for a fully-qualified path.
+   - For a fully-qualified path, any miss skips this source without a
+     message: no active workspace, a module not registered in it, an
+     unreadable `sb.dev.yml`, no matching entry, or a path not in the
+     five-segment form. So it works only on a machine where that workspace
+     is active and the module is registered.
+   - iceoryx2: a typed service always names its type on the wire first, so
+     this source applies only to an untyped `[u8]` service (the byte slab
+     `sb topic pub` creates). There, as with `--type`, the name cannot
+     select an iox2 struct; the bytes are tried as protobuf and otherwise
+     print as hex with `schema` set.
 
 When nothing names a type, the body prints as hex with `schema` and
 `schema_source` both `null`, and stderr gets a one-time hint to regenerate
 the publisher or pass `--type`. A named type that does not decode (not in
 the vault, or bytes that do not parse) also prints hex, with `schema` and
 `schema_source` filled in so the expected type is visible. `--raw` skips
-all three sources.
+all four sources.
 
 **iceoryx2 services open typed.** Before 0.4.0, `--transport iceoryx2`
 attached only to `[u8]` byte-slab services; a typed sb-generated publisher

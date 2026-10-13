@@ -344,6 +344,12 @@ buys us. `sb list` shows them as
 `/dev01/ws1/app2_cpp/iox2/hello` and
 `/dev01/ws1/app2_cpp/zenoh/hello`.
 
+Because the canonical form carries the transport, `sb topic listen` and
+`sb topic pub` read it from the `<transport>` segment (sb 0.4.1+):
+`sb topic listen /dev01/ws1/app2_cpp/iox2/hello` subscribes on iceoryx2
+with no flag, and `-t zenoh` / `-t iox2` is needed only for a path that is
+not in this form (§13.7).
+
 **Why the leading-`/` trim:**
 
 - **Slash form (`topic_full`)** is the human-facing canonical
@@ -402,7 +408,9 @@ this tag before the Header probe ([sbcli_messages.md](sbcli_messages.md)
 encoding. A publisher file generated before 0.4.0 carries no tag until it
 is re-rendered, for example with `sb pub edit <name> -m <its current type>`
 (§9.2); `sb message compile` does not rewrite publisher files. Until then,
-`sb topic listen` types its frames by the Header probe or `--type`.
+`sb topic listen` types its frames by the Header probe, `--type`, or
+(sb 0.4.1+) the entry's `type` in the module's `sb.dev.yml`
+([sbcli_messages.md](sbcli_messages.md) §1.1).
 
 Each generated file leads with an **Example usage** block showing how
 to import the class from the user's `main` and how to populate the
@@ -1025,6 +1033,11 @@ topics or for cross-workspace traffic. The user is responsible for
 including any `<transport>` segment they want; `sb` does not inject
 it when the topic is leading-slash-prefixed. The derived name is
 still `hello` (last segment).
+
+`sb topic listen` and `sb topic pub` read the transport only from the
+five-segment form, so for a path like this one pass `-t zenoh` or
+`-t iox2` (sb 0.4.1+); without it they exit 1 with
+`cannot infer transport from /flat/path/hello`.
 
 ### 13.8 `sb sub list` with no module errors with a more useful message
 

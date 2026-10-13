@@ -90,6 +90,19 @@ the subscriber polls — needed for the one-shot CLI invocation case.
 > starts later fail the same way, so it never creates the service and waits
 > for it instead. `sb topic pub` still uses `open_or_create()` as `[u8]`.
 
+> **0.4.1: the transport comes from the path.** `sb topic listen` and
+> `sb topic pub` defaulted `--transport` to `zenoh`, so listening on an
+> `/iox2/` path without the flag waited on Zenoh and printed nothing, although
+> the path already named the transport. The flag is now optional (`-t`,
+> aliases `z`, `i`, `iox2`): the `<transport>` segment decides, or the matched
+> `sb.dev.yml` entry for a bare topic, and with neither the command exits 1
+> rather than guess. A path without the segment now needs `-t`; the synopsis
+> at the top of this report is the L4 surface. The same release adds a
+> `"config"` type source after the Header probe: the owning module's
+> `sb.dev.yml`, found through the active workspace's `flow.yaml`, types
+> frames from publishers that stamp neither an encoding nor a Header type
+> (older templates), and fills the same gap in `sb topic list`'s Zenoh rows.
+
 ### 2. True L3 → discovery end-to-end example
 
 New [`examples/rust_zenoh_stamped/`](../examples/rust_zenoh_stamped/):

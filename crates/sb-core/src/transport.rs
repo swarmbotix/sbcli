@@ -37,6 +37,14 @@ impl Transport {
         }
     }
 
+    /// Inverse of [`Self::path_segment`]: the transport a fully-qualified
+    /// topic's `<transport>` segment names, `None` for anything else.
+    pub fn from_path_segment(segment: &str) -> Option<Self> {
+        [Self::Zenoh, Self::Iceoryx2]
+            .into_iter()
+            .find(|t| t.path_segment() == segment)
+    }
+
     /// Tag shown in `sb topic list` listings: `[z]` / `[i]`.
     pub fn tag(self) -> &'static str {
         match self {

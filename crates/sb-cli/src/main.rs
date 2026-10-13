@@ -518,7 +518,9 @@ struct TopicListCli {
     /// Match keyword case-sensitively (default: insensitive).
     #[arg(long)]
     case_sensitive: bool,
-    /// Restrict discovery to a single transport. Default: both.
+    /// Restrict discovery to a single transport: `zenoh` (alias `z`) or
+    /// `iceoryx2` (aliases `i`, `iox2`). Default: both. Long form only:
+    /// `-t` is `--timeout` here.
     #[arg(long, value_enum)]
     transport: Option<TransportArg>,
     /// Emit one JSON line per topic instead of the table.
@@ -530,9 +532,11 @@ struct TopicListCli {
 struct TopicListenCli {
     /// Bare (`chatter`) or fully-qualified (`/dev01/ws/mod/zenoh/chatter`).
     topic: String,
-    /// Which transport to subscribe on. Default: zenoh.
-    #[arg(long, value_enum, default_value_t = TransportArg::Zenoh)]
-    transport: TransportArg,
+    /// Transport to subscribe on: `zenoh` (alias `z`) or `iceoryx2`
+    /// (aliases `i`, `iox2`). Default: the topic's `<transport>` path
+    /// segment (a bare topic: its `sb.dev.yml` entry).
+    #[arg(short = 't', long, value_enum)]
+    transport: Option<TransportArg>,
     /// Skip the Header probe and emit hex bytes only.
     #[arg(long)]
     raw: bool,
@@ -567,15 +571,21 @@ struct TopicPubCli {
     topic: String,
     /// Hex bytes (no `0x` prefix, whitespace OK).
     bytes_hex: String,
-    /// Default: zenoh.
-    #[arg(long, value_enum, default_value_t = TransportArg::Zenoh)]
-    transport: TransportArg,
+    /// Transport to publish on: `zenoh` (alias `z`) or `iceoryx2` (aliases
+    /// `i`, `iox2`). Default: the topic's `<transport>` path segment (a
+    /// bare topic: its `sb.dev.yml` entry).
+    #[arg(short = 't', long, value_enum)]
+    transport: Option<TransportArg>,
 }
 
-#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+/// `--transport` value. `z`, `i` and the path segment `iox2` are accepted
+/// as aliases.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "lowercase")]
 enum TransportArg {
+    #[value(alias = "z")]
     Zenoh,
+    #[value(aliases = ["i", "iox2"])]
     Iceoryx2,
 }
 
@@ -584,6 +594,24 @@ impl TransportArg {
         match self {
             TransportArg::Zenoh => sb_discover::Transport::Zenoh,
             TransportArg::Iceoryx2 => sb_discover::Transport::Iceoryx2,
+        }
+    }
+}
+
+impl From<Transport> for TransportArg {
+    fn from(t: Transport) -> Self {
+        match t {
+            Transport::Zenoh => Self::Zenoh,
+            Transport::Iceoryx2 => Self::Iceoryx2,
+        }
+    }
+}
+
+impl From<TransportArg> for Transport {
+    fn from(t: TransportArg) -> Self {
+        match t {
+            TransportArg::Zenoh => Self::Zenoh,
+            TransportArg::Iceoryx2 => Self::Iceoryx2,
         }
     }
 }
@@ -3086,12 +3114,13 @@ fn cmd_config_get(key: &str, json: bool) -> Result<()> {
 
 fn cmd_topic_list(a: TopicListCli) -> Result<()> {
     let window = std::time::Duration::from_secs_f64(a.timeout.max(0.0));
-    let report = sb_discover::discover_all(
+    let mut report = sb_discover::discover_all(
         a.transport.map(TransportArg::to_discover),
         window,
         a.keyword.as_deref(),
         a.case_sensitive,
     )?;
+    fill_config_schemas(&mut report.zenoh);
     // Surface non-fatal per-backend failures (e.g. zenoh isn't running)
     // on stderr so the user knows the snapshot may be incomplete, but
     // still see whatever the other backend found on stdout.
@@ -3107,20 +3136,37 @@ fn cmd_topic_list(a: TopicListCli) -> Result<()> {
     Ok(())
 }
 
+/// Fill the schema of Zenoh rows the wire left blank (no Header type, no
+/// encoding schema, as from publishers rendered by older templates) with
+/// the `type` the owning module's `sb.dev.yml` declares, found through the
+/// active workspace's registry. Rows of unregistered modules stay blank.
+fn fill_config_schemas(rows: &mut [sb_discover::TopicEntry]) {
+    if rows.iter().all(|r| r.schema.is_some()) {
+        return;
+    }
+    let Some(registry) = active_module_registry() else {
+        return;
+    };
+    let lookup = |module: &str| registry.get(module).cloned();
+    for row in rows.iter_mut().filter(|r| r.schema.is_none()) {
+        row.schema = sb_discover::config_schema(&row.topic, &lookup);
+    }
+}
+
 fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
     use sb_listen::{FrameIter, FramePoll};
-    let resolved = resolve_topic_for_runtime(&a.topic)?;
-    let transport_tag = match a.transport {
-        TransportArg::Zenoh => "zenoh",
-        TransportArg::Iceoryx2 => "iceoryx2",
-    };
+    let registry = active_module_registry();
+    let resolved = resolve_topic_for_runtime(&a.topic, registry.as_ref())?;
+    let transport = pick_transport(a.transport, &resolved)?;
+    let transport_tag = Transport::from(transport).as_str();
     // Best-effort: compile the vault so payload bodies render as decoded
     // JSON (protobuf descriptors; plus the iox2 flat layouts when listening
     // on iceoryx2). The failure path (no protoc, vault empty, etc.) is
     // non-fatal — frames then render as hex, still with whatever schema
-    // the flag, the wire, or the Header names. The warning lands on stderr
-    // so users know why they're getting hex instead of JSON.
-    let decoders = match ListenDecoders::build(matches!(a.transport, TransportArg::Iceoryx2)) {
+    // the flag, the wire, the Header, or the module config names. The
+    // warning lands on stderr so users know why they're getting hex
+    // instead of JSON.
+    let decoders = match ListenDecoders::build(transport == TransportArg::Iceoryx2) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("warning: dynamic decode disabled ({e:#}); rendering payload as hex");
@@ -3135,7 +3181,7 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
         None
     };
     let (mut iter, payload): (Box<dyn FrameIter>, Option<sb_listen::Iox2PayloadDetail>) =
-        match a.transport {
+        match transport {
             TransportArg::Zenoh => (
                 Box::new(sb_listen::listen_zenoh(&resolved.full_topic)?),
                 None,
@@ -3157,6 +3203,7 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
         },
         no_data: a.no_data,
         keep_bytes: a.show,
+        config_schema: resolved.schema.as_deref(),
     };
     let mut warned_no_schema = false;
     let mut warned_view = false;
@@ -3478,10 +3525,12 @@ fn cmd_topic_prune(a: TopicPruneCli) -> Result<()> {
 }
 
 fn cmd_topic_pub(a: TopicPubCli) -> Result<()> {
-    let resolved = resolve_topic_for_runtime(&a.topic)?;
+    // Publishing raw hex needs no schema, so no registry lookup.
+    let resolved = resolve_topic_for_runtime(&a.topic, None)?;
+    let transport = pick_transport(a.transport, &resolved)?;
     let bytes = sb_listen::zenoh_bytes::parse_hex(&a.bytes_hex)
         .with_context(|| format!("parsing hex {:?}", a.bytes_hex))?;
-    match a.transport {
+    match transport {
         TransportArg::Zenoh => sb_listen::publish_zenoh_raw(&resolved.full_topic, &bytes)?,
         TransportArg::Iceoryx2 => sb_listen::publish_iceoryx_raw(&resolved.full_topic, &bytes)?,
     }
@@ -3489,19 +3538,74 @@ fn cmd_topic_pub(a: TopicPubCli) -> Result<()> {
         "published {} byte(s) on {} via {:?}",
         bytes.len(),
         resolved.full_topic,
-        a.transport
+        transport
     );
     Ok(())
+}
+
+/// The active workspace's module registry (`flow.yaml::modules`: module
+/// name → its `sb.dev.yml`).
+type ModuleRegistry = std::collections::BTreeMap<String, PathBuf>;
+
+/// [`ModuleRegistry`] of the active workspace, or `None` when there is no
+/// config, no active workspace, or its `flow.yaml` does not read. Only
+/// used to look up a topic's schema, which is a fallback, so every failure
+/// is silent.
+fn active_module_registry() -> Option<ModuleRegistry> {
+    let cfg = load_config().ok()?;
+    let home = SbHome::from_config(&cfg).ok()?;
+    let workspace = active_workspace(&home).ok()??;
+    sb_workspace::read_flow(&home, &workspace)
+        .ok()
+        .map(|flow| flow.modules)
+}
+
+/// Transport for `sb topic listen/pub`: `--transport` when given, else the
+/// one the resolver found (the `<transport>` segment of a fully-qualified
+/// topic, or the matched `sb.dev.yml` entry of a bare one). A flag that
+/// disagrees with the topic wins, with a note on stderr. There is no
+/// default: with neither, the topic cannot be routed.
+fn pick_transport(
+    flag: Option<TransportArg>,
+    resolved: &sb_discover::ResolveOutcome,
+) -> Result<TransportArg> {
+    match (flag, resolved.transport) {
+        (Some(flag), Some(path)) => {
+            let chosen = Transport::from(flag);
+            if chosen != path {
+                eprintln!(
+                    "note: path says {}, --transport says {}; using {}",
+                    path.path_segment(),
+                    chosen.as_str(),
+                    chosen.as_str()
+                );
+            }
+            Ok(flag)
+        }
+        (Some(flag), None) => Ok(flag),
+        (None, Some(path)) => Ok(path.into()),
+        (None, None) => anyhow::bail!(
+            "cannot infer transport from {}: expected \
+             /<device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2",
+            resolved.full_topic
+        ),
+    }
 }
 
 /// Resolve a bare-or-full topic for `sb topic listen/pub`. Builds the
 /// full path against the cwd module's `sb.dev.yml` + the active
 /// workspace + sb.config.yml's `device`. Fully-qualified inputs are
-/// passed through unchanged (no cwd module needed).
-fn resolve_topic_for_runtime(input: &str) -> Result<sb_discover::ResolveOutcome> {
+/// passed through unchanged (no cwd module needed); with a `registry`,
+/// their schema is looked up in the owning module's `sb.dev.yml`.
+fn resolve_topic_for_runtime(
+    input: &str,
+    registry: Option<&ModuleRegistry>,
+) -> Result<sb_discover::ResolveOutcome> {
     if input.starts_with('/') {
         // Fast path — `device` / `workspace` aren't needed for passthrough.
-        return sb_discover::resolve_bare_topic(input, None, "", "")
+        let lookup = registry.map(|r| move |module: &str| r.get(module).cloned());
+        let lookup = lookup.as_ref().map(|f| f as &sb_discover::ModuleLookup<'_>);
+        return sb_discover::resolve_bare_topic(input, None, "", "", lookup)
             .map_err(|e| anyhow::anyhow!("{e}"));
     }
     let cfg = load_config()?;
@@ -3517,7 +3621,7 @@ fn resolve_topic_for_runtime(input: &str) -> Result<sb_discover::ResolveOutcome>
     };
     let workspace = sb_workspace::active_workspace(&home)?.unwrap_or_default();
     let device = cfg.device.clone().unwrap_or_else(|| "dev01".to_string());
-    sb_discover::resolve_bare_topic(input, cwd_module.as_ref(), &device, &workspace)
+    sb_discover::resolve_bare_topic(input, cwd_module.as_ref(), &device, &workspace, None)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -4066,5 +4170,61 @@ mod app_dispatch_tests {
         assert_eq!(parse_app_kind("Docker"), Ok(sb_apps::AppKind::Docker));
         assert_eq!(parse_app_kind("none"), Ok(sb_apps::AppKind::None));
         assert!(parse_app_kind("vm").is_err());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Topic transport
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod topic_transport_tests {
+    use super::*;
+
+    /// `-t` / `--transport` take the short and path-segment spellings; with
+    /// neither a flag nor a `<transport>` segment, listen and pub refuse to
+    /// guess (there is no zenoh default any more).
+    #[test]
+    fn transport_flag_aliases_parse_and_no_flag_needs_a_path_segment() {
+        let transport_of = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().cmd {
+            Some(Cmd::Topic(TopicCmd::Listen(a))) => a.transport,
+            Some(Cmd::Topic(TopicCmd::Pub(a))) => a.transport,
+            Some(Cmd::Topic(TopicCmd::List(a))) => a.transport,
+            _ => panic!("expected sb topic listen/pub/list"),
+        };
+        let t = TransportArg::Iceoryx2;
+        assert_eq!(
+            transport_of(&["sb", "topic", "listen", "-t", "i", "/d/w/m/zenoh/x"]),
+            Some(t)
+        );
+        assert_eq!(
+            transport_of(&["sb", "topic", "pub", "--transport", "iox2", "x", "00"]),
+            Some(t)
+        );
+        assert_eq!(
+            transport_of(&["sb", "topic", "list", "--transport", "i"]),
+            Some(t)
+        );
+        let z = Some(TransportArg::Zenoh);
+        assert_eq!(transport_of(&["sb", "topic", "listen", "-t", "z", "x"]), z);
+        assert_eq!(
+            transport_of(&["sb", "topic", "pub", "-t", "zenoh", "x", "00"]),
+            z
+        );
+        assert!(Cli::try_parse_from(["sb", "topic", "listen", "-t", "tcp", "x"]).is_err());
+
+        let flag = transport_of(&["sb", "topic", "listen", "/not/canonical"]);
+        assert_eq!(flag, None);
+        let resolved =
+            sb_discover::resolve_bare_topic("/not/canonical", None, "", "", None).unwrap();
+        let err = pick_transport(flag, &resolved).unwrap_err().to_string();
+        assert!(
+            err.starts_with("cannot infer transport from /not/canonical: expected "),
+            "{err}"
+        );
+        // The segment fills in when the flag is absent; the flag wins over it.
+        let segment = sb_discover::resolve_bare_topic("/d/w/m/iox2/x", None, "", "", None).unwrap();
+        assert_eq!(pick_transport(None, &segment).unwrap(), t);
+        assert_eq!(pick_transport(z, &segment).unwrap(), TransportArg::Zenoh);
     }
 }

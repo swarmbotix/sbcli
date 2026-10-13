@@ -139,7 +139,7 @@ is always the authority on what this build actually accepts.
 | `sb init` | Adopt an existing user project as a swarmbotix module. Drops `sb.dev.yml`, a `runscript.bash` stub, and an empty `swarmbotix_io/`; registers the module in the active workspace's `flow.yaml`. | [sbcli_init.md](sbcli_init.md) | L2 |
 | `sb pub *` / `sb sub *` / `sb list` | The codegen surface. Each `add` / `edit` / `rm` mutates `sb.dev.yml` AND regenerates the file under `swarmbotix_io/{publishers,subscribers}/`. Generated classes expose a `TopicOverrides` API for runtime per-segment override (swarm instances, see consuming-doc §3). | [sbcli_pubsub.md](sbcli_pubsub.md) (codegen reference) · [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md) (consumer guide: main, build glue, swarm pattern) | L3 |
 | `sb service *` | REST-style request/response over Zenoh queryables, JSON payloads, independent of pub/sub. `init` drops a self-contained router (`service.py` / `service.rs`) into the module's io dir with its namespace baked in; you write the routes. Rust and Python only. | [sbcli_reqres.md](sbcli_reqres.md) | L4 |
-| `sb topic *` | Introspect the live swarm. `list` enumerates active topics on either transport; `listen` decodes frames as JSON lines; `pub` does a one-shot raw publish; `prune` clears iceoryx2 registrations left behind by dead publishers (the `(dead)` rows in `list`). | (ref TBD — see `requirements.md` §"Topic Introspection") | L4 |
+| `sb topic *` | Introspect the live swarm. `list` enumerates active topics on either transport; `listen` decodes frames as JSON lines; `pub` does a one-shot raw publish; `prune` clears iceoryx2 registrations left behind by dead publishers (the `(dead)` rows in `list`). `listen` and `pub` read the transport from the topic path's `zenoh` / `iox2` segment, so `-t zenoh` or `-t iox2` is needed only for a path without one (sb 0.4.1+). | (ref TBD — see `requirements.md` §"Topic Introspection") | L4 |
 | `sb up` / `sb run` / `sb stop` / `sb down` / `sb attach` | Launch every module in the active workspace under tmux, or a single module, or kill the session. `up` / `run` execute a module's `runscript.bash`; `stop` is `run`'s symmetric counterpart and executes its `stopscript.bash` in the same window. | [sbcli_launch.md](sbcli_launch.md) | L5 |
 | `sb install` / `sb app *` | Install app packages from a git URL or a local folder and run them as `sb <name> [args...]`, with no `PATH` change. `app init` makes any folder a package by writing `sb.app.yml`; `list` / `info` / `update` / `remove` manage what is installed. Global to the host, independent of workspaces. | [sbcli_app.md](sbcli_app.md) | `sb 0.2.1+` |
 | `sb update` / `sb --version` | Self-update from the GitHub release page: `--version` adds an `update available` line (cached 24 h, silent offline, `SB_NO_UPDATE_CHECK=1` to skip); `update --check` compares and exits 10 when newer exists; `update` downloads, verifies the checksum and runs the package installer in place. | [sbcli_update.md](sbcli_update.md) | `sb 0.2.1+` |
@@ -185,7 +185,9 @@ Order of operations from a fresh host to a running swarm:
 │ sb attach                # attach to the tmux session               │
 │ sb topic list            # enumerate live topics                    │
 │ sb topic listen /dev01/my_project/camera_app/iox2/image_raw \       │
-│     --transport iceoryx2 # JSON lines; listen defaults to zenoh     │
+│     --show               # JSON lines; iceoryx2, from the path      │
+│   # sb 0.4.1+: no transport flag needed; the path's iox2 / zenoh    │
+│   #   segment picks it. -t zenoh|iox2 only for other paths.         │
 │   # sb 0.4.0+ flags:                                                │
 │   #   --type <style>/<ns>/<Leaf>  decode as this vault message      │
 │   #   --no-data                   omit bytes data, keep <name>_len  │

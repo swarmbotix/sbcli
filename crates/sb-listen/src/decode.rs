@@ -19,6 +19,10 @@
 //!    vault name) or the iceoryx2 service's payload type name (a
 //!    language-native name, mapped to a vault iox2 struct by leaf + size).
 //! 3. `"header"` — the swarmbotix `Header.metadata.msg_type` probe.
+//! 4. `"config"`: the `type` the publishing module's `sb.dev.yml` declares
+//!    for the topic ([`DecodeContext::config_schema`]). Covers publishers
+//!    that stamp neither an encoding schema nor a Header type (older
+//!    templates).
 //!
 //! Nothing resolved → hex with a null schema.
 //!
@@ -65,6 +69,7 @@ enum SchemaSource {
     Flag,
     Wire,
     Header,
+    Config,
 }
 
 impl SchemaSource {
@@ -73,6 +78,7 @@ impl SchemaSource {
             Self::Flag => "flag",
             Self::Wire => "wire",
             Self::Header => "header",
+            Self::Config => "config",
         }
     }
 }
@@ -85,7 +91,8 @@ pub struct DecodedFrame<'a> {
     pub transport: &'a str,
     pub topic: &'a str,
     pub schema: Option<String>,
-    /// `"flag"` | `"wire"` | `"header"`: which source supplied `schema`.
+    /// `"flag"` | `"wire"` | `"header"` | `"config"`: which source supplied
+    /// `schema`.
     /// `None` whenever `schema` is `None`.
     pub schema_source: Option<&'static str>,
     pub hash: Option<String>,
@@ -149,6 +156,10 @@ pub struct DecodeContext<'a> {
     /// `--show` viewer). Call [`DecodedFrame::summarize_bytes`] before
     /// printing.
     pub keep_bytes: bool,
+    /// Vault name the publishing module's `sb.dev.yml` declares for this
+    /// topic (`sb_discover::ResolveOutcome::schema`). The last schema
+    /// source, after the Header probe.
+    pub config_schema: Option<&'a str>,
 }
 
 /// What maps an iceoryx2 payload to a vault message.
@@ -188,14 +199,15 @@ pub fn decode_frame<'a>(
 }
 
 /// Resolve the schema (`type_override` > `frame.wire_schema` > Header
-/// probe) and decode the body with it.
+/// probe > `ctx.config_schema`) and decode the body with it.
 ///
-/// - `transport == "iceoryx2"` with a flag or wire schema decodes the body
-///   as a `#[repr(C)]` struct from `ctx.iox2`. A wire type name maps to the
-///   vault struct with the same leaf (last `::` / `.` segment) whose layout
-///   size equals the payload's; no match renders hex with the native name
-///   as `schema`. A `--type` that matches no iox2 layout is tried as
-///   protobuf next (a `[u8]` slab may carry protobuf bytes).
+/// - `transport == "iceoryx2"` with a flag, wire, or config schema decodes
+///   the body as a `#[repr(C)]` struct from `ctx.iox2`. A wire type name
+///   maps to the vault struct with the same leaf (last `::` / `.` segment)
+///   whose layout size equals the payload's; no match renders hex with the
+///   native name as `schema`. A `--type` or config name that matches no
+///   iox2 layout is tried as protobuf next (a `[u8]` slab may carry
+///   protobuf bytes).
 /// - Everything else decodes as protobuf through `ctx.pool`.
 ///
 /// Falls back to hex when `raw` is set, nothing resolved the schema, the
@@ -211,7 +223,7 @@ pub fn decode_frame_dynamic<'a>(
     if raw {
         return decode_frame(transport, topic, &frame.bytes, true);
     }
-    let Some((schema, source)) = resolve_schema(type_override, frame) else {
+    let Some((schema, source)) = resolve_schema(type_override, frame, ctx.config_schema) else {
         return hex_frame(transport, topic, None, None, None, &frame.bytes);
     };
     if transport == TRANSPORT_ICEORYX2 && source != SchemaSource::Header {
@@ -254,18 +266,29 @@ pub fn decode_frame_dynamic<'a>(
     decode_protobuf(transport, topic, schema, source, &frame.bytes, ctx)
 }
 
-/// First hit of `type_override`, `frame.wire_schema`, Header probe.
-fn resolve_schema(type_override: Option<&str>, frame: &Frame) -> Option<(String, SchemaSource)> {
+/// First hit of `type_override`, `frame.wire_schema`, Header probe,
+/// `config_schema`.
+fn resolve_schema(
+    type_override: Option<&str>,
+    frame: &Frame,
+    config_schema: Option<&str>,
+) -> Option<(String, SchemaSource)> {
     if let Some(t) = type_override.map(str::trim).filter(|t| !t.is_empty()) {
         return Some((t.to_owned(), SchemaSource::Flag));
     }
     if let Some(w) = frame.wire_schema.as_deref().filter(|w| !w.is_empty()) {
         return Some((w.to_owned(), SchemaSource::Wire));
     }
-    probe_header(&frame.bytes)
+    if let Some(h) = probe_header(&frame.bytes)
         .map(|m| m.msg_type)
         .filter(|s| !s.is_empty())
-        .map(|s| (s, SchemaSource::Header))
+    {
+        return Some((h, SchemaSource::Header));
+    }
+    config_schema
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| (c.to_owned(), SchemaSource::Config))
 }
 
 /// Pick the vault iox2 layout for `schema` and decode `bytes` with it.
@@ -331,7 +354,7 @@ fn native_leaf(type_name: &str) -> &str {
     tail.rsplit('.').next().unwrap_or(tail)
 }
 
-/// Whether `name` (from `--type`) names `layout`: the full
+/// Whether `name` (from `--type` or the module config) names `layout`: the full
 /// `<style>/<ns>/<Leaf>`, the same with a variant's struct name as leaf, or
 /// the legacy two-segment `<ns>/<Leaf>`.
 fn matches_vault_name(layout: &Iox2Struct, name: &str) -> bool {
@@ -576,10 +599,14 @@ mod tests {
     }
 
     /// `--type` beats the transport's schema, which beats the Header probe,
-    /// and the winner is named in the rendered `schema_source` column.
+    /// which beats the module config, and the winner is named in the
+    /// rendered `schema_source` column.
     #[test]
-    fn schema_precedence_is_flag_then_wire_then_header() {
-        let ctx = DecodeContext::default();
+    fn schema_precedence_is_flag_then_wire_then_header_then_config() {
+        let ctx = DecodeContext {
+            config_schema: Some("ros2/custom/CubePoses"),
+            ..DecodeContext::default()
+        };
         let header_only = Frame::from(synthetic_stamped("ros2/std/StringStamped", 5.0));
         let with_wire = Frame {
             wire_schema: Some("ros2/std/String".into()),
@@ -605,6 +632,23 @@ mod tests {
         let header = decode_frame_dynamic("zenoh", "/x", &header_only, false, None, &ctx);
         assert_eq!(header.schema.as_deref(), Some("ros2/std/StringStamped"));
         assert_eq!(header.schema_source, Some("header"));
+
+        // No flag, no wire schema, no Header: the module config names it.
+        let untagged = Frame::from(b"foo".to_vec());
+        let config = decode_frame_dynamic("zenoh", "/x", &untagged, false, None, &ctx);
+        assert_eq!(config.schema.as_deref(), Some("ros2/custom/CubePoses"));
+        assert_eq!(config.schema_source, Some("config"));
+        assert!(render_decoded_json_line(&config).contains("\"schema_source\":\"config\""));
+
+        let none = decode_frame_dynamic(
+            "zenoh",
+            "/x",
+            &untagged,
+            false,
+            None,
+            &DecodeContext::default(),
+        );
+        assert_eq!((none.schema, none.schema_source), (None, None));
     }
 
     #[test]

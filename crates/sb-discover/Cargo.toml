@@ -15,6 +15,10 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 prost = { workspace = true }
 zenoh = { workspace = true }
 iceoryx2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

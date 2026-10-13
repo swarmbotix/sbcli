@@ -201,6 +201,7 @@ fn listen_iceoryx_opens_typed_service_and_decodes_it() {
         },
         no_data: false,
         keep_bytes: false,
+        config_schema: None,
     };
     let frame = decode_frame_dynamic("iceoryx2", name, &received, false, None, &ctx);
     assert_eq!(frame.schema.as_deref(), Some("test/lvl4/MiniStamped"));

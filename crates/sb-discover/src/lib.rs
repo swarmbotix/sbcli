@@ -28,7 +28,7 @@ mod resolve;
 use probe::encoding_schema;
 pub use probe::{HeaderProbe, MetadataProbe, StampedProbe, probe_header};
 pub use render::{TableLayout, render_json_lines, render_table};
-pub use resolve::{ResolveError, ResolveOutcome, resolve_bare_topic};
+pub use resolve::{ModuleLookup, ResolveError, ResolveOutcome, config_schema, resolve_bare_topic};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

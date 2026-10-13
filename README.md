@@ -117,10 +117,12 @@ for zero-copy shared memory on one device.
 
 - **`sb topic list`** -- enumerates live topics on both transports, marking
   iceoryx2 registrations left behind by dead publishers
-- **`sb topic listen`** -- decodes frames as JSON lines on either transport,
-  typed by `--type`, the publisher's wire schema, or the Header; `--show`
-  opens a window for image topics
-- **`sb topic pub`** -- one-shot raw publish for smoke tests
+- **`sb topic listen`** -- decodes frames as JSON lines on the transport the
+  topic path names, typed by `--type`, the publisher's wire schema, the
+  Header, or the module's `sb.dev.yml`; `--show` opens a window for image
+  topics
+- **`sb topic pub`** -- one-shot raw publish for smoke tests, on the
+  transport the topic path names
 - **`sb topic prune`** -- clears dead iceoryx2 registrations
 
 ## How Messages Travel
@@ -386,8 +388,7 @@ build as described in
 # edit each module's runscript.bash so it actually launches the app, then:
 sb up                                                    # tmux session comes up
 sb attach                                                # look inside
-sb topic listen --transport iceoryx2 /dev01/my_project/camera_app/iox2/image_raw   # add --show for images
-sb topic listen /dev01/my_project/camera_app/iox2/image_raw
+sb topic listen /dev01/my_project/camera_app/iox2/image_raw   # add --show for images
 sb run camera_app --id 2                                 # restart one module with args
 sb stop camera_app                                       # run its stopscript.bash
 ```
@@ -409,8 +410,8 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | Command | Purpose |
 |---|---|
 | `sb topic list` | Enumerate live topics on both transports |
-| `sb topic listen <topic>` | Decode frames as JSON lines; `--show` displays image frames in a window |
-| `sb topic pub <topic> <bytes-hex>` | One-shot raw publish |
+| `sb topic listen <topic> [-t zenoh\|iox2]` | Decode frames as JSON lines; `--show` displays image frames in a window |
+| `sb topic pub <topic> <bytes-hex> [-t zenoh\|iox2]` | One-shot raw publish |
 | `sb topic prune` | Clear iceoryx2 registrations left by dead publishers |
 
 ### Setup
@@ -439,7 +440,10 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | `sb service init` | Scaffold REST-style request/response over Zenoh queryables |
 
 With no `--zenoh` / `--iox2` flag, `sb pub add` and `sb sub add` default to
-iceoryx2, while `sb topic listen` and `sb topic pub` default to Zenoh.
+iceoryx2. `sb topic listen` and `sb topic pub` have no default: they take
+the transport from the topic path's `zenoh` / `iox2` segment, or for a bare
+topic from its entry in the cwd module's `sb.dev.yml`. Any other path needs
+`-t zenoh` or `-t iox2`.
 
 ### Launch
 

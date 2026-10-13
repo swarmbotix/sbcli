@@ -453,29 +453,36 @@ Enumerate currently-active topics on either transport.
 - `-t, --timeout <sec>` (default: `0.5`) — Zenoh discovery window. iceoryx2 uses `Service::list` and ignores the window.
 - `-k, --keyword <str>` (default: none) — substring filter on topic name.
 - `--case-sensitive` (default: insensitive) — toggle keyword case.
-- `--transport zenoh | iceoryx2 | all` (default: `all`) — restrict discovery.
+- `--transport zenoh | iceoryx2` (default: both): restrict discovery. Aliases `z` (zenoh), `i` and `iox2` (iceoryx2) are `sb 0.4.1+`. Long form only: `-t` is `--timeout` on this verb. There is no `all` value; omit the flag for both.
 - `--json` (default: pretty table) — one JSON line per topic instead. JSON keys: `topic`, `transport`, `schema`, `hash`, `rate_hz`, `publisher_pid`, `is_dead`.
 
 Table columns: `[transport-tag] rate Hz  PID <n>[ (dead)]  schema  topic`. The PID column is populated for iceoryx2 via `Service::list` → `dynamic_details.nodes` → `UniqueNodeId::pid()` — alive owner shown as `PID <n>`, stale on-disk service whose owning process is gone shown as `PID <n> (dead)`. Zenoh entries render `-` in the PID column (the wire format does not yet carry publisher PID).
 
+`sb 0.4.1+`: a Zenoh row with neither a Header `msg_type` nor an encoding schema takes its `schema` from the owning module's `sb.dev.yml`, by the same lookup as `sb topic listen`'s `"config"` source below (`fill_config_schemas` → `sb_discover::config_schema` on the row's key expression). Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no matching entry) leaves the row blank. Table and JSON shapes are unchanged.
+
 #### `sb topic listen <topic> [OPTIONS]`
 Subscribe and print frames as JSON lines.
 - `<topic>` (required) — bare names resolved via cwd's `sb.dev.yml`.
-- `--transport zenoh | iceoryx2` (default: `zenoh`) — which transport to subscribe on.
+- `-t, --transport zenoh | iceoryx2` (default: inferred, below): which transport to subscribe on. Aliases `z` (zenoh), `i` and `iox2` (iceoryx2).
 - `--raw` (default: decode via vault) — emit hex bytes; payload becomes `{kind: "hex", bytes: "…"}`.
 - `-n, --count <N>` (default: `0` — run until SIGINT) — stop after N frames.
 - `--type <style>/<ns>/<Leaf>` (default: none): decode every frame as this vault message, overriding the wire schema and the Header probe.
 - `--no-data` (default: off): drop `bytes` field contents and keep only `<name>_len`.
 - `--show` (default: off): open a window and draw image frames (below). Conflicts with `--raw`.
 
-`--type`, `--no-data`, `--show`, the `schema_source` key, the `bytes` summary, the wire-schema source, and typed iceoryx2 opens are `sb 0.4.0+`.
+`--type`, `--no-data`, `--show`, the `schema_source` key, the `bytes` summary, the wire-schema source, and typed iceoryx2 opens are `sb 0.4.0+`. The `-t` short, the transport aliases, transport inference, and the `"config"` source are `sb 0.4.1+`; before 0.4.1, `--transport` defaulted to `zenoh`.
 
-Output: one JSON line per frame, keys in this order: `transport`, `topic`, `schema`, `schema_source`, `hash`, `encoding`, `payload`. `schema_source` is `"flag"`, `"wire"`, `"header"`, or `null` (exactly when `schema` is `null`). `encoding` is `"protobuf"`, `"iox2"` (an iceoryx2 `#[repr(C)]` struct), or `null`. `payload` is `{kind: "json", json: {…}}` or `{kind: "hex", bytes: "…"}`. `hash` is reserved and always `null`. A `bytes` field longer than 64 bytes prints as `{len, head_hex}` (first 16 bytes).
+Transport, when `-t` is absent (`pick_transport`): the `<transport>` segment of a fully-qualified `/<device>/<ws>/<module>/<zenoh|iox2>/<topic>`, or, for a bare topic, the transport of the cwd `sb.dev.yml` entry it resolved to. There is no default. A fully-qualified path not in that five-segment form, without `-t`, exits 1 with
+`error: cannot infer transport from <topic>: expected /<device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2`.
+A `-t` that disagrees with the path wins, with a stderr note such as `note: path says zenoh, --transport says iceoryx2; using iceoryx2`.
+
+Output: one JSON line per frame, keys in this order: `transport`, `topic`, `schema`, `schema_source`, `hash`, `encoding`, `payload`. `schema_source` is `"flag"`, `"wire"`, `"header"`, `"config"` (`sb 0.4.1+`), or `null` (exactly when `schema` is `null`). `encoding` is `"protobuf"`, `"iox2"` (an iceoryx2 `#[repr(C)]` struct), or `null`. `payload` is `{kind: "json", json: {…}}` or `{kind: "hex", bytes: "…"}`. `hash` is reserved and always `null`. A `bytes` field longer than 64 bytes prints as `{len, head_hex}` (first 16 bytes).
 
 Type resolution, per frame, first hit wins:
 1. `--type` → `"flag"`.
 2. The transport's wire schema → `"wire"`. Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`, set by generated Rust, Python, and C++ Zenoh publishers (Flutter and Unity set none). iceoryx2: the payload type name the service was registered with, mapped to the vault iox2 struct with the same leaf and the live payload's size.
 3. The swarmbotix Header probe (`metadata.msg_type`) → `"header"`.
+4. The topic's entry in the module's `sb.dev.yml` → `"config"` (`sb 0.4.1+`; `ResolveOutcome::schema`). The entry's `type` is used verbatim. Bare topic: the cwd module's matched entry. Fully-qualified: `<module>` is looked up in the active workspace's `flow.yaml` (`active_module_registry`), as written, then without its `-<instance>` suffix (everything from the first `-`; `ips_track-sb00` → `ips_track`); publishers then subscribers, the first entry whose transport equals the path's and whose `topic` equals the path's last segment or the whole path (`sb_discover::config_schema`). The cwd `sb.dev.yml` is never consulted for a fully-qualified path. Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no entry, path not in the five-segment form) skips the source silently. On iceoryx2 a typed service always supplies a wire type first, so the source matters only for an untyped `[u8]` service; there, as with `--type`, the name matches no iox2 layout (the element is one byte), so the bytes are tried as protobuf, else hex with `schema` kept.
 
 No hit: hex, `schema: null`, and a one-time stderr hint to re-render the publisher (`sb pub edit <name> -m <type>`) or pass `--type`. A resolved type that does not decode prints hex with `schema` kept. `--raw` skips resolution entirely.
 
@@ -485,11 +492,11 @@ iceoryx2: the service is opened with its own registered payload type (read via `
 
 Decoding uses a `DescriptorPool` built from the vault at startup, one `protoc` run per style with that style's `message_definitions/` as the include root (`sb_listen::build_pool`), so intra-style imports resolve exactly as they do for `sb message compile`. A style that fails to compile prints `warning: dynamic decode skipped for style <style> (<protoc error>)` on stderr and is left out; the pool is only abandoned (`warning: dynamic decode disabled`, hex payloads) when `protoc` is unconfigured, the vault is empty, or no style compiled.
 
-#### `sb topic pub <topic> <bytes-hex> [--transport zenoh | iceoryx2]`
+#### `sb topic pub <topic> <bytes-hex> [-t, --transport zenoh | iceoryx2]`
 Publish raw bytes once.
-- `<topic>` (required)
+- `<topic>` (required): bare or fully-qualified.
 - `<bytes-hex>` (required) — hex string (no `0x` prefix).
-- `--transport zenoh | iceoryx2` (default: `zenoh`)
+- `-t, --transport zenoh | iceoryx2` (default: inferred): aliases `z` (zenoh), `i` and `iox2` (iceoryx2). Inference, the `cannot infer transport` error, and the disagreement note are exactly as for `sb topic listen` (`sb 0.4.1+`; before it the default was `zenoh`). No schema lookup: raw bytes need none.
 
 #### `sb topic prune [--json]`
 Remove iceoryx2 on-disk node registrations whose owning process is gone — the entries `sb topic list` flags `(dead)`. Walks `Node::list` for the global iceoryx2 config and calls `try_remove_stale_resources()` on every `NodeState::Dead`. Zenoh is session-based and has no on-disk state to prune, so this verb is iceoryx2-only.
