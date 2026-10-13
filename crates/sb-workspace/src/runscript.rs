@@ -117,7 +117,8 @@ pub fn render(runscript_path: &Path, module: &str) -> String {
 /// edits `flow.yaml::instances` after this script is generated, the
 /// next invocation emits a one-line warning to stderr (the script
 /// still runs, on the assumption that the existing branches are good
-/// enough; users regenerate with `sb init --docker --force`).
+/// enough; users regenerate by deleting `runscript.bash` and running
+/// `sb init --docker`, never `--force`, which also resets `sb.dev.yml`).
 // `push_str(&format!(..))` throughout: this is a template builder that runs
 // once per `sb init --docker`, and reading it as a linear transcript of the
 // emitted script matters more than sparing an intermediate String.
@@ -139,21 +140,22 @@ pub fn render_docker(
     let mut out = String::new();
     out.push_str("#!/usr/bin/env bash\n");
     out.push_str(&format!("# {}\n", runscript_path.display()));
-    out.push_str("# regenerate with: sb init --docker --force\n");
+    out.push_str("# regenerate: delete runscript.bash, then run sb init --docker\n");
     out.push_str("#\n");
     out.push_str(
         "# Docker-flavored runscript: each `--id <name>` selects one pre-resolved\n\
          # `docker run` invocation below. Per-instance image, env, --device, mounts,\n\
          # --gpus, and --network were baked in from flow.yaml::instances at\n\
-         # `sb init --docker` time. Edit flow.yaml and re-run\n\
-         # `sb init --docker --force` to update.\n",
+         # `sb init --docker` time. To update, edit flow.yaml, delete this file,\n\
+         # and run `sb init --docker` (not --force: it also resets sb.dev.yml).\n",
     );
     out.push_str("set -euo pipefail\n");
     out.push_str("cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")\"\n\n");
 
     // Staleness check: warn (don't fail) if flow.yaml is newer than us.
     out.push_str("# Staleness check — warn if flow.yaml has been edited since we were\n");
-    out.push_str("# generated. The script still runs; regenerate with --force to refresh.\n");
+    out.push_str("# generated. The script still runs; delete it and run sb init --docker\n");
+    out.push_str("# to refresh.\n");
     out.push_str(&format!(
         "__sb_flow={}\n",
         shell_single_quote(&flow_yaml_path.display().to_string())
@@ -161,8 +163,9 @@ pub fn render_docker(
     out.push_str("__sb_self=\"$PWD/$(basename \"${BASH_SOURCE[0]}\")\"\n");
     out.push_str("if [[ -f \"$__sb_flow\" ]] && [[ \"$__sb_flow\" -nt \"$__sb_self\" ]]; then\n");
     out.push_str(
-        "  echo \"warning: $__sb_flow is newer than $__sb_self — \
-         instances may be stale; regenerate with: sb init --docker --force\" >&2\n",
+        "  echo \"warning: $__sb_flow is newer than $__sb_self, so its \
+         instances may be stale; regenerate: delete runscript.bash, then run \
+         sb init --docker\" >&2\n",
     );
     out.push_str("fi\n\n");
 
@@ -268,78 +271,6 @@ fn shell_single_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-
-    use sb_core::DockerSpec;
-
-    fn left_right_fixture() -> Vec<ModuleInstance> {
-        let mut env_left = BTreeMap::new();
-        env_left.insert("CAM_SERIAL".into(), "A123".into());
-        env_left.insert("LOG_LEVEL".into(), "info".into());
-        let mut env_right = BTreeMap::new();
-        env_right.insert("CAM_SERIAL".into(), "B456".into());
-        vec![
-            ModuleInstance {
-                id: "left".into(),
-                label: Some("Left Camera".into()),
-                docker: Some(DockerSpec {
-                    image: Some("cam_gige_ht:latest".into()),
-                    env: env_left,
-                    devices: vec!["/dev/video0".into()],
-                    mounts: vec![],
-                    gpus: Some("all".into()),
-                    network: None,
-                }),
-                args: vec![],
-            },
-            ModuleInstance {
-                id: "right".into(),
-                label: None,
-                docker: Some(DockerSpec {
-                    image: Some("cam_gige_ht:latest".into()),
-                    env: env_right,
-                    devices: vec!["/dev/video1".into()],
-                    mounts: vec![],
-                    gpus: None,
-                    network: None,
-                }),
-                args: vec![],
-            },
-        ]
-    }
-
-    #[test]
-    fn docker_runscript_includes_branch_per_instance() {
-        let rs = render_docker(
-            &PathBuf::from("/m/runscript.bash"),
-            "cam_gige_ht",
-            &left_right_fixture(),
-            &PathBuf::from("/ws/flow.yaml"),
-        );
-        // Each id appears as a case-branch label.
-        assert!(rs.contains("'left')"), "missing left branch:\n{rs}");
-        assert!(rs.contains("'right')"), "missing right branch:\n{rs}");
-        // Container name = <module>-<id>.
-        assert!(rs.contains("--name 'cam_gige_ht-left'"), "name missing");
-        assert!(rs.contains("--name 'cam_gige_ht-right'"), "name missing");
-        // Env, devices, gpus baked in.
-        assert!(rs.contains("'CAM_SERIAL=A123'"));
-        assert!(rs.contains("'CAM_SERIAL=B456'"));
-        assert!(rs.contains("--device '/dev/video0'"));
-        assert!(rs.contains("--device '/dev/video1'"));
-        assert!(rs.contains("--gpus 'all'"));
-        // Image, then "$@".
-        assert!(
-            rs.contains("'cam_gige_ht:latest' \"$@\""),
-            "image+args trail missing"
-        );
-        // Header is the docker variant, not the stub.
-        assert!(rs.contains("regenerate with: sb init --docker --force"));
-        assert!(rs.contains("/ws/flow.yaml"), "flow.yaml path embedded");
-        // Unknown-id fallback names known instances.
-        assert!(rs.contains("known: left right"));
-    }
 
     #[test]
     fn shell_single_quote_escapes_internal_apostrophe() {

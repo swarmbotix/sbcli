@@ -1,6 +1,6 @@
 //! Serde types — one Rust struct per on-disk YAML file.
 //!
-//! File ↔ type ↔ owner mapping (see CLAUDE.md):
+//! File ↔ type ↔ owner mapping:
 //!
 //! | File             | Type              | Owner               |
 //! | ---------------- | ----------------- | ------------------- |
@@ -13,11 +13,13 @@
 //! given layer; `SbCliConfig::merge` then resolves the layering.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ident::{IdentError, validate_identifier};
+use crate::style::Backend;
 use crate::topic::{InstanceIdError, validate_instance_id};
 use crate::transport::Transport;
 
@@ -360,14 +362,21 @@ impl SbCliConfig {
 // ModuleDevConfig — `sb.dev.yml`
 // ─────────────────────────────────────────────────────────────────────
 
-/// Per-module development-time interface. Gitignored on user machines
-/// because `root` is an absolute path.
+/// Per-module development-time interface.
+///
+/// `root` is optional: absent means "the directory holding this
+/// `sb.dev.yml`", which keeps the file free of host-specific paths so it
+/// can be committed. Resolve it with [`ModuleDevConfig::module_root`],
+/// never by reading the field directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleDevConfig {
     pub module: String,
     pub language: Language,
-    pub root: PathBuf,
+    /// Module root. Absent = the yaml's own directory; relative = relative
+    /// to that directory; absolute = used as is (pre-0.5.0 files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<PathBuf>,
     #[serde(default = "default_io_dir")]
     pub io_dir: PathBuf,
 
@@ -375,10 +384,45 @@ pub struct ModuleDevConfig {
     pub publishers: Vec<PubSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscribers: Vec<SubSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceSpec>,
 }
 
 fn default_io_dir() -> PathBuf {
     PathBuf::from("swarmbotix_io")
+}
+
+impl ModuleDevConfig {
+    /// The module root for the `sb.dev.yml` at `dev_yml`.
+    ///
+    /// `root:` absent resolves to the yaml's directory, a relative `root:`
+    /// is joined onto that directory, and an absolute one is returned
+    /// unchanged. A bare `sb.dev.yml` (no directory part) resolves to `.`.
+    pub fn module_root(&self, dev_yml: &Path) -> PathBuf {
+        let dir = match dev_yml.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        match &self.root {
+            // `join` with an absolute path replaces, which is the
+            // "absolute is used as is" rule.
+            Some(root) => dir.join(root),
+            None => dir.to_path_buf(),
+        }
+    }
+
+    /// Which entry, if any, is called `name`. Publishers, subscribers and
+    /// services share one namespace; the first match wins in that order.
+    pub fn find_name(&self, name: &str) -> Option<EntryKind> {
+        find_entry_name(&self.publishers, &self.subscribers, &self.services, name)
+    }
+
+    /// Re-run the per-entry load-time rules (`topic:`/`key:`, `type:`,
+    /// `encoding:`, `mime:`) on a config built in code. The error names the
+    /// entry the way a load error would: `publishers[0]: ...`.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_entries(&self.publishers, &self.subscribers)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -395,32 +439,576 @@ pub struct ModulePrdConfig {
     pub publishers: Vec<PubSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscribers: Vec<SubSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceSpec>,
+}
+
+impl ModulePrdConfig {
+    /// See [`ModuleDevConfig::find_name`].
+    pub fn find_name(&self, name: &str) -> Option<EntryKind> {
+        find_entry_name(&self.publishers, &self.subscribers, &self.services, name)
+    }
+
+    /// See [`ModuleDevConfig::validate`].
+    pub fn validate(&self) -> Result<(), String> {
+        validate_entries(&self.publishers, &self.subscribers)
+    }
+}
+
+/// Which list a named entry lives in, and at what index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntryKind {
+    Publisher(usize),
+    Subscriber(usize),
+    Service(usize),
+}
+
+fn find_entry_name(
+    publishers: &[PubSpec],
+    subscribers: &[SubSpec],
+    services: &[ServiceSpec],
+    name: &str,
+) -> Option<EntryKind> {
+    if let Some(i) = publishers.iter().position(|p| p.name == name) {
+        return Some(EntryKind::Publisher(i));
+    }
+    if let Some(i) = subscribers.iter().position(|s| s.name == name) {
+        return Some(EntryKind::Subscriber(i));
+    }
+    services
+        .iter()
+        .position(|s| s.name == name)
+        .map(EntryKind::Service)
+}
+
+fn validate_entries(publishers: &[PubSpec], subscribers: &[SubSpec]) -> Result<(), String> {
+    for (i, p) in publishers.iter().enumerate() {
+        p.validate(i, "publishers")?;
+    }
+    for (i, s) in subscribers.iter().enumerate() {
+        s.validate(i, "subscribers")?;
+    }
+    Ok(())
+}
+
+/// One `services:` entry. Only the name is declared today.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceSpec {
+    pub name: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// TopicRef: where a pub/sub entry's wire key comes from
+// ─────────────────────────────────────────────────────────────────────
+
+/// The topic half of a pub/sub entry: either a bare topic the module
+/// owns, or a verbatim wire key.
+///
+/// The fully-qualified form is `device/ws/module/transport/topic`, with no
+/// leading `/`; it is byte-identical to the wire key on both transports.
+///
+/// In YAML an `Owned` entry is written `topic: hello` and a `Key` entry
+/// `key: dev01/ws/pubber/zenoh/hello`. [`TopicRef::full_key`] is the only
+/// place a bare topic gets its `<device>/<ws>/<module>/<transport>/`
+/// prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TopicRef {
+    /// Bare topic (`hello`), never containing `/`. Prefixed with
+    /// `<device>/<ws>/<module>/<transport>/` when the wire key is built.
+    Owned(String),
+    /// Verbatim wire key (`dev01/ws/pubber/zenoh/hello`), used as is.
+    /// Never starts with `/`.
+    Key(String),
+}
+
+impl TopicRef {
+    /// A bare, module-owned topic. Rejects an empty (or whitespace-only)
+    /// name and any `/`; nested names go through [`TopicRef::key`].
+    pub fn owned(bare: &str) -> Result<Self, TopicRefError> {
+        if bare.trim().is_empty() {
+            return Err(TopicRefError::Empty);
+        }
+        if bare.contains('/') {
+            return Err(TopicRefError::OwnedContainsSlash {
+                topic: bare.to_owned(),
+            });
+        }
+        Ok(Self::Owned(bare.to_owned()))
+    }
+
+    /// A verbatim wire key. Leading `/`s are stripped (the canonical form
+    /// has none); an empty or whitespace-only remainder is rejected.
+    pub fn key(key: &str) -> Result<Self, TopicRefError> {
+        let key = key.trim_start_matches('/');
+        if key.trim().is_empty() {
+            return Err(TopicRefError::Empty);
+        }
+        Ok(Self::Key(key.to_owned()))
+    }
+
+    pub fn is_owned(&self) -> bool {
+        matches!(self, Self::Owned(_))
+    }
+
+    /// The bare topic for `Owned`, the wire key for `Key`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Owned(s) | Self::Key(s) => s,
+        }
+    }
+
+    /// The last path segment: the bare topic itself for `Owned`, the
+    /// segment after the final `/` for `Key`.
+    pub fn leaf(&self) -> &str {
+        match self {
+            Self::Owned(bare) => bare,
+            Self::Key(key) => key.rsplit_once('/').map_or(key.as_str(), |(_, leaf)| leaf),
+        }
+    }
+
+    /// Whether a user-typed reference names this entry. `Owned` matches
+    /// the bare topic exactly; `Key` matches the wire key with any
+    /// leading `/` on the input ignored.
+    pub fn matches_input(&self, input: &str) -> bool {
+        match self {
+            Self::Owned(bare) => input == bare,
+            Self::Key(key) => input.trim_start_matches('/') == key,
+        }
+    }
+
+    /// The wire key. `Owned` becomes
+    /// `{device}/{workspace}/{module}/{transport}/{bare}` (transport as its
+    /// path segment, `iox2` or `zenoh`); `Key` is returned verbatim.
+    pub fn full_key(
+        &self,
+        device: &str,
+        workspace: &str,
+        module: &str,
+        transport: Transport,
+    ) -> String {
+        match self {
+            Self::Owned(bare) => format!(
+                "{device}/{workspace}/{module}/{}/{bare}",
+                transport.path_segment()
+            ),
+            Self::Key(key) => key.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TopicRefError {
+    #[error("exactly one of topic: or key: is required (both given)")]
+    BothTopicAndKey,
+    #[error("exactly one of topic: or key: is required (neither given)")]
+    NeitherTopicNorKey,
+    #[error("topic {topic:?} may not contain '/'; use key: for a verbatim wire key")]
+    OwnedContainsSlash { topic: String },
+    /// An empty key. [`TopicRef::owned`] also returns it for an empty bare
+    /// topic; config loading reports that case as `topic: is empty`.
+    #[error("key: is empty")]
+    Empty,
+    /// A `topic:` with an inner `/` but no leading `/`. sb 0.4.x rendered
+    /// `topic: a/b` as `<device>/<ws>/<module>/<transport>/a/b`; no
+    /// slash-free `topic:` reproduces that wire key, so loading refuses
+    /// it instead of silently moving the entry to another key.
+    #[error(
+        "topic {topic:?} may not contain '/'; use key: for a verbatim wire key \
+         (sb 0.4.x rendered it as <device>/<ws>/<module>/<transport>/{topic}; \
+         to keep that wire key, use key: <device>/<ws>/<module>/<transport>/{topic})"
+    )]
+    LegacyOwnedWithSlash { topic: String },
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Encoding: how a pub/sub entry's payload is framed
+// ─────────────────────────────────────────────────────────────────────
+
+/// Payload encoding of a pub/sub entry (`encoding:` in YAML).
+///
+/// Only zenoh entries may set it. An iceoryx2 payload is always the
+/// fixed-layout struct generated from the `.proto`, so iceoryx2 entries
+/// omit the key (or say `proto`, the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Encoding {
+    /// Protobuf bytes of the vault message named by `type:`.
+    #[default]
+    Proto,
+    /// `FlatBuffers` bytes of the vault message named by `type:`.
+    Fb,
+    /// Opaque bytes with no vault schema. Takes no `type:`; `mime:` may
+    /// describe the content (e.g. `text/json`).
+    Raw,
+}
+
+impl Encoding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proto => "proto",
+            Self::Fb => "fb",
+            Self::Raw => "raw",
+        }
+    }
+
+    /// `true` for [`Encoding::Proto`], the value an omitted `encoding:`
+    /// reads as. Serde uses it to leave the default off disk.
+    // By reference because `skip_serializing_if` passes `&Encoding`.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_default(&self) -> bool {
+        *self == Self::Proto
+    }
+}
+
+impl FromStr for Encoding {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "proto" => Ok(Self::Proto),
+            "fb" => Ok(Self::Fb),
+            "raw" => Ok(Self::Raw),
+            other => Err(format!(
+                "unknown encoding: {other:?} (expected proto, fb, or raw)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for Encoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Pub / Sub specs (shared between dev and prd configs)
 // ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One `publishers:` entry. On disk it carries exactly one of `topic:`
+/// (bare, owned by the module) or `key:` (verbatim wire key).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "RawSpec")]
 pub struct PubSpec {
     pub name: String,
-    /// Bare topic (`image_raw`) — resolved to full form at runtime.
-    pub topic: String,
-    /// Vault name, e.g. `std/ImageStamped`.
-    #[serde(rename = "type")]
-    pub msg_type: String,
+    /// Bare topic (`image_raw`) prefixed at codegen, or a verbatim key.
+    pub topic: TopicRef,
+    /// Vault name, e.g. `ros2/std/ImageStamped` (`type:` on disk).
+    /// `None` only when `encoding` is [`Encoding::Raw`].
+    pub msg_type: Option<String>,
     pub transport: Transport,
+    /// Payload framing; zenoh only. Omitted on disk when `proto`.
+    pub encoding: Encoding,
+    /// Content type of a raw payload (e.g. `text/json`); raw only.
+    pub mime: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One `subscribers:` entry. Same shape and YAML form as [`PubSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "RawSpec")]
 pub struct SubSpec {
     pub name: String,
-    pub topic: String,
-    #[serde(rename = "type")]
-    pub msg_type: String,
+    /// Bare topic (`image_raw`) prefixed at codegen, or a verbatim key.
+    pub topic: TopicRef,
+    /// Vault name, e.g. `ros2/std/ImageStamped` (`type:` on disk).
+    /// `None` only when `encoding` is [`Encoding::Raw`].
+    pub msg_type: Option<String>,
     pub transport: Transport,
+    /// Payload framing; zenoh only. Omitted on disk when `proto`.
+    pub encoding: Encoding,
+    /// Content type of a raw payload (e.g. `text/json`); raw only.
+    pub mime: Option<String>,
+}
+
+impl PubSpec {
+    /// Check this entry against the load-time rules, naming it as
+    /// `<role>[<idx>]: ...` (e.g. `publishers[0]: encoding: raw takes no
+    /// type:`). Passing means the entry survives a save and reload.
+    pub fn validate(&self, idx: usize, role: &str) -> Result<(), String> {
+        Self::try_from(RawSpec::from(self.clone()))
+            .map(drop)
+            .map_err(|e| format!("{role}[{idx}]: {e}"))
+    }
+}
+
+impl SubSpec {
+    /// See [`PubSpec::validate`].
+    pub fn validate(&self, idx: usize, role: &str) -> Result<(), String> {
+        Self::try_from(RawSpec::from(self.clone()))
+            .map(drop)
+            .map_err(|e| format!("{role}[{idx}]: {e}"))
+    }
+}
+
+/// On-disk shape of a pub/sub entry, before the `topic:`/`key:` and
+/// `type:`/`encoding:`/`mime:` rules are applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSpec {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    msg_type: Option<String>,
+    transport: Transport,
+    #[serde(default, skip_serializing_if = "Encoding::is_default")]
+    encoding: Encoding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mime: Option<String>,
+}
+
+/// A `type:` / `encoding:` / `mime:` combination that cannot be honoured.
+/// The text is the part after the entry's `publishers[i]: ` prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum SpecRuleError {
+    #[error("encoding: is only valid for transport: zenoh")]
+    EncodingNotZenoh,
+    #[error("encoding: raw takes no type:")]
+    RawWithType,
+    #[error("type: is required unless encoding: raw")]
+    MissingType,
+    #[error("mime: is only valid with encoding: raw")]
+    MimeWithoutRaw,
+}
+
+/// Why a [`RawSpec`] does not form a valid entry.
+#[derive(Debug, thiserror::Error)]
+enum RawSpecError {
+    #[error(transparent)]
+    Topic(#[from] TopicRefError),
+    #[error("topic: is empty")]
+    EmptyTopic,
+    #[error(transparent)]
+    Rule(#[from] SpecRuleError),
+}
+
+impl RawSpec {
+    /// Apply the load-time rules:
+    /// - `topic: /a/b/...` (legacy leading slash) reads as `Key("a/b/...")`,
+    ///   which is the wire key sb 0.4.x produced for it;
+    /// - `topic: a/b` (inner `/`, no leading `/`) is refused, see
+    ///   [`TopicRefError::LegacyOwnedWithSlash`];
+    /// - `topic: hello` is `Owned`, `key: ...` is `Key`;
+    /// - both or neither is an error.
+    fn topic_ref(&self) -> Result<TopicRef, RawSpecError> {
+        match (self.topic.as_deref(), self.key.as_deref()) {
+            (Some(_), Some(_)) => Err(TopicRefError::BothTopicAndKey.into()),
+            (None, None) => Err(TopicRefError::NeitherTopicNorKey.into()),
+            (None, Some(key)) => Ok(TopicRef::key(key)?),
+            (Some(topic), None) if topic.starts_with('/') => {
+                TopicRef::key(topic).map_err(|_| RawSpecError::EmptyTopic)
+            }
+            (Some(topic), None) if topic.contains('/') => {
+                Err(TopicRefError::LegacyOwnedWithSlash {
+                    topic: topic.to_owned(),
+                }
+                .into())
+            }
+            (Some(topic), None) => TopicRef::owned(topic).map_err(|_| RawSpecError::EmptyTopic),
+        }
+    }
+
+    /// The `type:` / `encoding:` / `mime:` rules. The transport rule runs
+    /// first because it is the root cause whenever it fires: an iceoryx2
+    /// entry with `encoding: raw` is wrong for its encoding, not its type.
+    fn check_rules(&self) -> Result<(), SpecRuleError> {
+        if self.encoding != Encoding::Proto && self.transport != Transport::Zenoh {
+            return Err(SpecRuleError::EncodingNotZenoh);
+        }
+        match (self.encoding, self.msg_type.is_some()) {
+            (Encoding::Raw, true) => return Err(SpecRuleError::RawWithType),
+            (Encoding::Proto | Encoding::Fb, false) => return Err(SpecRuleError::MissingType),
+            _ => {}
+        }
+        if self.mime.is_some() && self.encoding != Encoding::Raw {
+            return Err(SpecRuleError::MimeWithoutRaw);
+        }
+        Ok(())
+    }
+
+    /// Both rule sets, topic first (a missing `topic:` is reported even
+    /// when the type rules also fail).
+    fn checked_topic_ref(&self) -> Result<TopicRef, RawSpecError> {
+        let topic = self.topic_ref()?;
+        self.check_rules()?;
+        Ok(topic)
+    }
+}
+
+/// `TopicRef` → the (`topic:`, `key:`) pair written to disk.
+fn split_topic(topic: TopicRef) -> (Option<String>, Option<String>) {
+    match topic {
+        TopicRef::Owned(bare) => (Some(bare), None),
+        TopicRef::Key(key) => (None, Some(key)),
+    }
+}
+
+impl TryFrom<RawSpec> for PubSpec {
+    type Error = RawSpecError;
+    fn try_from(raw: RawSpec) -> Result<Self, Self::Error> {
+        let topic = raw.checked_topic_ref()?;
+        Ok(Self {
+            name: raw.name,
+            topic,
+            msg_type: raw.msg_type,
+            transport: raw.transport,
+            encoding: raw.encoding,
+            mime: raw.mime,
+        })
+    }
+}
+
+impl TryFrom<RawSpec> for SubSpec {
+    type Error = RawSpecError;
+    fn try_from(raw: RawSpec) -> Result<Self, Self::Error> {
+        let topic = raw.checked_topic_ref()?;
+        Ok(Self {
+            name: raw.name,
+            topic,
+            msg_type: raw.msg_type,
+            transport: raw.transport,
+            encoding: raw.encoding,
+            mime: raw.mime,
+        })
+    }
+}
+
+impl From<PubSpec> for RawSpec {
+    fn from(p: PubSpec) -> Self {
+        let (topic, key) = split_topic(p.topic);
+        Self {
+            name: p.name,
+            topic,
+            key,
+            msg_type: p.msg_type,
+            transport: p.transport,
+            encoding: p.encoding,
+            mime: p.mime,
+        }
+    }
+}
+
+impl From<SubSpec> for RawSpec {
+    fn from(s: SubSpec) -> Self {
+        let (topic, key) = split_topic(s.topic);
+        Self {
+            name: s.name,
+            topic,
+            key,
+            msg_type: s.msg_type,
+            transport: s.transport,
+            encoding: s.encoding,
+            mime: s.mime,
+        }
+    }
+}
+
+/// Field names of [`RawSpec`] as they appear on disk.
+const SPEC_FIELDS: &[&str] = &[
+    "name",
+    "topic",
+    "key",
+    "type",
+    "transport",
+    "encoding",
+    "mime",
+];
+
+/// Deserializes a [`RawSpec`] and converts it inside the map visit, so a
+/// `topic:`/`key:` or `type:`/`encoding:` error carries the entry's own
+/// path (`publishers[0]: ...`) rather than the enclosing list's.
+struct SpecVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T> serde::de::Visitor<'de> for SpecVisitor<T>
+where
+    T: TryFrom<RawSpec, Error = RawSpecError>,
+{
+    type Value = T;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a pub/sub entry with name, topic or key, type, and transport")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+        let raw = RawSpec::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        T::try_from(raw).map_err(serde::de::Error::custom)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<T, A::Error> {
+        let raw = RawSpec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
+        T::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for PubSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_struct(
+            "PubSpec",
+            SPEC_FIELDS,
+            SpecVisitor(std::marker::PhantomData),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for SubSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_struct(
+            "SubSpec",
+            SPEC_FIELDS,
+            SpecVisitor(std::marker::PhantomData),
+        )
+    }
+}
+
+/// A `topic: /...` entry found by [`legacy_topics_in`]. sb 0.5.0 reads it
+/// as `key:` with the leading `/` dropped, which is the same wire key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyTopic {
+    /// `"pub"` or `"sub"`.
+    pub role: &'static str,
+    pub name: String,
+    /// The `topic:` value as written, leading `/` included.
+    pub topic: String,
+    /// The normalised wire key (leading `/`s removed).
+    pub key: String,
+}
+
+/// Scan raw `sb.dev.yml` text for legacy `topic: /...` entries.
+///
+/// Uses a loose parse that ignores every other top-level key, so it works
+/// on files the strict [`ModuleDevConfig`] would reject. Never errors:
+/// text that does not parse yields an empty list.
+pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
+    #[derive(Deserialize)]
+    struct Loose {
+        #[serde(default)]
+        publishers: Vec<RawSpec>,
+        #[serde(default)]
+        subscribers: Vec<RawSpec>,
+    }
+
+    let Ok(loose) = serde_yaml::from_str::<Loose>(dev_yml_text) else {
+        return Vec::new();
+    };
+    let tag = |role: &'static str| {
+        move |spec: RawSpec| {
+            let topic = spec.topic.filter(|t| t.starts_with('/'))?;
+            Some(LegacyTopic {
+                role,
+                name: spec.name,
+                key: topic.trim_start_matches('/').to_owned(),
+                topic,
+            })
+        }
+    };
+    loose
+        .publishers
+        .into_iter()
+        .filter_map(tag("pub"))
+        .chain(loose.subscribers.into_iter().filter_map(tag("sub")))
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -428,7 +1016,15 @@ pub struct SubSpec {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Workspace module registry. Maps module name → path to its config.
-/// Defined here at L1; populated by `sb init` / `sb create app` at L5.
+///
+/// Two copies of this shape exist:
+///
+/// - the **repo copy**, a `flow.yaml` at a repository root, written by
+///   hand (and by `sb init`). Module and message paths are relative to
+///   that file's directory; `name:` optionally names the workspace.
+/// - the **installed copy** at `<sb_home>/workspaces/<name>/flow.yaml`,
+///   derived from the repo copy on install. Every path is absolute and
+///   `source:` records where it came from.
 ///
 /// `instances` carries the workspace's deployment topology — one entry
 /// per declared instance of a module (e.g. `cam_gige_ht: [left, right]`).
@@ -440,23 +1036,58 @@ pub struct SubSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceFlow {
+    /// Workspace name. Absent = the repo copy's directory name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
-    pub modules: BTreeMap<String, PathBuf>,
+    pub modules: BTreeMap<String, ModuleRef>,
+    /// Message directories imported into the vault on install.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<MessageSource>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, Vec<ModuleInstance>>,
+    /// Provenance of an installed copy. Never present in a repo copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FlowSource>,
 }
 
 impl WorkspaceFlow {
+    /// Every module's path, ignoring `up:`. The shape pre-0.5.0 readers of
+    /// `modules` expect.
+    pub fn module_paths(&self) -> BTreeMap<String, PathBuf> {
+        self.modules
+            .iter()
+            .map(|(name, m)| (name.clone(), m.path.clone()))
+            .collect()
+    }
+
     /// Look up a single instance by `(module, id)`. Returns `None` if
     /// the module has no instances declared or no instance with that id.
     pub fn instance(&self, module: &str, id: &str) -> Option<&ModuleInstance> {
         self.instances.get(module)?.iter().find(|i| i.id == id)
     }
 
-    /// Validate every instance id and reject duplicates within a single
-    /// module's instance list. Call after deserializing `flow.yaml` so
-    /// bad input fails at load time, not at launch time.
+    /// Validate the workspace name, module paths, message sources, and
+    /// every instance id (rejecting duplicates within one module's list).
+    /// Call after deserializing `flow.yaml` so bad input fails at load
+    /// time, not at launch time.
     pub fn validate(&self) -> Result<(), FlowValidationError> {
+        if let Some(name) = &self.name {
+            validate_identifier(name).map_err(|e| FlowValidationError::BadName {
+                name: name.clone(),
+                source: e,
+            })?;
+        }
+        for (module, m) in &self.modules {
+            if m.path.as_os_str().is_empty() {
+                return Err(FlowValidationError::EmptyModulePath {
+                    module: module.clone(),
+                });
+            }
+        }
+        for (index, src) in self.messages.iter().enumerate() {
+            src.validate(index)?;
+        }
         for (module, list) in &self.instances {
             let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
             for inst in list {
@@ -488,6 +1119,197 @@ pub enum FlowValidationError {
     },
     #[error("module {module:?} declares instance id {id:?} more than once")]
     DuplicateInstanceId { module: String, id: String },
+    #[error("workspace name {name:?} is invalid: {source}")]
+    BadName {
+        name: String,
+        #[source]
+        source: IdentError,
+    },
+    #[error("module {module:?} has an empty path")]
+    EmptyModulePath { module: String },
+    #[error("messages[{index}]: style {style:?} is invalid (allowed: [A-Za-z0-9_])")]
+    BadMessageStyle { index: usize, style: String },
+    #[error("messages[{index}]: path is empty")]
+    EmptyMessagePath { index: usize },
+    #[error("messages[{index}]: unknown backend {backend:?} (expected one of: proto, fb, iox2)")]
+    UnknownBackend { index: usize, backend: String },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One `modules:` value in `flow.yaml`: where the module's `sb.dev.yml`
+/// is, and whether `sb up` launches it.
+///
+/// On disk it is either a bare path (`pubber` or `pubber/sb.dev.yml`),
+/// which means `up: true`, or a map `{ path: ..., up: false }`. A module
+/// with `up: false` is still registered (`sb run` / `sb stop` work on it);
+/// only the whole-workspace `sb up` skips it. Serialises back to the bare
+/// form whenever `up` is true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "ModuleRefRaw")]
+pub struct ModuleRef {
+    pub path: PathBuf,
+    pub up: bool,
+}
+
+impl ModuleRef {
+    /// A module `sb up` launches (`up: true`).
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            up: true,
+        }
+    }
+}
+
+impl From<PathBuf> for ModuleRef {
+    fn from(path: PathBuf) -> Self {
+        Self::new(path)
+    }
+}
+
+/// The two YAML spellings of a [`ModuleRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModuleRefRaw {
+    /// `name: path`, meaning `up: true`.
+    Path(PathBuf),
+    /// `name: { path: ..., up: ... }`; `up` defaults to `true`.
+    Full {
+        path: PathBuf,
+        #[serde(default = "default_true")]
+        up: bool,
+    },
+}
+
+impl From<ModuleRefRaw> for ModuleRef {
+    fn from(raw: ModuleRefRaw) -> Self {
+        match raw {
+            ModuleRefRaw::Path(path) => Self::new(path),
+            ModuleRefRaw::Full { path, up } => Self { path, up },
+        }
+    }
+}
+
+impl From<ModuleRef> for ModuleRefRaw {
+    fn from(m: ModuleRef) -> Self {
+        if m.up {
+            Self::Path(m.path)
+        } else {
+            Self::Full {
+                path: m.path,
+                up: false,
+            }
+        }
+    }
+}
+
+/// The map spelling of a [`ModuleRef`], parsed strictly so a typo'd key
+/// is reported by name instead of as "matched no variant".
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModuleRefMap {
+    path: PathBuf,
+    #[serde(default = "default_true")]
+    up: bool,
+}
+
+// Hand-written rather than `#[serde(from = "ModuleRefRaw")]`: an untagged
+// enum reports every mismatch as "data did not match any variant", which
+// hides an `upp:` typo or a non-boolean `up:` from the user. Accepts
+// exactly the shapes `ModuleRefRaw` describes.
+impl<'de> Deserialize<'de> for ModuleRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ModuleRefVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ModuleRefVisitor {
+            type Value = ModuleRef;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a module path, or a map with `path:` and optional `up:`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ModuleRef, E> {
+                Ok(ModuleRef::new(s))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<ModuleRef, A::Error> {
+                let m =
+                    ModuleRefMap::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(ModuleRef {
+                    path: m.path,
+                    up: m.up,
+                })
+            }
+        }
+
+        d.deserialize_any(ModuleRefVisitor)
+    }
+}
+
+/// One `messages:` entry in `flow.yaml`: a directory of `.proto` files
+/// imported into the vault under `style`.
+///
+/// `path` holds `<ns>/<Leaf>.proto` files, or flat `<Leaf>.proto` files
+/// (namespace = the directory's own name). `backends` picks what
+/// `sb message compile` emits for it, among `proto`, `fb`, `iox2`;
+/// empty means the style's own default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageSource {
+    pub style: String,
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<String>,
+}
+
+impl MessageSource {
+    fn validate(&self, index: usize) -> Result<(), FlowValidationError> {
+        let style_ok = is_valid_message_style(&self.style)
+            && self
+                .style
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !style_ok {
+            return Err(FlowValidationError::BadMessageStyle {
+                index,
+                style: self.style.clone(),
+            });
+        }
+        if self.path.as_os_str().is_empty() {
+            return Err(FlowValidationError::EmptyMessagePath { index });
+        }
+        if let Some(bad) = self
+            .backends
+            .iter()
+            .find(|b| !Backend::ALL.iter().any(|k| k.as_str() == b.as_str()))
+        {
+            return Err(FlowValidationError::UnknownBackend {
+                index,
+                backend: bad.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Where an installed `flow.yaml` came from. Written only into the
+/// installed copy under `<sb_home>/workspaces/<name>/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowSource {
+    /// Absolute path of the repo copy that was installed.
+    pub repo_flow: PathBuf,
+    /// Git URL the repo was cloned from; enables `update_from_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// RFC 3339 UTC time of the install, e.g. `2026-10-13T08:35:23Z`.
+    pub installed_at: String,
 }
 
 /// One deployed instance of a module — a node in the L6 graph and a
@@ -549,139 +1371,88 @@ mod tests {
         assert_eq!(*orig, back, "round-trip changed the value");
     }
 
-    #[test]
-    fn sb_cli_config_round_trip() {
-        let c = SbCliConfig {
-            sb_home_dir: Some(PathBuf::from("/opt/sb_home")),
-            protoc: Some(PathBuf::from("/opt/protoc/bin/protoc")),
-            flatc: Some(PathBuf::from("/opt/flatc/bin/flatc")),
-            libzenohc: Some(PathBuf::from("/opt/zenoh-c/lib/libzenohc.so")),
-            libiceoryx2: Some(PathBuf::from("/opt/iceoryx2/lib/libiceoryx2_ffi_c.so")),
-            tmux: Some(PathBuf::from("/usr/bin/tmux")),
-            messages_root: Some(PathBuf::from("/home/u/.swarmbotix/messages")),
-            message_style: Some(STYLE_ROS2.into()),
-            message_definitions: Some(PathBuf::from(
-                "/home/u/.swarmbotix/messages/ros2/message_definitions",
-            )),
-            message_targets: Some(PathBuf::from(
-                "/home/u/.swarmbotix/messages/ros2/message_targets",
-            )),
-            device: Some("dev01".into()),
-            transport_on_device: Some(Transport::Iceoryx2),
-            transport_cross_device: Some(Transport::Zenoh),
-            string_array_cap: None,
-            string_array_caps: None,
-            bytes_caps: None,
-            vec_caps: None,
-            iox2_variants: None,
-        };
-        yaml_fixed_point(&c);
+    // ── topic: / key: entries ─────────────────────────────────────────
+
+    fn dev_yml_with(entries: &str) -> String {
+        format!("module: subber\nlanguage: rust\nroot: /tmp/subber\n{entries}")
+    }
+
+    fn load_err(entries: &str) -> String {
+        serde_yaml::from_str::<ModuleDevConfig>(&dev_yml_with(entries))
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]
-    fn module_dev_config_round_trip() {
-        let m = ModuleDevConfig {
-            module: "camera".into(),
-            language: Language::Rust,
-            root: PathBuf::from("/home/u/projects/camera_app"),
-            io_dir: PathBuf::from("swarmbotix_io"),
-            publishers: vec![PubSpec {
-                name: "image_raw".into(),
-                topic: "image_raw".into(),
-                msg_type: "std/ImageStamped".into(),
-                transport: Transport::Iceoryx2,
-            }],
-            subscribers: vec![SubSpec {
-                name: "cmd_vel".into(),
-                topic: "cmd_vel".into(),
-                msg_type: "std/TwistStamped".into(),
-                transport: Transport::Zenoh,
-            }],
-        };
-        yaml_fixed_point(&m);
+    fn spec_legacy_slashed_topic_reads_as_key() {
+        let y = dev_yml_with(
+            "subscribers:\n  - name: hello\n    topic: /dev01/demo/pubber/zenoh/hello\n    \
+             type: std/String\n    transport: zenoh\n",
+        );
+        let m: ModuleDevConfig = serde_yaml::from_str(&y).unwrap();
+        let topic = &m.subscribers[0].topic;
+        assert_eq!(
+            *topic,
+            TopicRef::Key("dev01/demo/pubber/zenoh/hello".into())
+        );
+        // Same wire key sb 0.4.x produced (leading slash stripped).
+        assert_eq!(
+            topic.full_key("devX", "wsX", "subber", Transport::Zenoh),
+            "dev01/demo/pubber/zenoh/hello"
+        );
+        // Re-serialising writes the canonical `key:` form.
+        let out = serde_yaml::to_string(&m).unwrap();
+        assert!(out.contains("key: dev01/demo/pubber/zenoh/hello"), "{out}");
+        assert!(!out.contains("topic:"), "{out}");
     }
 
     #[test]
-    fn module_prd_config_round_trip() {
-        let m = ModulePrdConfig {
-            module: "camera".into(),
-            publishers: vec![PubSpec {
-                name: "image_raw".into(),
-                topic: "image_raw".into(),
-                msg_type: "std/ImageStamped".into(),
-                transport: Transport::Iceoryx2,
-            }],
-            subscribers: vec![],
-        };
-        yaml_fixed_point(&m);
+    fn spec_rejects_both_topic_and_key() {
+        let e = load_err(
+            "publishers:\n  - name: hello\n    topic: hello\n    key: a/b/c/zenoh/hello\n    \
+             type: std/String\n    transport: zenoh\n",
+        );
+        assert!(
+            e.contains("publishers[0]: exactly one of topic: or key: is required (both given)"),
+            "{e}"
+        );
     }
 
     #[test]
-    fn workspace_flow_round_trip() {
-        let mut modules = BTreeMap::new();
-        modules.insert(
-            "camera".into(),
-            PathBuf::from("/home/u/projects/camera/sb.dev.yml"),
+    fn spec_rejects_neither() {
+        let e =
+            load_err("publishers:\n  - name: hello\n    type: std/String\n    transport: zenoh\n");
+        assert!(
+            e.contains("publishers[0]: exactly one of topic: or key: is required (neither given)"),
+            "{e}"
         );
-        modules.insert(
-            "detector".into(),
-            PathBuf::from("/home/u/projects/detector/sb.dev.yml"),
-        );
-        let f = WorkspaceFlow {
-            modules,
-            ..Default::default()
-        };
-        yaml_fixed_point(&f);
     }
 
     #[test]
-    fn workspace_flow_with_instances_round_trip() {
-        let mut modules = BTreeMap::new();
-        modules.insert(
-            "cam_gige_ht".into(),
-            PathBuf::from("/home/u/projects/cam_gige_ht/sb.dev.yml"),
+    fn spec_rejects_empty_key() {
+        let e = load_err(
+            "subscribers:\n  - name: hello\n    key: \"/\"\n    type: std/String\n    \
+             transport: zenoh\n",
         );
-        let mut env_left = BTreeMap::new();
-        env_left.insert("CAM_SERIAL".into(), "A123".into());
-        env_left.insert("LOG_LEVEL".into(), "info".into());
-        let mut instances = BTreeMap::new();
-        instances.insert(
-            "cam_gige_ht".into(),
-            vec![
-                ModuleInstance {
-                    id: "left".into(),
-                    label: Some("Left Camera".into()),
-                    docker: Some(DockerSpec {
-                        image: Some("cam_gige_ht:latest".into()),
-                        env: env_left,
-                        devices: vec!["/dev/video0".into()],
-                        mounts: vec![],
-                        gpus: Some("all".into()),
-                        network: None,
-                    }),
-                    args: vec![],
-                },
-                ModuleInstance {
-                    id: "right".into(),
-                    label: Some("Right Camera".into()),
-                    docker: Some(DockerSpec {
-                        image: Some("cam_gige_ht:latest".into()),
-                        env: {
-                            let mut m = BTreeMap::new();
-                            m.insert("CAM_SERIAL".into(), "B456".into());
-                            m
-                        },
-                        devices: vec!["/dev/video1".into()],
-                        mounts: vec![],
-                        gpus: None,
-                        network: None,
-                    }),
-                    args: vec![],
-                },
-            ],
+        assert!(e.contains("subscribers[0]: key: is empty"), "{e}");
+    }
+
+    #[test]
+    fn spec_rejects_legacy_unslashed_nested_topic() {
+        let e = load_err(
+            "publishers:\n  - name: hello\n    topic: a/b\n    type: std/String\n    \
+             transport: zenoh\n",
         );
-        let f = WorkspaceFlow { modules, instances };
-        yaml_fixed_point(&f);
+        assert!(
+            e.contains(
+                "publishers[0]: topic \"a/b\" may not contain '/'; use key: for a verbatim wire key"
+            ),
+            "{e}"
+        );
+        assert!(
+            e.contains("key: <device>/<ws>/<module>/<transport>/a/b"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -693,39 +1464,6 @@ mod tests {
         assert_eq!(f.modules.len(), 1);
         assert!(f.instances.is_empty());
         assert!(f.validate().is_ok());
-    }
-
-    #[test]
-    fn workspace_flow_instance_resolver_returns_match() {
-        let mut instances = BTreeMap::new();
-        instances.insert(
-            "cam".into(),
-            vec![
-                ModuleInstance {
-                    id: "left".into(),
-                    label: None,
-                    docker: None,
-                    args: vec![],
-                },
-                ModuleInstance {
-                    id: "right".into(),
-                    label: Some("Right".into()),
-                    docker: None,
-                    args: vec![],
-                },
-            ],
-        );
-        let f = WorkspaceFlow {
-            instances,
-            ..Default::default()
-        };
-        assert!(f.instance("cam", "left").is_some());
-        assert_eq!(
-            f.instance("cam", "right").unwrap().label.as_deref(),
-            Some("Right")
-        );
-        assert!(f.instance("cam", "ghost").is_none());
-        assert!(f.instance("missing", "left").is_none());
     }
 
     #[test]
@@ -782,121 +1520,187 @@ mod tests {
         ));
     }
 
-    // ── Merge tests (L1 TDD test #3) ──────────────────────────────────
+    // ── encoding: / type: / mime: rules ───────────────────────────────
 
-    fn cfg_with_device(d: &str) -> SbCliConfig {
-        SbCliConfig {
-            device: Some(d.into()),
-            ..Default::default()
-        }
+    #[test]
+    fn encoding_defaults_to_proto_and_is_omitted() {
+        let y = dev_yml_with(
+            "publishers:\n  - name: out\n    topic: out\n    type: ros2/std/String\n    \
+             transport: zenoh\n",
+        );
+        let m: ModuleDevConfig = serde_yaml::from_str(&y).unwrap();
+        assert_eq!(m.publishers[0].encoding, Encoding::Proto);
+        assert_eq!(m.publishers[0].mime, None);
+        let out = serde_yaml::to_string(&m).unwrap();
+        assert!(!out.contains("encoding:"), "{out}");
+        assert!(!out.contains("mime:"), "{out}");
+        assert_eq!(serde_yaml::to_string(&Encoding::Fb).unwrap().trim(), "fb");
+        assert_eq!("raw".parse::<Encoding>(), Ok(Encoding::Raw));
+        assert!(Encoding::default().is_default());
+        assert!(!Encoding::Raw.is_default());
     }
 
     #[test]
-    fn merge_env_wins_over_workspace_and_global() {
-        let env = cfg_with_device("from-env");
-        let ws = cfg_with_device("from-ws");
-        let glb = cfg_with_device("from-global");
-        let m = SbCliConfig::merge(Some(env), Some(ws), Some(glb));
-        assert_eq!(m.device.as_deref(), Some("from-env"));
-    }
-
-    #[test]
-    fn merge_workspace_wins_over_global() {
-        let ws = cfg_with_device("from-ws");
-        let glb = cfg_with_device("from-global");
-        let m = SbCliConfig::merge(None, Some(ws), Some(glb));
-        assert_eq!(m.device.as_deref(), Some("from-ws"));
-    }
-
-    #[test]
-    fn merge_missing_keys_fall_through() {
-        let env = SbCliConfig {
-            protoc: Some(PathBuf::from("/env/protoc")),
-            ..Default::default()
-        };
-        let ws = SbCliConfig {
-            flatc: Some(PathBuf::from("/ws/flatc")),
-            ..Default::default()
-        };
-        let glb = SbCliConfig {
-            tmux: Some(PathBuf::from("/global/tmux")),
-            device: Some("dev07".into()),
-            ..Default::default()
-        };
-        let m = SbCliConfig::merge(Some(env), Some(ws), Some(glb));
-        assert_eq!(m.protoc.as_deref().unwrap().to_str(), Some("/env/protoc"));
-        assert_eq!(m.flatc.as_deref().unwrap().to_str(), Some("/ws/flatc"));
-        assert_eq!(m.tmux.as_deref().unwrap().to_str(), Some("/global/tmux"));
-        assert_eq!(m.device.as_deref(), Some("dev07"));
-        // Falls through to built-in defaults for transports.
-        assert_eq!(m.transport_on_device, Some(Transport::Iceoryx2));
-        assert_eq!(m.transport_cross_device, Some(Transport::Zenoh));
-    }
-
-    #[test]
-    fn merge_all_missing_returns_builtin_defaults() {
-        let m = SbCliConfig::merge(None, None, None);
-        assert_eq!(m.device.as_deref(), Some("dev01"));
-        assert_eq!(m.transport_on_device, Some(Transport::Iceoryx2));
-        assert_eq!(m.transport_cross_device, Some(Transport::Zenoh));
-        assert!(m.protoc.is_none());
-    }
-
-    // ── Language tests ────────────────────────────────────────────────
-
-    #[test]
-    fn language_yaml_round_trip() {
-        for lang in [
-            Language::Rust,
-            Language::Python,
-            Language::Cpp,
-            Language::Flutter,
-            Language::Unity,
-        ] {
-            let y = serde_yaml::to_string(&lang).unwrap();
-            let back: Language = serde_yaml::from_str(&y).unwrap();
-            assert_eq!(lang, back);
-        }
-    }
-
-    #[test]
-    fn language_serializes_lowercase() {
-        assert_eq!(serde_yaml::to_string(&Language::Cpp).unwrap().trim(), "cpp");
-        assert_eq!(
-            serde_yaml::to_string(&Language::Rust).unwrap().trim(),
-            "rust"
+    fn spec_rule_raw_with_type_is_rejected() {
+        let e = load_err(
+            "publishers:\n  - name: out\n    topic: out\n    type: ros2/std/String\n    \
+             transport: zenoh\n    encoding: raw\n",
+        );
+        assert!(
+            e.contains("publishers[0]: encoding: raw takes no type:"),
+            "{e}"
         );
     }
 
     #[test]
-    fn language_default_io_dir_unity_special_cases() {
-        assert_eq!(
-            Language::Unity.default_io_dir(),
-            PathBuf::from("Assets/Scripts/swarmbotix_io")
+    fn spec_rule_missing_type_is_rejected() {
+        let e = load_err("publishers:\n  - name: out\n    topic: out\n    transport: zenoh\n");
+        assert!(
+            e.contains("publishers[0]: type: is required unless encoding: raw"),
+            "{e}"
         );
-        for lang in [
-            Language::Rust,
-            Language::Python,
-            Language::Cpp,
-            Language::Flutter,
-        ] {
-            assert_eq!(lang.default_io_dir(), PathBuf::from("swarmbotix_io"));
-        }
     }
 
     #[test]
-    fn merge_env_partial_does_not_clobber_workspace_other_fields() {
-        let env = SbCliConfig {
-            device: Some("from-env".into()),
+    fn spec_rule_mime_without_raw_is_rejected() {
+        let e = load_err(
+            "publishers:\n  - name: out\n    topic: out\n    type: ros2/std/String\n    \
+             transport: zenoh\n    mime: text/json\n",
+        );
+        assert!(
+            e.contains("publishers[0]: mime: is only valid with encoding: raw"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn spec_rule_encoding_on_iox2_is_rejected() {
+        let e = load_err(
+            "publishers:\n  - name: out\n    topic: out\n    type: ros2/std/String\n    \
+             transport: iceoryx2\n    encoding: fb\n",
+        );
+        assert!(
+            e.contains("publishers[0]: encoding: is only valid for transport: zenoh"),
+            "{e}"
+        );
+        // `encoding: proto` is the default, so iceoryx2 may spell it out.
+        let y = dev_yml_with(
+            "publishers:\n  - name: out\n    topic: out\n    type: ros2/std/String\n    \
+             transport: iceoryx2\n    encoding: proto\n",
+        );
+        assert!(serde_yaml::from_str::<ModuleDevConfig>(&y).is_ok());
+    }
+
+    // ── sb.dev.yml root: ──────────────────────────────────────────────
+
+    #[test]
+    fn root_absent_resolves_to_the_yaml_dir() {
+        let m: ModuleDevConfig = serde_yaml::from_str("module: m\nlanguage: rust\n").unwrap();
+        assert_eq!(m.root, None);
+        assert_eq!(
+            m.module_root(Path::new("/repo/apps/m/sb.dev.yml")),
+            PathBuf::from("/repo/apps/m")
+        );
+        assert_eq!(m.module_root(Path::new("sb.dev.yml")), PathBuf::from("."));
+        assert!(!serde_yaml::to_string(&m).unwrap().contains("root:"));
+
+        let rel = ModuleDevConfig {
+            root: Some(PathBuf::from("src")),
+            ..m.clone()
+        };
+        assert_eq!(
+            rel.module_root(Path::new("/repo/m/sb.dev.yml")),
+            PathBuf::from("/repo/m/src")
+        );
+        let abs = ModuleDevConfig {
+            root: Some(PathBuf::from("/elsewhere/m")),
+            ..m
+        };
+        assert_eq!(
+            abs.module_root(Path::new("/repo/m/sb.dev.yml")),
+            PathBuf::from("/elsewhere/m")
+        );
+    }
+
+    // ── flow.yaml modules: / messages: / source: ──────────────────────
+
+    #[test]
+    fn module_ref_string_and_map_forms() {
+        let y = "modules:\n  a: apps/a\n  b:\n    path: apps/b\n    up: false\n  \
+                 c:\n    path: apps/c\n";
+        let f: WorkspaceFlow = serde_yaml::from_str(y).unwrap();
+        assert_eq!(f.modules["a"], ModuleRef::new("apps/a"));
+        assert_eq!(
+            f.modules["b"],
+            ModuleRef {
+                path: PathBuf::from("apps/b"),
+                up: false
+            }
+        );
+        // Map form without `up:` means up: true and re-emits as a string.
+        assert_eq!(f.modules["c"], ModuleRef::new("apps/c"));
+        let out = serde_yaml::to_string(&f).unwrap();
+        assert!(out.contains("a: apps/a\n"), "{out}");
+        assert!(out.contains("c: apps/c\n"), "{out}");
+        assert!(out.contains("path: apps/b"), "{out}");
+        assert!(out.contains("up: false"), "{out}");
+        yaml_fixed_point(&f);
+        assert_eq!(
+            f.module_paths(),
+            BTreeMap::from([
+                ("a".to_owned(), PathBuf::from("apps/a")),
+                ("b".to_owned(), PathBuf::from("apps/b")),
+                ("c".to_owned(), PathBuf::from("apps/c")),
+            ])
+        );
+        assert_eq!(
+            ModuleRef::from(ModuleRefRaw::Full {
+                path: "x".into(),
+                up: true
+            }),
+            ModuleRef::new("x")
+        );
+    }
+
+    #[test]
+    fn module_ref_rejects_unknown_keys_by_name() {
+        let e = serde_yaml::from_str::<WorkspaceFlow>("modules:\n  a:\n    path: a\n    upp: no\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown field `upp`"), "{e}");
+    }
+
+    #[test]
+    fn flow_validate_rejects_bad_name_style_and_backend() {
+        let bad_name = WorkspaceFlow {
+            name: Some("my-ws".into()),
             ..Default::default()
         };
-        let ws = SbCliConfig {
-            protoc: Some(PathBuf::from("/ws/protoc")),
-            device: Some("from-ws".into()),
+        assert!(matches!(
+            bad_name.validate(),
+            Err(FlowValidationError::BadName { .. })
+        ));
+        let bad_style = WorkspaceFlow {
+            messages: vec![MessageSource {
+                style: "../x".into(),
+                path: "m".into(),
+                backends: vec![],
+            }],
             ..Default::default()
         };
-        let m = SbCliConfig::merge(Some(env), Some(ws), None);
-        assert_eq!(m.device.as_deref(), Some("from-env"));
-        assert_eq!(m.protoc.as_deref().unwrap().to_str(), Some("/ws/protoc"));
+        assert!(matches!(
+            bad_style.validate(),
+            Err(FlowValidationError::BadMessageStyle { index: 0, .. })
+        ));
+        let bad_backend = WorkspaceFlow {
+            messages: vec![MessageSource {
+                style: "acme".into(),
+                path: "m".into(),
+                backends: vec!["proto".into(), "capnp".into()],
+            }],
+            ..Default::default()
+        };
+        let e = bad_backend.validate().unwrap_err();
+        assert!(e.to_string().contains("\"capnp\""), "{e}");
     }
 }

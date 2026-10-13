@@ -21,7 +21,7 @@ message Header {
   Metadata metadata = 3;
 
   message Metadata {
-    // Fully-qualified topic name, e.g. /dev01/ws/cam/iox2/image_raw.
+    // Fully-qualified topic name, e.g. dev01/ws/cam/iox2/image_raw.
     string topic_full_name = 1;
 
     // Vault name of the wrapping *Stamped type, e.g. "std/ImageStamped".

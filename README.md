@@ -66,12 +66,16 @@ for zero-copy shared memory on one device.
   runs on a laptop, a Jetson, or a phone
 - **iceoryx2 for shared memory** -- zero-copy, typed payloads between processes
   on one host, for image and point-cloud rates
-- **Pick per publisher** -- `--zenoh` or `--iox2` on each `sb pub add` /
-  `sb sub add`; a module can use both at once
+- **Pick per publisher** -- `--zenoh` or `--iox2` on each `sb io add pub` /
+  `sb io add sub`; a module can use both at once
+- **Payload encodings** -- on Zenoh each entry carries protobuf (with a typed
+  `publish(msg)` and receive in Rust, Python, and C++), FlatBuffers, or raw
+  bytes tagged with a MIME type such as `text/json`; `sb topic listen` decodes
+  all of them
 - **Uniform topic naming** -- every topic is
-  `/<device>/<workspace>/<module>/<transport>/<topic>`, so
-  `/dev01/perception/camera/iox2/image_raw` tells you where it lives and how it
-  travels
+  `<device>/<workspace>/<module>/<transport>/<topic>`, so
+  `dev01/perception/camera/iox2/image_raw` tells you where it lives and how it
+  travels, and that same string is the wire key on both transports
 
 ### Developer experience
 
@@ -82,21 +86,28 @@ for zero-copy shared memory on one device.
   compiles them into iceoryx2 ctypes, protobuf, and FlatBuffers bindings per
   language, with a shipped ROS2-style bundle (`std/*`, `geometry_msgs`,
   `sensor_msgs`, ...) and a `swarmbotix/` style
-- **Pub/sub codegen** -- each `sb pub add` / `sb sub add` writes one file under
+- **Pub/sub codegen** -- each `sb io add` writes one file under
   `swarmbotix_io/` that you wire into your build; edit the message or the
-  transport and the file regenerates
+  topic and the file regenerates, and `sb io update` regenerates a whole
+  module from its `sb.dev.yml`
 - **Workspaces** -- named, isolated collections of modules, comparable to
-  Python virtual environments but for a swarm
+  Python virtual environments but for a swarm; a workspace is a `flow.yaml`
+  committed at a repository root, and `sb install <git-url>` clones it,
+  installs it, compiles its messages, and regenerates every module in one
+  step
 - **Layered config** -- one `sb.config.yml` per host, an optional override per
   workspace, environment variables on top; `sb config show` prints the merged
   result for scripts and LLMs
 - **`sb doctor`** -- validates `protoc`, `flatc`, `tmux`, the two transport
-  libraries, and whether their versions match what this `sb` links against
+  libraries, and whether their versions match what this `sb` links against,
+  plus the active workspace (`sb ws check`: paths, types, encodings,
+  generated files, staleness)
 
 ### Launch and production
 
 - **`sb up`** -- starts every module in the active workspace under tmux, one
-  window per module, driven by that module's `runscript.bash`
+  window per module, driven by that module's `runscript.bash`; a module
+  marked `up: false` in `flow.yaml` is left for `sb run`
 - **Per-module lifecycle** -- `sb run` restarts one module with passthrough
   args, `sb stop` runs its `stopscript.bash`, `sb attach` drops you into the
   session, `sb down` tears it all down
@@ -104,14 +115,15 @@ for zero-copy shared memory on one device.
   through the same lifecycle
 - **`sb gopro`** -- freezes a module's interface into a language-agnostic
   `sb.prd.yml` that ships with the binary
-- **Request/response** -- `sb service init` drops a REST-style router over
-  Zenoh queryables into a Rust or Python module, independent of pub/sub
+- **Request/response** -- `sb io add service <name>` drops a REST-style router
+  over Zenoh queryables into a Rust or Python module, independent of pub/sub
 - **Self-update** -- `sb --version` says when a newer release exists;
   `sb update --check` compares, `sb update` downloads, verifies and installs
   it in place, keeping config, workspaces and apps
 - **App packages** -- `sb install <git-url | path>` installs any repository
   that carries an `sb.app.yml` and runs it as `sb <name> [args...]`, with no
-  `PATH` change; `sb app init` writes that manifest for package authors
+  `PATH` change; `sb app init` writes that manifest for package authors. A
+  repository with a `flow.yaml` at its root installs as a workspace instead
 
 ### Introspection
 
@@ -131,8 +143,8 @@ Every topic has one wire path, and the fourth segment says which transport
 carries it:
 
 ```
-/<device>/<workspace>/<module>/<transport>/<topic>
- dev01    ws          camera    iox2        imu
+<device>/<workspace>/<module>/<transport>/<topic>
+dev01    ws          camera    iox2        imu
 ```
 
 `sb` never puts anything on the wire itself. It compiles the schema, generates
@@ -167,15 +179,16 @@ flowchart LR
 ```
 
 Custom **messages** work on both transports: add your own `.proto` to the vault
-with `sb message new` and compile it like any shipped one. A custom **encoding**
+with `sb message new`, or ship it in a workspace repository's `messages:` for
+`sb install` to import, and compile it like any shipped one. A custom **encoding**
 is a Zenoh-only choice, because an iceoryx2 payload is always the typed struct.
 
 ### Same device: iceoryx2, zero-copy
 
 ```bash
 # on camera (Rust)                 # on detector (Python)
-sb pub add -m swarmbotix/sensors/Imu imu --iox2
-                                   sb sub add -m swarmbotix/sensors/Imu /dev01/ws/camera/iox2/imu --iox2
+sb io add pub imu -m swarmbotix/sensors/Imu --iox2
+                                   sb io add sub --key dev01/ws/camera/iox2/imu -m swarmbotix/sensors/Imu --iox2
 ```
 
 ```mermaid
@@ -207,8 +220,8 @@ open the same service.
 
 ```bash
 # on gps (Python, dev01)           # on planner (Rust, dev02)
-sb pub add -m swarmbotix/sensors/GnssFix fix --zenoh
-                                   sb sub add -m swarmbotix/sensors/GnssFix /dev01/ws/gps/zenoh/fix --zenoh
+sb io add pub fix -m swarmbotix/sensors/GnssFix --zenoh
+                                   sb io add sub --key dev01/ws/gps/zenoh/fix -m swarmbotix/sensors/GnssFix --zenoh
 ```
 
 ```mermaid
@@ -228,15 +241,17 @@ flowchart LR
   class G,BYTES,D src
 ```
 
-The generated Zenoh publisher and subscriber only move bytes and own the key
-expression. Encoding is yours: the protobuf or FlatBuffers bindings compiled
-from the same `.proto`, or anything else, as long as both ends agree.
+The generated Zenoh publisher and subscriber own the key expression and tag
+every sample with its encoding. With the default protobuf encoding, the Rust,
+Python, and C++ wrappers also serialize and parse the message for you
+(`publish(msg)`, `try_recv_latest_msg`); with `--fb` or `--raw [<mime>]` they
+move bytes and the encoding is yours, as long as both ends agree.
 
 ### Both at once: one message, two wire paths
 
 ```bash
-sb pub add -m swarmbotix/images/Image1280x1024 image_raw --iox2
-sb pub add -m swarmbotix/images/Image1280x1024 image_raw --zenoh
+sb io add pub image_raw -m swarmbotix/images/Image1280x1024 --iox2  --name image_raw_shm
+sb io add pub image_raw -m swarmbotix/images/Image1280x1024 --zenoh --name image_raw_net
 ```
 
 ```mermaid
@@ -254,8 +269,9 @@ flowchart LR
   class CAM src
 ```
 
-The transport segment keeps the two paths from ever colliding. `sb list` shows
-them as two entries, and `sb topic list` shows both live.
+The transport segment keeps the two paths from ever colliding on the wire.
+Entry names are unique within a module, hence the two `--name`s; `sb io list`
+shows them as two entries, and `sb topic list` shows both live.
 
 | | iceoryx2 | Zenoh |
 |---|---|---|
@@ -339,44 +355,64 @@ in `Assets/Plugins/` (Zenoh only).
 
 ## Quick Start
 
-From a fresh host to a running swarm. Every stage reads what the previous one
-wrote to disk; no state lives in memory between `sb` invocations.
+**Install a published workspace.** A workspace is a repository with a
+`flow.yaml` at its root. From a host with `sb` installed:
+
+```bash
+sb config set device <name>
+sb install https://github.com/<org>/<workspace>.git --dir ~/<workspace>   # or: cd clone && sb install .
+sb up
+```
+
+`sb install` clones the repository (into `--dir`, or `~/.swarmbotix/repos/`
+without it), installs its `flow.yaml` as the active workspace, imports and
+compiles its messages, and regenerates every module's `swarmbotix_io/`. After a `git pull`, run `sb install .` again (or
+`sb ws update <workspace>`). On a new host, run `sb doctor` first.
+
+**Or build one yourself**, from a fresh host to a running swarm. Every stage
+reads what the previous one wrote to disk; no state lives in memory between
+`sb` invocations.
 
 **1. Set up the host** (once)
 
 ```bash
 sb doctor                                    # check tooling
 sb config set protoc /usr/local/bin/protoc   # point at tools doctor could not find
+sb config set device dev01                   # this host's <device> segment
 sb message list                              # first run installs the std/* bundle
 sb message compile                           # generate bindings into message_targets/
 ```
 
-**2. Create a workspace** (once per project)
+**2. Create a workspace** (once per project, at the repository root)
 
 ```bash
-sb ws create my_project
-sb ws set    my_project
+cd ~/my_project
+sb ws create my_project      # writes ./flow.yaml, installs it, makes it active
 ```
 
 **3. Adopt your modules** (once per app)
 
 ```bash
-sb init --rust   /path/to/camera_app
-sb init --python /path/to/detector
+sb init --rust   modules/camera_app
+sb init --python modules/detector
 ```
 
 Each module gets `sb.dev.yml`, a `runscript.bash` stub, and an empty
-`swarmbotix_io/`, and is registered in the workspace's `flow.yaml`.
+`swarmbotix_io/`, and is registered in `./flow.yaml` with a relative path.
 
 **4. Wire pub/sub** (iterate freely)
 
 ```bash
-cd /path/to/camera_app
-sb pub add -m ros2/std/ImageStamped image_raw --iox2
+cd ~/my_project/modules/camera_app
+sb io add pub image_raw -m ros2/std/ImageStamped --iox2
 
-cd /path/to/detector
-sb sub add -m ros2/std/ImageStamped /dev01/my_project/camera_app/iox2/image_raw --iox2
+cd ~/my_project/modules/detector
+sb io add sub --key dev01/my_project/camera_app/iox2/image_raw -m ros2/std/ImageStamped --iox2
 ```
+
+A subscriber in another module names the publisher's full wire key with
+`--key`; a bare topic (`image_raw`) is always prefixed with the module's own
+name.
 
 Each command regenerates one file under `swarmbotix_io/`. Wire it into your
 build as described in
@@ -388,12 +424,22 @@ build as described in
 # edit each module's runscript.bash so it actually launches the app, then:
 sb up                                                    # tmux session comes up
 sb attach                                                # look inside
-sb topic listen /dev01/my_project/camera_app/iox2/image_raw   # add --show for images
+sb topic listen dev01/my_project/camera_app/iox2/image_raw    # add --show for images
 sb run camera_app --id 2                                 # restart one module with args
 sb stop camera_app                                       # run its stopscript.bash
 ```
 
-**6. Freeze for production**
+**6. Share it**
+
+```bash
+git add flow.yaml modules && git commit -m "my_project" && git push
+# others: sb install <git-url>
+```
+
+Commit `flow.yaml` and each module's `sb.dev.yml`; every install regenerates
+`swarmbotix_io/`.
+
+**7. Freeze for production**
 
 ```bash
 sb gopro --all   # writes sb.prd.yml next to each sb.dev.yml
@@ -426,21 +472,33 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 
 | Command | Purpose |
 |---|---|
-| `sb ws <create\|set\|list\|delete>` | Workspace lifecycle under `~/.swarmbotix/workspaces/` |
-| `sb init [path] [--rust\|--python\|--cpp\|--flutter\|--unity] [--docker] [--force]` | Adopt an existing project as a module |
-| `sb list` | List publishers and subscribers on the resolved module |
+| `sb install <url\|path> [--dir <path>] [--force]` | Install a workspace repository (root holds `flow.yaml`): install the flow, import and compile `messages:`, regenerate every module's io |
+| `sb ws create <name>` | Write `./flow.yaml` and install it |
+| `sb ws install [<url\|path>] [--dir <path>] [--force]` | Workspace-only form of `sb install` (default: the current folder) |
+| `sb ws check [<name>]` | Validate a workspace (default: the active one): module files, message types, instance ids, encodings per wire key, generated files, staleness |
+| `sb ws update <name> [--force]` | `git pull --ff-only` the workspace's clone, then reinstall |
+| `sb ws uninstall <name> [--clean]` | Remove the installed copy; `--clean` also deletes each module's io dir and the clone `sb` made |
+| `sb ws <set\|list\|delete>` | Switch, list (with source and a stale marker), delete installed workspaces under `~/.swarmbotix/workspaces/` |
+| `sb init [path] [--rust\|--python\|--cpp\|--flutter\|--unity] [--docker] [--force]` | Adopt an existing project as a module; registers it in the repository `flow.yaml` above it |
+| `sb list` | List publishers and subscribers on the resolved module (deprecated: `sb io list`) |
 | `sb gopro [--all \| --module <name>]` | Freeze a module for production (`sb.prd.yml`) |
 
 ### Pub/sub codegen
 
 | Command | Purpose |
 |---|---|
-| `sb pub <list\|add\|edit\|rm>` | Manage publishers; each mutation regenerates the file |
-| `sb sub <list\|add\|edit\|rm>` | Manage subscribers |
-| `sb service init` | Scaffold REST-style request/response over Zenoh queryables |
+| `sb io add <pub\|sub> (<topic> \| --key <key>) -m <Type> [--zenoh\|--iox2] [--proto\|--fb] [-n <name>]` | Add a publisher or subscriber and generate its file |
+| `sb io add <pub\|sub> <topic> --raw [<mime>]` | Add a raw-bytes Zenoh entry, tagged with `<mime>` or `application/octet-stream` |
+| `sb io add service <name>` | Add a REST-style request/response router over Zenoh queryables |
+| `sb io <edit\|rm\|list>` | Change (or, with no flags, regenerate), remove, or list entries by name |
+| `sb io update [<module> \| --all] [--services]` | Regenerate `swarmbotix_io/` from `sb.dev.yml` without changing it |
+| `sb pub <list\|add\|edit\|rm>` | Deprecated: manage publishers |
+| `sb sub <list\|add\|edit\|rm>` | Deprecated: manage subscribers |
+| `sb service init` | Deprecated: scaffold the module's default service router |
 
-With no `--zenoh` / `--iox2` flag, `sb pub add` and `sb sub add` default to
-iceoryx2. `sb topic listen` and `sb topic pub` have no default: they take
+With no `--zenoh` / `--iox2` flag, a protobuf entry from `sb io add` (or the
+deprecated `sb pub add` / `sb sub add`) uses `transport_on_device`, iceoryx2
+unless configured; `--fb` and `--raw` entries are Zenoh only. `sb topic listen` and `sb topic pub` have no default: they take
 the transport from the topic path's `zenoh` / `iox2` segment, or for a bare
 topic from its entry in the cwd module's `sb.dev.yml`. Any other path needs
 `-t zenoh` or `-t iox2`.
@@ -480,25 +538,31 @@ Every `sb` invocation reads from and writes to one of three roots:
 ~/.swarmbotix/                       (1) swarmbotix home
 ├── sb.config.yml                        host-wide config (tool paths, defaults)
 ├── active                               name of the active workspace
+├── repos/<name>/                        workspace clones made by `sb install <git-url>`
 ├── messages/                        (2) message vault, one subdir per style
 │   ├── ros2/
 │   │   ├── message_definitions/         source .proto files
 │   │   └── message_targets/             generated bindings (iox2 / proto / fb)
 │   └── swarmbotix/
 └── workspaces/<name>/
-    ├── flow.yaml                        module name -> sb.dev.yml path
+    ├── flow.yaml                        installed copy: absolute paths + source (never hand-edited)
     └── sb.config.yml                    per-workspace override (optional)
 
-/path/to/<user_project>/             (3) an adopted module, located anywhere
-├── sb.dev.yml                           dev-time interface (gitignored)
-├── sb.prd.yml                           production interface (ships with binary)
-├── swarmbotix_io/                       generated pub/sub files
-├── runscript.bash                       user-written launch script
-└── ...your own source tree...
+/path/to/<repo>/                     (3) a workspace repository, located anywhere
+├── flow.yaml                            the workspace: modules, messages (committed)
+├── messages/<dir>/*.proto               optional; imported into (2) by `sb install`
+└── modules/<module>/                    an adopted module
+    ├── sb.dev.yml                       dev-time interface (committed; no host paths)
+    ├── sb.prd.yml                       production interface (ships with binary)
+    ├── swarmbotix_io/                   generated publishers/, subscribers/, services/
+    ├── runscript.bash                   user-written launch script
+    └── ...your own source tree...
 ```
 
-The vault is global to the host, workspaces are isolated registries, and
-modules stay wherever you keep your source. Configuration resolves as
+The vault is global to the host. A workspace is the `flow.yaml` in its
+repository; `sb install` derives the installed copy that every other verb
+reads, and re-running it after a `git pull` brings that copy up to date.
+Modules stay wherever you keep your source. Configuration resolves as
 environment override, then workspace, then global, then built-in defaults; see
 [sbcli_config.md](documents/sbcli_config.md).
 
@@ -514,9 +578,9 @@ Rust source is not split per OS.
 | [sb-vault](crates/sb-vault) | Message vault: embedded standard bundle, CRUD, `protoc` invocation |
 | [sb-iox2-typegen](crates/sb-iox2-typegen) | Flattens protobuf descriptors into iceoryx2-compatible fixed-size types |
 | [sb-doctor](crates/sb-doctor) | Environment validation behind `sb doctor` |
-| [sb-workspace](crates/sb-workspace) | Workspace lifecycle, `flow.yaml`, module adoption |
+| [sb-workspace](crates/sb-workspace) | Workspace lifecycle, repository `flow.yaml` install / update / uninstall, module adoption |
 | [sb-codegen](crates/sb-codegen) | Per-language pub/sub codegen (minijinja templates) |
-| [sb-pubsub](crates/sb-pubsub) | `sb pub` / `sb sub` mutation and codegen invocation |
+| [sb-pubsub](crates/sb-pubsub) | `sb io` (and `sb pub` / `sb sub`) mutation, `sb io update`, and codegen invocation |
 | [sb-discover](crates/sb-discover) | Snapshot topic discovery (Zenoh enumeration, iceoryx2 service list) |
 | [sb-listen](crates/sb-listen) | Per-transport frame iterators and one-shot raw publishers |
 | [sb-launch](crates/sb-launch) | tmux session launch (`sb up` / `run` / `stop` / `down` / `attach`) |
@@ -539,7 +603,8 @@ Top-level directories:
 
 ## Language Support
 
-What `sb pub add` / `sb sub add` can generate, per language and transport:
+What `sb io add` (and the deprecated `sb pub add` / `sb sub add`) can generate,
+per language and transport:
 
 | | Zenoh | iceoryx2 |
 |---|---|---|
@@ -549,8 +614,10 @@ What `sb pub add` / `sb sub add` can generate, per language and transport:
 | Flutter | pub ✓ · sub ✓ | -- (mobile sandbox) |
 | Unity | pub ✓ · sub ✓ | -- (game sandbox) |
 
-Zenoh payloads are raw bytes at the API boundary; iceoryx2 payloads are always
-typed, fixed-size structs generated from the vault. The two empty cells are
+Zenoh payloads are bytes at the API boundary, plus a typed protobuf
+`publish(msg)` / receive for `proto` entries in Rust, Python, and C++; iceoryx2
+payloads are always typed, fixed-size structs generated from the vault.
+Services (`sb io add service`) are Rust and Python only. The two empty cells are
 structural: a mobile or game sandbox has no shared memory to map.
 
 ### Platform support
@@ -607,12 +674,12 @@ release. Start with [sbcli.md](documents/sbcli.md).
 | [sbcli_config.md](documents/sbcli_config.md) | `sb config`: file locations, layering chain, key reference |
 | [sbcli_doctor.md](documents/sbcli_doctor.md) | `sb doctor`: every check, OK / FAIL / SKIP semantics |
 | [sbcli_init.md](documents/sbcli_init.md) | `sb init`: adopting a project in each supported language |
-| [sbcli_ws.md](documents/sbcli_ws.md) | `sb ws`: workspace lifecycle, `active` marker, `flow.yaml` |
+| [sbcli_ws.md](documents/sbcli_ws.md) | `sb ws` and workspace `sb install`: the repository `flow.yaml`, the installed copy, `active` marker |
 | [sbcli_messages.md](documents/sbcli_messages.md) | `sb message`: vault lifecycle, codegen, capacity configuration |
-| [sbcli_pubsub.md](documents/sbcli_pubsub.md) | `sb pub` / `sb sub` / `sb list`: resolution, validation, conflicts |
+| [sbcli_pubsub.md](documents/sbcli_pubsub.md) | `sb io` (and the deprecated `sb pub` / `sb sub` / `sb list`): resolution, validation, encodings, conflicts |
 | [sbcli_pubsub_consuming.md](documents/sbcli_pubsub_consuming.md) | Per-language guide to wiring generated files into your build |
 | [sbcli_launch.md](documents/sbcli_launch.md) | `sb up` / `run` / `stop` / `down` / `attach`: the tmux session and lifecycle scripts |
-| [sbcli_reqres.md](documents/sbcli_reqres.md) | `sb service`: request/response over Zenoh queryables |
+| [sbcli_reqres.md](documents/sbcli_reqres.md) | Services (`sb io add service`, `sb service`): request/response over Zenoh queryables |
 | [sbcli_docker_runscript.md](documents/sbcli_docker_runscript.md) | `sb init --docker`: `flow.yaml` instances and docker dispatch |
 | [sbcli_app.md](documents/sbcli_app.md) | `sb app` / `sb install`: app packages, `sb.app.yml`, running `sb <name>` |
 | [sbcli_update.md](documents/sbcli_update.md) | `sb update` / `sb --version`: update notice, `--check`, in-place self-update |

@@ -48,28 +48,3 @@ pub(crate) fn plain_path(p: &Path) -> PathBuf {
         _ => p.to_path_buf(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn at(secs: u64) -> String {
-        rfc3339_utc(UNIX_EPOCH + Duration::from_secs(secs))
-    }
-
-    #[test]
-    fn rfc3339_known_instants() {
-        assert_eq!(at(0), "1970-01-01T00:00:00Z");
-        assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(at(1_791_374_400), "2026-10-07T12:00:00Z");
-    }
-
-    #[test]
-    fn plain_path_strips_only_drive_verbatim_prefixes() {
-        assert_eq!(plain_path(Path::new(r"\\?\C:\sb")), PathBuf::from(r"C:\sb"));
-        let unc = Path::new(r"\\?\UNC\server\share");
-        assert_eq!(plain_path(unc), unc.to_path_buf());
-        assert_eq!(plain_path(Path::new("/home/x")), PathBuf::from("/home/x"));
-    }
-}

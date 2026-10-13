@@ -66,8 +66,9 @@ Checked in this order, before tmux is touched:
 1. **An active workspace exists.** Otherwise:
    `no active workspace — run \`sb ws create <name> && sb ws set <name>\` first`
 2. **The module resolves through `flow.yaml`.** Module paths come from
-   the registry, never from cwd, so every launch verb works from any
-   directory.
+   the registry (the workspace's installed copy, see
+   [sbcli_ws.md](sbcli_ws.md) §4.3), never from cwd, so every launch
+   verb works from any directory.
 3. **The required script exists** at the module root.
 4. **tmux is resolvable** — the `tmux:` path in `sb.config.yml` if set,
    otherwise `tmux` on `PATH`. On Windows, `psmux` ships as the `tmux`
@@ -87,7 +88,24 @@ sb up
 
 Launch every module in the active workspace's `flow.yaml`, one window
 each, in a detached session. No arguments, and no per-module passthrough
-args — that is `sb run`'s job.
+args; that is `sb run`'s job.
+
+**`up: false` modules are skipped** (sb 0.5.0+). A module registered as
+`{ path: ..., up: false }` ([sbcli_ws.md](sbcli_ws.md) §4.4) gets no
+window from `sb up`; start it on its own with `sb run <module>`.
+
+**A stale installed copy warns** (sb 0.5.0+). When the workspace was
+installed from a repository and the repo `flow.yaml` is newer than the
+installed copy (you edited it, or pulled, without reinstalling),
+`sb up` prints, on stderr,
+
+```
+warning: flow.yaml at /home/el/ws_ips is newer than the installed copy; run sb install
+```
+
+and launches from the installed copy anyway. Run `sb install <repo>`
+(or `sb ws update <name>`) to bring the installed copy up to date.
+`sb run` gives the same warning.
 
 ```console
 $ sb up
@@ -112,6 +130,9 @@ $ sb up
 error: workspace "emptyws" has no modules in flow.yaml — run `sb init` to adopt one
 
 $ sb up
+error: workspace "tools" has no modules to launch: every module in flow.yaml has `up: false` (use `sb run <module>` to start one)
+
+$ sb up
 error: module "beta": missing runscript at /path/beta/runscript.bash — `sb init` writes a stub; fill it in (or re-run `sb init --force`) before `sb up`
 ```
 
@@ -131,7 +152,7 @@ window for one module.
 
 | Argument | Required | Meaning |
 |---|---|---|
-| `<MODULE>` | yes | Module name as registered in the active workspace's `flow.yaml` |
+| `<MODULE>` | yes | Module name as registered in the active workspace's `flow.yaml`. A module marked `up: false` can be run (sb 0.5.0+); the flag only keeps it out of `sb up`. |
 | `[ARGS]...` | no | Appended verbatim to `runscript.bash`'s argv |
 
 ```console
@@ -358,6 +379,9 @@ runscripts exited, not that the launch failed.
 |---|---|---|
 | `no active workspace` | no `active` marker set | `sb ws create <name> && sb ws set <name>` |
 | `module "x" not registered in workspace "y"` | module absent from `flow.yaml` | `sb init` from the module root |
+| `has no modules to launch` | every module is marked `up: false` (sb 0.5.0+) | `sb run <module>`, or set `up: true` in the repo `flow.yaml` and reinstall |
+| `warning: flow.yaml at … is newer than the installed copy` | edited or pulled without reinstalling (sb 0.5.0+) | `sb install <repo>` or `sb ws update <name>` |
+| a module listed in the repo `flow.yaml` is not launched | the installed copy predates the edit, or the module has `up: false` | reinstall; check `up:` |
 | `sb.dev.yml not found … did the module dir get moved?` | `flow.yaml` points at a stale path | re-`sb init` at the new location |
 | `missing runscript … sb init writes a stub` | stub deleted, or never filled in | restore with `sb init --force`, then edit it |
 | `missing stopscript … sb stop requires a stopscript.bash` | none was authored | write one (§4.2) — `sb init` never stubs it |

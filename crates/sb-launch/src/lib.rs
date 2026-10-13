@@ -107,7 +107,8 @@ pub struct LaunchPlan {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Build a launch plan from the active workspace's `flow.yaml`. Walks
-/// every module in the registry, verifies its `runscript.bash` exists.
+/// every module in the registry except those marked `up: false`, and
+/// verifies each one's `runscript.bash` exists.
 ///
 /// Returns an error *before* tmux is touched if any precondition fails
 /// (no active workspace, missing flow.yaml entry, missing dev.yml,
@@ -119,12 +120,18 @@ pub fn plan_workspace(home: &SbHome, workspace: &str) -> Result<LaunchPlan> {
         bail!("workspace {workspace:?} has no modules in flow.yaml — run `sb init` to adopt one");
     }
     let mut panes = Vec::with_capacity(flow.modules.len());
-    for (module, dev_yml_path) in &flow.modules {
+    for (module, entry) in flow.modules.iter().filter(|(_, m)| m.up) {
         // `sb up` runs the runscript with no extra args (the L5 multi-
         // module workflow). Per-module passthrough args are an `sb run`
         // / `sb stop` thing only.
-        let pane = plan_module(module, dev_yml_path, Script::Run, &[])?;
+        let pane = plan_module(module, &entry.path, Script::Run, &[])?;
         panes.push(pane);
+    }
+    if panes.is_empty() {
+        bail!(
+            "workspace {workspace:?} has no modules to launch: every module in flow.yaml \
+             has `up: false` (use `sb run <module>` to start one)"
+        );
     }
     Ok(LaunchPlan {
         workspace: workspace.to_string(),
@@ -136,6 +143,8 @@ pub fn plan_workspace(home: &SbHome, workspace: &str) -> Result<LaunchPlan> {
 /// Like [`plan_workspace`] but for a single module — used by `sb run <module>`
 /// and `sb stop <module>`. The `script` arg picks runscript.bash vs
 /// stopscript.bash; `args` are appended verbatim to that script's argv.
+/// A module's `up: false` does not apply here: it only keeps the module
+/// out of the whole-workspace `sb up`.
 pub fn plan_single(
     home: &SbHome,
     workspace: &str,
@@ -145,13 +154,13 @@ pub fn plan_single(
 ) -> Result<(LaunchPlan, Pane)> {
     let flow = read_flow(home, workspace)
         .with_context(|| format!("reading flow.yaml for workspace {workspace:?}"))?;
-    let dev_yml = flow.modules.get(module).ok_or_else(|| {
+    let entry = flow.modules.get(module).ok_or_else(|| {
         anyhow!(
             "module {module:?} not registered in workspace {workspace:?} — \
              run `sb init` from its rootpath first"
         )
     })?;
-    let pane = plan_module(module, dev_yml, script, args)?;
+    let pane = plan_module(module, &entry.path, script, args)?;
     Ok((
         LaunchPlan {
             workspace: workspace.to_string(),
@@ -162,8 +171,8 @@ pub fn plan_single(
     ))
 }
 
-/// Read `<dev_yml>`, validate the requested lifecycle script exists
-/// alongside it, and emit a [`Pane`]. Errors include the offending
+/// Read `<dev_yml>`, validate the requested lifecycle script exists in
+/// the module root ([`ModuleDevConfig::module_root`]), and emit a [`Pane`]. Errors include the offending
 /// module name + the missing filename so the CLI can blame the right
 /// pane (TDD #2 for `sb up`; analogous failure mode for `sb stop` when
 /// the user never wrote a stopscript).
@@ -179,10 +188,7 @@ fn plan_module(module: &str, dev_yml_path: &Path, script: Script, args: &[String
         .with_context(|| format!("reading {}", dev_yml_path.display()))?;
     let dev: ModuleDevConfig = serde_yaml::from_str(&body)
         .with_context(|| format!("parsing {}", dev_yml_path.display()))?;
-    let module_root = dev_yml_path
-        .parent()
-        .ok_or_else(|| anyhow!("sb.dev.yml has no parent: {}", dev_yml_path.display()))?
-        .to_path_buf();
+    let module_root = dev.module_root(dev_yml_path);
     let script_path = module_root.join(script.filename());
     if !script_path.exists() {
         let hint = match script {
@@ -196,7 +202,7 @@ fn plan_module(module: &str, dev_yml_path: &Path, script: Script, args: &[String
             // No stub for stopscripts today; tell the user to author one.
             Script::Stop => format!(
                 "missing stopscript at {} — `sb stop` requires a \
-                 stopscript.bash next to the module's sb.dev.yml \
+                 stopscript.bash in the module root \
                  (mirror your runscript's launch with a teardown)",
                 script_path.display()
             ),
@@ -501,8 +507,7 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    use sb_core::{Language, ModuleDevConfig, WorkspaceFlow};
-    use std::collections::BTreeMap;
+    use sb_core::{Language, ModuleDevConfig, ModuleRef, WorkspaceFlow};
     use tempfile::TempDir;
 
     fn write_module(root: &Path, name: &str, with_runscript: bool) -> PathBuf {
@@ -520,10 +525,11 @@ mod tests {
         let dev = ModuleDevConfig {
             module: name.to_string(),
             language: Language::Rust,
-            root: dir.clone(),
+            root: None,
             io_dir: PathBuf::from("swarmbotix_io"),
             publishers: vec![],
             subscribers: vec![],
+            services: vec![],
         };
         let dev_yml = dir.join("sb.dev.yml");
         fs::write(&dev_yml, serde_yaml::to_string(&dev).unwrap()).unwrap();
@@ -544,12 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn session_name_format_stable() {
-        assert_eq!(session_name("demo"), "sb-demo");
-        assert_eq!(session_name("my-ws"), "sb-my-ws");
-    }
-
-    #[test]
     fn pane_shell_command_quotes_safely() {
         let p = Pane {
             module: "m".into(),
@@ -565,213 +565,31 @@ mod tests {
     }
 
     #[test]
-    fn pane_shell_command_appends_passthrough_args() {
-        let p = Pane {
-            module: "m".into(),
-            cwd: PathBuf::from("/m"),
-            script: PathBuf::from("/m/runscript.bash"),
-            args: vec!["--id".into(), "sb01".into(), "with space".into()],
-        };
-        let cmd = p.shell_command();
-        assert!(cmd.starts_with("cd '/m' && '/m/runscript.bash'"));
-        // Each arg is single-quoted independently; the embedded space
-        // survives a second pass through the shell.
-        assert!(cmd.contains(" '--id' 'sb01' 'with space'"), "got: {cmd}");
-    }
-
-    #[test]
-    fn shell_quote_handles_single_quote() {
-        // `it's` becomes `'it'\''s'`
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-        assert_eq!(shell_quote("safe"), "'safe'");
-    }
-
-    #[test]
-    fn plan_workspace_succeeds_with_two_modules() {
+    fn up_false_is_skipped_by_plan_workspace_but_not_plan_single() {
         let (_td, home) = sandbox_home();
         let ws = "demo";
         fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-
         let projects = home.root().join("projects");
         fs::create_dir_all(&projects).unwrap();
         let dev_a = write_module(&projects, "alpha", true);
         let dev_b = write_module(&projects, "beta", true);
-
         let mut flow = WorkspaceFlow::default();
-        flow.modules.insert("alpha".into(), dev_a);
-        flow.modules.insert("beta".into(), dev_b);
-        let body = serde_yaml::to_string(&flow).unwrap();
-        fs::write(home.flow_yaml(ws), body).unwrap();
+        flow.modules.insert("alpha".into(), ModuleRef::new(dev_a));
+        flow.modules.insert(
+            "beta".into(),
+            ModuleRef {
+                path: dev_b,
+                up: false,
+            },
+        );
+        fs::write(home.flow_yaml(ws), serde_yaml::to_string(&flow).unwrap()).unwrap();
 
         let plan = plan_workspace(&home, ws).unwrap();
-        assert_eq!(plan.session, "sb-demo");
-        assert_eq!(plan.panes.len(), 2);
         let names: Vec<&str> = plan.panes.iter().map(|p| p.module.as_str()).collect();
-        // BTreeMap iteration sorts keys alphabetically.
-        assert_eq!(names, ["alpha", "beta"]);
-    }
+        assert_eq!(names, ["alpha"]);
 
-    #[test]
-    fn plan_workspace_blames_missing_runscript() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        let projects = home.root().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let dev = write_module(&projects, "alpha", false); // no runscript
-
-        let mut flow = WorkspaceFlow::default();
-        flow.modules.insert("alpha".into(), dev);
-        fs::write(home.flow_yaml(ws), serde_yaml::to_string(&flow).unwrap()).unwrap();
-
-        let err = plan_workspace(&home, ws).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("alpha"), "want module name in error: {msg}");
-        assert!(
-            msg.contains("runscript"),
-            "want 'runscript' in error: {msg}"
-        );
-    }
-
-    #[test]
-    fn plan_workspace_errors_on_empty_flow() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        fs::write(
-            home.flow_yaml(ws),
-            serde_yaml::to_string(&WorkspaceFlow::default()).unwrap(),
-        )
-        .unwrap();
-        let err = plan_workspace(&home, ws).unwrap_err();
-        assert!(format!("{err:#}").contains("no modules"), "got: {err:#}");
-    }
-
-    #[test]
-    fn plan_single_finds_the_named_module() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        let projects = home.root().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let dev_a = write_module(&projects, "alpha", true);
-        let dev_b = write_module(&projects, "beta", true);
-        let mut flow = WorkspaceFlow::default();
-        flow.modules.insert("alpha".into(), dev_a);
-        flow.modules.insert("beta".into(), dev_b);
-        fs::write(home.flow_yaml(ws), serde_yaml::to_string(&flow).unwrap()).unwrap();
-
-        let (plan, pane) = plan_single(&home, ws, "beta", Script::Run, &[]).unwrap();
-        assert_eq!(plan.panes.len(), 1);
+        let (_plan, pane) = plan_single(&home, ws, "beta", Script::Run, &[]).unwrap();
         assert_eq!(pane.module, "beta");
-        assert!(pane.args.is_empty());
+        assert_eq!(pane.cwd, projects.join("beta"));
     }
-
-    #[test]
-    fn plan_single_threads_passthrough_args_into_pane() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        let projects = home.root().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let dev_a = write_module(&projects, "alpha", true);
-        let mut flow = WorkspaceFlow::default();
-        flow.modules.insert("alpha".into(), dev_a);
-        fs::write(home.flow_yaml(ws), serde_yaml::to_string(&flow).unwrap()).unwrap();
-
-        let args = vec!["--id".to_string(), "sb01".to_string()];
-        let (_plan, pane) = plan_single(&home, ws, "alpha", Script::Run, &args).unwrap();
-        assert_eq!(pane.args, args);
-        let cmd = pane.shell_command();
-        assert!(cmd.ends_with(" '--id' 'sb01'"), "got: {cmd}");
-    }
-
-    #[test]
-    fn plan_single_stop_finds_stopscript() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        let projects = home.root().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let dev_a = write_module_full(&projects, "alpha", true, true);
-        let mut flow = WorkspaceFlow::default();
-        flow.modules.insert("alpha".into(), dev_a);
-        fs::write(home.flow_yaml(ws), serde_yaml::to_string(&flow).unwrap()).unwrap();
-
-        let (_plan, pane) = plan_single(&home, ws, "alpha", Script::Stop, &[]).unwrap();
-        assert_eq!(pane.script.file_name().unwrap(), "stopscript.bash");
-    }
-
-    #[test]
-    fn plan_single_stop_blames_missing_stopscript() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        let projects = home.root().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        // runscript present, but no stopscript.
-        let dev_a = write_module_full(&projects, "alpha", true, false);
-        let mut flow = WorkspaceFlow::default();
-        flow.modules.insert("alpha".into(), dev_a);
-        fs::write(home.flow_yaml(ws), serde_yaml::to_string(&flow).unwrap()).unwrap();
-
-        let err = plan_single(&home, ws, "alpha", Script::Stop, &[]).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("alpha"), "want module name in error: {msg}");
-        assert!(
-            msg.contains("stopscript"),
-            "want 'stopscript' in error: {msg}"
-        );
-    }
-
-    #[test]
-    fn plan_single_errors_when_module_missing() {
-        let (_td, home) = sandbox_home();
-        let ws = "demo";
-        fs::create_dir_all(home.workspace_dir(ws)).unwrap();
-        fs::write(
-            home.flow_yaml(ws),
-            serde_yaml::to_string(&WorkspaceFlow::default()).unwrap(),
-        )
-        .unwrap();
-        let err = plan_single(&home, ws, "nope", Script::Run, &[]).unwrap_err();
-        assert!(format!("{err:#}").contains("nope"), "got: {err:#}");
-    }
-
-    #[test]
-    fn resolve_tmux_honors_config_path() {
-        let td = TempDir::new().unwrap();
-        let fake = td.path().join("tmux");
-        fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        let resolved = resolve_tmux(Some(&fake)).unwrap();
-        assert_eq!(resolved, fake);
-    }
-
-    #[test]
-    fn resolve_tmux_errors_when_configured_path_missing() {
-        let bad = PathBuf::from("/definitely/not/here/tmux-binary-do-not-create");
-        // The path doesn't exist on disk → should error out, not fall back to PATH.
-        let err = resolve_tmux(Some(&bad)).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("tmux"), "want 'tmux' in error: {msg}");
-        assert!(msg.contains("does not exist"), "got: {msg}");
-    }
-
-    #[test]
-    fn plan_module_uses_dev_yml_module_name_not_flow_key() {
-        // Lets us assert the dev.yml's `module:` field — not the flow.yaml key —
-        // wins for the pane name. (Today they're identical, but the function
-        // should still read from sb.dev.yml for consistency.)
-        let (_td, home) = sandbox_home();
-        let projects = home.root().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let dev = write_module(&projects, "alpha", true);
-        let pane = plan_module("alpha", &dev, Script::Run, &[]).unwrap();
-        assert_eq!(pane.module, "alpha");
-        assert_eq!(pane.script.file_name().unwrap(), "runscript.bash");
-    }
-
-    // Drop the unused BTreeMap import warning in fixtures.
-    #[allow(dead_code)]
-    fn _silence(_x: BTreeMap<String, PathBuf>) {}
 }

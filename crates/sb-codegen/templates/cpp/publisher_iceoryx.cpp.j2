@@ -113,7 +113,7 @@ struct {{ struct_name_base }}TopicOverrides {
   }
 };
 {% else %}
-// Foreign topic — leading-slash input, overrides don't apply.
+// Verbatim wire key (`key:` entry): overrides do not apply.
 inline constexpr const char* {{ struct_name_base }}_SERVICE = "{{ topic_iox }}";
 {% endif %}
 class {{ struct_name }} {

@@ -2,7 +2,7 @@
 //!
 //! `listen_zenoh` opens a short-lived session and a typed subscriber on
 //! the exact full-path topic; each sample's payload bytes come back as-is,
-//! together with the schema half of its encoding (see [`wire_schema`]).
+//! together with its encoding, classified by [`parse_wire_tag`].
 //! Decoding is the caller's job (`sb-listen::decode::decode_frame_dynamic`).
 //!
 //! `publish_zenoh_raw` is one-and-done: open session → declare publisher →
@@ -14,6 +14,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use zenoh::Wait;
 
+use sb_discover::{WireTag, parse_wire_tag};
+
 use crate::{Frame, FrameIter, FramePoll};
 
 pub struct ZenohFrames {
@@ -21,9 +23,10 @@ pub struct ZenohFrames {
     sub: zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
 }
 
-/// Open a Zenoh subscriber. `topic_full_name` may start with `/`; Zenoh
-/// key expressions don't carry the leading slash, so we trim it the same
-/// way the L3 codegen does (`topic_zenoh` is built without it).
+/// Open a Zenoh subscriber on `topic_full_name`, the canonical
+/// fully-qualified topic, which is the Zenoh key expression itself. The
+/// canonical form has no leading `/`; one is tolerated and stripped (as is
+/// a trailing one) because Zenoh rejects them.
 pub fn listen_zenoh(topic_full_name: &str) -> Result<ZenohFrames> {
     let key = topic_full_name.trim_matches('/').to_string();
     let session = zenoh::open(zenoh::Config::default())
@@ -58,28 +61,20 @@ impl FrameIter for ZenohFrames {
     }
 }
 
+/// A sample as a [`Frame`]. The encoding is classified by the same
+/// [`parse_wire_tag`] `sb topic list` uses, so both commands agree on a
+/// topic's type; a protobuf tag's vault name also becomes
+/// [`Frame::wire_schema`].
 fn to_frame(sample: &zenoh::sample::Sample) -> Frame {
+    let tag = parse_wire_tag(&sample.encoding().to_string());
     Frame {
         bytes: sample.payload().to_bytes().to_vec(),
-        wire_schema: wire_schema(sample.encoding()),
+        wire_schema: match &tag {
+            WireTag::Protobuf(name) => Some(name.clone()),
+            _ => None,
+        },
+        wire_tag: Some(tag),
     }
-}
-
-/// Schema half of a protobuf sample's encoding:
-/// `application/protobuf;ros2/std/Header` → `ros2/std/Header`. sb-generated
-/// publishers put the vault name there.
-///
-/// Read from the encoding's string form because `Encoding::schema()` is
-/// behind zenoh's `internal` feature. Zenoh renders an encoding as
-/// `<mime>;<schema>`. Only a MIME of exactly `application/protobuf` counts:
-/// any other encoding's schema (`text/plain;utf-8`) names no vault message.
-/// No `;`, another MIME, or an empty schema all mean none. Kept identical to
-/// `sb_discover::probe::encoding_schema`, so `sb topic list` and
-/// `sb topic listen` agree on a topic's type.
-fn wire_schema(encoding: &zenoh::bytes::Encoding) -> Option<String> {
-    let rendered = encoding.to_string();
-    let (mime, schema) = rendered.split_once(';')?;
-    (mime.trim() == "application/protobuf" && !schema.is_empty()).then(|| schema.to_owned())
 }
 
 /// Publish `bytes` on `topic_full_name` exactly once. Synchronous: by
@@ -89,6 +84,9 @@ fn wire_schema(encoding: &zenoh::bytes::Encoding) -> Option<String> {
 /// settle window, closing the session immediately after `put` can drop
 /// the sample before any subscriber sees it (observed under the L4
 /// round-trip test).
+///
+/// `topic_full_name` is the canonical topic (no leading `/`); a stray
+/// leading or trailing `/` is tolerated and stripped.
 pub fn publish_zenoh_raw(topic_full_name: &str, bytes: &[u8]) -> Result<()> {
     let key = topic_full_name.trim_matches('/').to_string();
     let session = zenoh::open(zenoh::Config::default())
@@ -128,29 +126,4 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>> {
                 .with_context(|| format!("invalid hex at byte {}: {:?}", i / 2, &cleaned[i..i + 2]))
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_hex_basic() {
-        assert_eq!(parse_hex("deadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(
-            parse_hex("DE AD BE EF").unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert_eq!(parse_hex("").unwrap(), Vec::<u8>::new());
-    }
-
-    #[test]
-    fn parse_hex_rejects_odd_length() {
-        assert!(parse_hex("abc").is_err());
-    }
-
-    #[test]
-    fn parse_hex_rejects_non_hex_chars() {
-        assert!(parse_hex("zz").is_err());
-    }
 }

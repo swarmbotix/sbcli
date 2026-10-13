@@ -2,14 +2,14 @@
 //!
 //! L1 surface: `doctor`, `message *`, `config *`. Later levels add verbs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use sb_config::LoadInputs;
-use sb_core::{Language, SbCliConfig, Transport};
+use sb_core::{Encoding, EntryKind, Language, SbCliConfig, TopicRef, TopicRefError, Transport};
 use sb_pubsub::{
     Action, Collider, ConflictPolicy, ModuleHandle, PubAddArgs, PubEditArgs, Scope, SubAddArgs,
     find_pub_colliders, find_sub_colliders, format_colliders, list as pubsub_list, render_table,
@@ -48,19 +48,30 @@ enum Cmd {
     /// Edit `sb.config.yml` (interactive or set a single key).
     #[command(subcommand)]
     Config(ConfigCmd),
-    /// Manage swarmbotix workspaces under `~/.swarmbotix/workspaces/`.
+    /// Manage workspaces: create, install, check, update, uninstall, set, list, delete.
     #[command(subcommand)]
     Ws(WsCmd),
     /// Adopt an existing project directory as a swarmbotix module.
     Init(InitArgs),
+    /// Manage a module's publishers, subscribers, and services, and regenerate their code.
+    #[command(subcommand)]
+    Io(IoCmd),
+    /// Deprecated since 0.5.0: use `sb io list`.
+    ///
     /// List publishers and subscribers across the resolved module.
     List(ListArgs),
-    /// Manage publishers (alias for `sb pub *`).
+    /// Deprecated since 0.5.0: use `sb io add pub`, `sb io edit`, `sb io rm`.
+    ///
+    /// Manage publishers.
     #[command(subcommand)]
     Pub(PubCmd),
+    /// Deprecated since 0.5.0: use `sb io add sub`, `sb io edit`, `sb io rm`.
+    ///
     /// Manage subscribers.
     #[command(subcommand)]
     Sub(SubCmd),
+    /// Deprecated since 0.5.0: use `sb io add service`.
+    ///
     /// REST-style request/response over Zenoh (FastAPI-style route router).
     #[command(subcommand)]
     Service(ServiceCmd),
@@ -87,10 +98,11 @@ enum Cmd {
     Attach,
     /// Freeze a module for production — write sb.prd.yml next to sb.dev.yml.
     Gopro(GoproArgs),
-    /// Install an app package from a git URL or a local folder; then run it as `sb <name> ...`.
+    /// Install an app or workspace package from a git URL or a local folder.
     ///
-    /// The argument is either a git URL or a local folder that holds an
-    /// `sb.app.yml` manifest. Git URLs are anything starting with https://,
+    /// The package root decides the kind: `sb.app.yml` is an app package,
+    /// `flow.yaml` is a workspace package; a root holding both, or neither,
+    /// is refused. Git URLs are anything starting with https://,
     /// http://, ssh://, git://, file:// or git@ (as in git@github.com:org/repo.git),
     /// plus any path ending in .git. Append @<branch-or-tag> to a git URL to pin
     /// it (refs containing `/` cannot be pinned this way).
@@ -112,6 +124,13 @@ enum Cmd {
     /// with your arguments, and exits with the app's exit code. No PATH change is
     /// needed. An app name may not be an sb built-in command, and a name already
     /// taken by another package must be freed first with `sb app remove <name>`.
+    ///
+    /// A workspace package is installed from its flow.yaml: a git URL is cloned
+    /// into <sb_home>/repos/<name>/ (or --dir), a local folder is used in place.
+    /// The installed copy goes to <sb_home>/workspaces/<name>/ and becomes the
+    /// active workspace; each `messages:` source is imported into the vault and
+    /// compiled; then every module's generated io code is regenerated.
+    /// Installing the same URL or folder again updates it in place.
     #[command(after_long_help = INSTALL_EXAMPLES)]
     Install(InstallArgs),
     /// Create and manage app packages: init, install, list, info, update, remove.
@@ -165,6 +184,9 @@ Examples:
   sb install ~/dev/sb_kalibr                                    use a local folder in place
   sb install ~/dev/sb_kalibr --prefetch                         also docker pull the image now
   sb camcalib --help                                            run the app it installed
+  sb install https://github.com/org/ws_ips.git                  install a workspace package
+  sb install https://github.com/org/ws_ips.git --dir ~/dev/ips  clone the workspace there
+  sb install ~/dev/ws_ips                                       install a workspace in place
 
 Manage installed apps with `sb app list`, `sb app info <name>`,
 `sb app update [name]` and `sb app remove <name>`.";
@@ -219,6 +241,26 @@ struct UpdateArgs {
 #[derive(clap::Args)]
 struct InstallArgs {
     /// Git URL, optionally pinned as `<url>@<branch-or-tag>`, or the path of a
+    /// local package folder (one that holds sb.app.yml or flow.yaml).
+    #[arg(value_name = "URL|PATH")]
+    source: String,
+    /// For `kind: docker` packages, run `docker pull <image>` now even when the
+    /// manifest says `prefetch: false`. No effect on other kinds.
+    #[arg(long)]
+    prefetch: bool,
+    /// Workspace packages from a git URL: clone into this folder instead of
+    /// <sb_home>/repos/<name>/. Refused for a local folder and for an app.
+    #[arg(long, value_name = "PATH")]
+    dir: Option<PathBuf>,
+    /// Workspace packages: overwrite vault messages that differ from the
+    /// package's copies (the bundled ros2/std set is never overwritten).
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args)]
+struct AppInstallArgs {
+    /// Git URL, optionally pinned as `<url>@<branch-or-tag>`, or the path of a
     /// local package folder (one that contains sb.app.yml).
     #[arg(value_name = "URL|PATH")]
     source: String,
@@ -251,9 +293,9 @@ enum AppCmd {
     /// `sb install <url>` and then `sb <name> [args...]`.
     #[command(after_long_help = APP_INIT_EXAMPLES)]
     Init(AppInitArgs),
-    /// Install an app package (same as `sb install`).
+    /// Install an app package (`sb install` also accepts workspace packages).
     #[command(after_long_help = INSTALL_EXAMPLES)]
-    Install(InstallArgs),
+    Install(AppInstallArgs),
     /// List installed apps: name, version, kind, source and folder.
     #[command(alias = "ls")]
     List,
@@ -390,8 +432,13 @@ enum PubCmd {
 
 #[derive(clap::Args)]
 struct PubAddCli {
-    /// Topic — bare (`hello`) or fully-qualified (`/dev01/ws/mod/iox2/hello`).
-    topic: String,
+    /// Bare topic (hello), prefixed <device>/<ws>/<module>/<transport>/ at
+    /// codegen; may not contain '/'. Use --key for a verbatim wire key.
+    #[arg(required_unless_present = "key", conflicts_with = "key")]
+    topic: Option<String>,
+    /// Verbatim wire key (dev01/ws/mod/iox2/hello), used as is
+    #[arg(long, value_name = "WIRE_KEY")]
+    key: Option<String>,
     /// Message type from the vault, e.g. `std/StringStamped`. `-m` is
     /// reserved for this — module selection uses `--module`.
     #[arg(short = 'm', long = "msg")]
@@ -425,9 +472,12 @@ struct PubEditCli {
     /// New message type from the vault.
     #[arg(short = 'm', long = "msg")]
     msg: Option<String>,
-    /// New topic.
-    #[arg(short = 't', long)]
+    /// New bare topic (no '/').
+    #[arg(short = 't', long, conflicts_with = "key")]
     topic: Option<String>,
+    /// New verbatim wire key
+    #[arg(long, value_name = "WIRE_KEY")]
+    key: Option<String>,
     #[arg(long)]
     module: Option<String>,
 }
@@ -443,12 +493,14 @@ enum SubCmd {
     Add(SubAddCli),
     /// Re-render a subscriber file from current `sb.dev.yml`.
     Edit {
+        /// Bare topic or wire key of the subscriber (a leading '/' is ignored)
         topic: String,
         #[arg(long)]
         module: Option<String>,
     },
     /// Remove a subscriber and its generated file.
     Rm {
+        /// Bare topic or wire key of the subscriber (a leading '/' is ignored)
         topic: String,
         #[arg(long)]
         module: Option<String>,
@@ -469,8 +521,13 @@ enum ServiceCmd {
 
 #[derive(clap::Args)]
 struct SubAddCli {
-    /// Topic — bare or fully-qualified.
-    topic: String,
+    /// Bare topic (hello), prefixed <device>/<ws>/<module>/<transport>/ at
+    /// codegen; may not contain '/'. Use --key for a verbatim wire key.
+    #[arg(required_unless_present = "key", conflicts_with = "key")]
+    topic: Option<String>,
+    /// Verbatim wire key (dev01/ws/mod/iox2/hello), used as is
+    #[arg(long, value_name = "WIRE_KEY")]
+    key: Option<String>,
     /// Message type from the vault.
     #[arg(short = 'm', long = "msg")]
     msg: String,
@@ -512,7 +569,8 @@ struct TopicListCli {
     /// this. Defaults to 0.5 s — just long enough for any 2 Hz+ publisher.
     #[arg(short = 't', long = "timeout", default_value_t = 0.5)]
     timeout: f64,
-    /// Substring filter on the topic as printed (with its leading `/`).
+    /// Substring filter on the topic as printed; a leading '/' in the
+    /// keyword is ignored.
     #[arg(short = 'k', long)]
     keyword: Option<String>,
     /// Match keyword case-sensitively (default: insensitive).
@@ -530,8 +588,9 @@ struct TopicListCli {
 
 #[derive(clap::Args)]
 struct TopicListenCli {
-    /// Bare (`chatter`) or fully-qualified (`/dev01/ws/mod/zenoh/chatter`).
-    /// Any `/` makes it fully-qualified; the leading `/` is optional.
+    /// Bare (chatter) or fully-qualified (dev01/ws/mod/zenoh/chatter).
+    /// Any '/' makes it fully-qualified; a leading '/' is accepted and
+    /// dropped.
     topic: String,
     /// Transport to subscribe on: `zenoh` (alias `z`) or `iceoryx2`
     /// (aliases `i`, `iox2`). Default: the topic's `<transport>` path
@@ -568,8 +627,9 @@ struct TopicPruneCli {
 
 #[derive(clap::Args)]
 struct TopicPubCli {
-    /// Bare or fully-qualified topic. Any `/` makes it fully-qualified;
-    /// the leading `/` is optional.
+    /// Bare (chatter) or fully-qualified (dev01/ws/mod/zenoh/chatter).
+    /// Any '/' makes it fully-qualified; a leading '/' is accepted and
+    /// dropped.
     topic: String,
     /// Hex bytes (no `0x` prefix, whitespace OK).
     bytes_hex: String,
@@ -620,14 +680,204 @@ impl From<TransportArg> for Transport {
 
 #[derive(Subcommand)]
 enum WsCmd {
-    /// Create a workspace dir and an empty flow.yaml.
+    /// Write ./flow.yaml for a new workspace, then install it.
+    ///
+    /// Refuses when ./flow.yaml already exists or a workspace of that name is
+    /// already installed. Add modules with `sb init <dir>` under this folder.
     Create { name: String },
+    /// Install a workspace package (`sb install` restricted to workspaces).
+    Install(WsInstallArgs),
+    /// Validate a workspace: module files, message types, instance ids,
+    /// encodings per wire key, generated io files, and staleness.
+    ///
+    /// Exits 1 when any row is [FAIL].
+    Check {
+        /// Workspace to check. Default: the active one.
+        name: Option<String>,
+    },
+    /// Pull the repository a workspace was cloned from, then reinstall it.
+    Update {
+        name: String,
+        /// Overwrite vault messages that differ from the workspace's copies.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove an installed workspace; its repository is left alone.
+    Uninstall {
+        name: String,
+        /// Also delete each module's generated io directory, and the clone
+        /// sb made under <sb_home>/repos/ when it was installed from a URL.
+        #[arg(long)]
+        clean: bool,
+    },
     /// Mark a workspace active (writes `~/.swarmbotix/active`).
     Set { name: String },
-    /// List workspaces; the active one is prefixed with `*`.
+    /// List workspaces with their source; the active one is prefixed with `*`.
     List,
     /// Remove the workspace dir; clears `active` if it was the active workspace.
     Delete { name: String },
+}
+
+#[derive(clap::Args)]
+struct WsInstallArgs {
+    /// Git URL (optionally `<url>@<branch-or-tag>`) or local folder holding
+    /// flow.yaml. Default: the current folder.
+    #[arg(value_name = "URL|PATH")]
+    source: Option<String>,
+    /// Git URL only: clone into this folder instead of <sb_home>/repos/<name>/.
+    #[arg(long, value_name = "PATH")]
+    dir: Option<PathBuf>,
+    /// Overwrite vault messages that differ from the workspace's copies.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Subcommand)]
+enum IoCmd {
+    /// Add a publisher, subscriber, or service and generate its file.
+    #[command(subcommand)]
+    Add(IoAddCmd),
+    /// Change an entry's type, topic, or encoding and regenerate its file.
+    ///
+    /// With no flags the file is only regenerated. Services have no
+    /// editable fields.
+    Edit(IoEditCli),
+    /// Remove a publisher, subscriber, or service and its generated file.
+    Rm {
+        /// Entry name (see `sb io list`).
+        name: String,
+        #[arg(long)]
+        module: Option<String>,
+    },
+    /// List the module's publishers, subscribers, and services.
+    #[command(alias = "ls")]
+    List {
+        #[arg(long)]
+        module: Option<String>,
+    },
+    /// Regenerate every generated io file from sb.dev.yml.
+    ///
+    /// Targets <module>, else the module in the current folder, else (or
+    /// with --all) every module of the active workspace. Unchanged files are
+    /// not rewritten. Exits 1 when an entry could not be rendered.
+    Update {
+        /// Module to update. Default: the current folder's module.
+        #[arg(conflicts_with = "all")]
+        module: Option<String>,
+        /// Also regenerate services (user-edited routers; off by default).
+        #[arg(long)]
+        services: bool,
+        /// Every module of the active workspace.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum IoAddCmd {
+    /// Add a publisher.
+    Pub(IoAddEntryCli),
+    /// Add a subscriber.
+    Sub(IoAddEntryCli),
+    /// Add a service (Rust and Python modules).
+    Service {
+        /// Service name: letters, digits, `_`.
+        name: String,
+        #[arg(long)]
+        module: Option<String>,
+    },
+}
+
+/// `--proto` / `--fb` / `--raw [<mime>]`, shared by `sb io add` and `sb io edit`.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct EncodingFlags {
+    /// Protobuf payload of the `-m` type (the default).
+    #[arg(long, group = "encoding")]
+    proto: bool,
+    /// FlatBuffers payload of the `-m` type; zenoh only. Needs the style's
+    /// fb backend compiled (`sb message compile <type> --fb`).
+    #[arg(long, group = "encoding")]
+    fb: bool,
+    /// Opaque bytes with no message type; zenoh only. The optional MIME
+    /// type (e.g. text/json) tags every sample. Put it after the topic.
+    #[arg(
+        long,
+        group = "encoding",
+        value_name = "MIME",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    raw: Option<String>,
+}
+
+impl EncodingFlags {
+    /// The encoding the flags pick, if any, and the raw mime.
+    fn pick(&self) -> (Option<Encoding>, Option<&str>) {
+        if self.proto {
+            (Some(Encoding::Proto), None)
+        } else if self.fb {
+            (Some(Encoding::Fb), None)
+        } else {
+            match self.raw.as_deref() {
+                Some("") => (Some(Encoding::Raw), None),
+                Some(mime) => (Some(Encoding::Raw), Some(mime)),
+                None => (None, None),
+            }
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct IoAddEntryCli {
+    /// Bare topic (hello), prefixed <device>/<ws>/<module>/<transport>/ at
+    /// codegen; may not contain '/'. Use --key for a verbatim wire key.
+    #[arg(required_unless_present = "key", conflicts_with = "key")]
+    topic: Option<String>,
+    /// Verbatim wire key (dev01/ws/mod/zenoh/hello), used as is.
+    #[arg(long, value_name = "WIRE_KEY")]
+    key: Option<String>,
+    /// Message type from the vault, e.g. `ros2/std/StringStamped`. Required
+    /// unless --raw.
+    #[arg(short = 'm', long = "msg")]
+    msg: Option<String>,
+    /// Entry name. Default: the topic's last segment.
+    #[arg(short = 'n', long)]
+    name: Option<String>,
+    /// Zenoh transport.
+    #[arg(long, group = "transport")]
+    zenoh: bool,
+    /// iceoryx2 transport (typed payloads only).
+    #[arg(long = "iox2", group = "transport")]
+    iox2: bool,
+    #[command(flatten)]
+    encoding: EncodingFlags,
+    /// Replace any entry that collides on name or topic.
+    #[arg(long, group = "conflict")]
+    force: bool,
+    /// Do nothing when an entry already collides on name or topic.
+    #[arg(long, group = "conflict")]
+    skip_existing: bool,
+    #[arg(long)]
+    module: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct IoEditCli {
+    /// Entry name (see `sb io list`).
+    name: String,
+    /// New message type from the vault.
+    #[arg(short = 'm', long = "msg")]
+    msg: Option<String>,
+    /// New bare topic (no '/').
+    #[arg(short = 't', long, conflicts_with = "key")]
+    topic: Option<String>,
+    /// New verbatim wire key.
+    #[arg(long, value_name = "WIRE_KEY")]
+    key: Option<String>,
+    #[command(flatten)]
+    encoding: EncodingFlags,
+    #[arg(long)]
+    module: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -887,11 +1137,30 @@ fn real_main() -> Result<ExitCode> {
         },
         Cmd::Ws(w) => match w {
             WsCmd::Create { name } => cmd_ws_create(&name),
+            WsCmd::Install(a) => cmd_ws_install(&a),
+            WsCmd::Check { name } => cmd_ws_check(name.as_deref()),
+            WsCmd::Update { name, force } => cmd_ws_update(&name, force),
+            WsCmd::Uninstall { name, clean } => cmd_ws_uninstall(&name, clean),
             WsCmd::Set { name } => cmd_ws_set(&name),
             WsCmd::List => cmd_ws_list(),
             WsCmd::Delete { name } => cmd_ws_delete(&name),
         },
         Cmd::Init(a) => cmd_init(a),
+        Cmd::Io(io) => match io {
+            IoCmd::Add(IoAddCmd::Pub(a)) => cmd_io_add_entry(&a, IoRole::Pub),
+            IoCmd::Add(IoAddCmd::Sub(a)) => cmd_io_add_entry(&a, IoRole::Sub),
+            IoCmd::Add(IoAddCmd::Service { name, module }) => {
+                cmd_io_add_service(&name, module.as_deref())
+            }
+            IoCmd::Edit(a) => cmd_io_edit(&a),
+            IoCmd::Rm { name, module } => cmd_io_rm(&name, module.as_deref()),
+            IoCmd::List { module } => cmd_list(module.as_deref(), Scope::All),
+            IoCmd::Update {
+                module,
+                services,
+                all,
+            } => cmd_io_update(module.as_deref(), services, all),
+        },
         Cmd::List(a) => cmd_list(a.module.as_deref(), Scope::All),
         Cmd::Pub(p) => match p {
             PubCmd::List { module } => cmd_list(module.as_deref(), Scope::PubsOnly),
@@ -920,10 +1189,10 @@ fn real_main() -> Result<ExitCode> {
         Cmd::Down => cmd_down(),
         Cmd::Attach => cmd_attach(),
         Cmd::Gopro(a) => cmd_gopro(a),
-        Cmd::Install(a) => cmd_install(&a),
+        Cmd::Install(a) => cmd_install(&a, None),
         Cmd::App(a) => match a {
             AppCmd::Init(a) => cmd_app_init(a),
-            AppCmd::Install(a) => cmd_install(&a),
+            AppCmd::Install(a) => install_app(&sb_home()?, &a.source, a.prefetch),
             AppCmd::List => cmd_app_list(),
             AppCmd::Info { name } => cmd_app_info(&name),
             AppCmd::Update { name } => cmd_app_update(name.as_deref()),
@@ -1064,19 +1333,42 @@ fn cmd_list(module: Option<&str>, scope: Scope) -> Result<()> {
     Ok(())
 }
 
+/// The `<topic>` positional / `--key` pair of `sb pub|sub add|edit` as a
+/// [`TopicRef`]. A bare topic may not contain `/`; the error points at
+/// `--key` with the leading `/` already dropped.
+fn topic_ref_from_cli(topic: Option<&str>, key: Option<&str>) -> Result<TopicRef> {
+    match (topic, key) {
+        (Some(_), Some(_)) => anyhow::bail!("pass either a bare topic or --key, not both"),
+        (None, None) => anyhow::bail!("a bare topic or --key <WIRE_KEY> is required"),
+        (None, Some(key)) => TopicRef::key(key).map_err(|_| anyhow::anyhow!("--key is empty")),
+        (Some(topic), None) => TopicRef::owned(topic).map_err(|e| match e {
+            TopicRefError::OwnedContainsSlash { .. } => anyhow::anyhow!(
+                "topic {topic:?} may not contain '/'; for a verbatim wire key use --key {}",
+                topic.trim_start_matches('/')
+            ),
+            _ => anyhow::anyhow!("topic is empty"),
+        }),
+    }
+}
+
 fn cmd_pub_add(a: PubAddCli) -> Result<()> {
+    let topic = topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?;
     let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
     let name = a
         .name
         .clone()
-        .unwrap_or_else(|| sb_pubsub::default_name_from_topic(&a.topic));
-    let colliders = find_pub_colliders(&handle.config, &name, &a.topic);
+        .unwrap_or_else(|| sb_pubsub::default_name(&topic));
+    let transport =
+        transport_from_flags(a.zenoh, a.iox2).unwrap_or_else(|| sb_pubsub::default_transport(&cfg));
+    let colliders = find_pub_colliders(&handle.config, &name, &topic, transport);
     let policy = resolve_conflict_policy(a.force, a.skip_existing, &colliders, "publisher")?;
     let args = PubAddArgs {
-        topic: &a.topic,
-        msg_type: &a.msg,
+        topic: &topic,
+        msg_type: Some(&a.msg),
         name: a.name.as_deref(),
-        transport: transport_from_flags(a.zenoh, a.iox2),
+        transport: Some(transport),
+        encoding: Encoding::Proto,
+        mime: None,
         policy,
     };
     let outcome = sb_pubsub::pub_add(&mut handle, &args, &cfg, &vault, &ws, &device)?;
@@ -1085,11 +1377,21 @@ fn cmd_pub_add(a: PubAddCli) -> Result<()> {
 }
 
 fn cmd_pub_edit(a: PubEditCli) -> Result<()> {
+    if a.msg.is_none() && a.topic.is_none() && a.key.is_none() {
+        anyhow::bail!("at least one of -m/--msg, -t/--topic, or --key is required");
+    }
+    let topic = if a.topic.is_some() || a.key.is_some() {
+        Some(topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?)
+    } else {
+        None
+    };
     let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
     let args = PubEditArgs {
         name: &a.name,
         msg_type: a.msg.as_deref(),
-        topic: a.topic.as_deref(),
+        topic: topic.as_ref(),
+        encoding: None,
+        mime: None,
     };
     let outcome = sb_pubsub::pub_edit(&mut handle, &args, &cfg, &vault, &ws, &device)?;
     print_outcome(&handle, &outcome);
@@ -1104,14 +1406,20 @@ fn cmd_pub_rm(name: &str, module: Option<&str>) -> Result<()> {
 }
 
 fn cmd_sub_add(a: SubAddCli) -> Result<()> {
+    let topic = topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?;
     let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
-    let name = sb_pubsub::default_name_from_topic(&a.topic);
-    let colliders = find_sub_colliders(&handle.config, &name, &a.topic);
+    let name = sb_pubsub::default_name(&topic);
+    let transport =
+        transport_from_flags(a.zenoh, a.iox2).unwrap_or_else(|| sb_pubsub::default_transport(&cfg));
+    let colliders = find_sub_colliders(&handle.config, &name, &topic, transport);
     let policy = resolve_conflict_policy(a.force, a.skip_existing, &colliders, "subscriber")?;
     let args = SubAddArgs {
-        topic: &a.topic,
-        msg_type: &a.msg,
-        transport: transport_from_flags(a.zenoh, a.iox2),
+        topic: &topic,
+        msg_type: Some(&a.msg),
+        name: None,
+        transport: Some(transport),
+        encoding: Encoding::Proto,
+        mime: None,
         policy,
     };
     let outcome = sb_pubsub::sub_add(&mut handle, &args, &cfg, &vault, &ws, &device)?;
@@ -1161,7 +1469,7 @@ fn cmd_service_init(module: Option<&str>) -> Result<()> {
     println!("{verb} service router on module {}", handle.config.module);
     println!("  {file_verb} {}", abs.display());
     println!(
-        "  serves on /{device}/{ws}/{}/zenoh/{}/**",
+        "  serves on {device}/{ws}/{}/zenoh/{}/**",
         handle.config.module,
         sb_codegen::SERVICE_SEGMENT,
     );
@@ -1176,6 +1484,9 @@ fn print_outcome(handle: &ModuleHandle, outcome: &sb_pubsub::MutationOutcome) {
         Action::SubAdd => "added subscriber",
         Action::SubEdit => "regenerated subscriber",
         Action::SubRm => "removed subscriber",
+        Action::ServiceAdd => "added service",
+        Action::ServiceRm => "removed service",
+        Action::Regenerate => "regenerated",
     };
     if outcome.skipped {
         println!(
@@ -1183,6 +1494,7 @@ fn print_outcome(handle: &ModuleHandle, outcome: &sb_pubsub::MutationOutcome) {
             match outcome.action {
                 Action::PubAdd => "publisher",
                 Action::SubAdd => "subscriber",
+                Action::ServiceAdd => "service",
                 _ => "entry",
             },
             handle.config.module
@@ -1201,6 +1513,14 @@ fn print_outcome(handle: &ModuleHandle, outcome: &sb_pubsub::MutationOutcome) {
     }
     if outcome.dev_yml_written {
         println!("  updated {}", handle.dev_yml_path.display());
+    }
+    if outcome.legacy_rewritten > 0 {
+        let n = outcome.legacy_rewritten;
+        println!(
+            "  rewrote {n} legacy topic {} as key: in {}",
+            if n == 1 { "entry" } else { "entries" },
+            handle.dev_yml_path.display()
+        );
     }
 }
 
@@ -1253,6 +1573,342 @@ fn resolve_conflict_policy(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// io: `sb io add | edit | rm | list | update`
+// ─────────────────────────────────────────────────────────────────────
+
+/// Which list `sb io add pub|sub` adds to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoRole {
+    Pub,
+    Sub,
+}
+
+fn cmd_io_add_entry(a: &IoAddEntryCli, role: IoRole) -> Result<()> {
+    let topic = topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?;
+    let (encoding, mime) = a.encoding.pick();
+    let encoding = encoding.unwrap_or(Encoding::Proto);
+    if encoding == Encoding::Raw && a.iox2 {
+        anyhow::bail!("iceoryx2 payloads are typed; use a message with a bytes field and --iox2");
+    }
+    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
+    // fb and raw ride zenoh only, so they need no transport flag.
+    let transport = match transport_from_flags(a.zenoh, a.iox2) {
+        Some(t) => t,
+        None if encoding != Encoding::Proto => Transport::Zenoh,
+        None => sb_pubsub::default_transport(&cfg),
+    };
+    if encoding == Encoding::Fb {
+        if let Some(m) = a.msg.as_deref() {
+            require_fb_compiled(&vault, m)?;
+        }
+    }
+    let name = a
+        .name
+        .clone()
+        .unwrap_or_else(|| sb_pubsub::default_name(&topic));
+    let outcome = match role {
+        IoRole::Pub => {
+            let colliders = find_pub_colliders(&handle.config, &name, &topic, transport);
+            let policy =
+                resolve_conflict_policy(a.force, a.skip_existing, &colliders, "publisher")?;
+            let args = PubAddArgs {
+                topic: &topic,
+                msg_type: a.msg.as_deref(),
+                name: a.name.as_deref(),
+                transport: Some(transport),
+                encoding,
+                mime,
+                policy,
+            };
+            sb_pubsub::pub_add(&mut handle, &args, &cfg, &vault, &ws, &device)?
+        }
+        IoRole::Sub => {
+            let colliders = find_sub_colliders(&handle.config, &name, &topic, transport);
+            let policy =
+                resolve_conflict_policy(a.force, a.skip_existing, &colliders, "subscriber")?;
+            let args = SubAddArgs {
+                topic: &topic,
+                msg_type: a.msg.as_deref(),
+                name: a.name.as_deref(),
+                transport: Some(transport),
+                encoding,
+                mime,
+                policy,
+            };
+            sb_pubsub::sub_add(&mut handle, &args, &cfg, &vault, &ws, &device)?
+        }
+    };
+    print_outcome(&handle, &outcome);
+    Ok(())
+}
+
+/// A FlatBuffers entry's generated code imports the style's fb bindings,
+/// so they must exist before the entry is written.
+fn require_fb_compiled(vault: &Vault, msg_type: &str) -> Result<()> {
+    // A malformed name is reported by sb-pubsub with its own wording.
+    let Ok(name) = MessageName::parse(msg_type) else {
+        return Ok(());
+    };
+    let dir = vault
+        .targets_dir(&name.style)
+        .join("fb")
+        .join(&name.namespace)
+        .join(&name.leaf);
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "flatbuffers backend not compiled for style {}; run sb message compile {msg_type} --fb",
+            name.style
+        );
+    }
+    Ok(())
+}
+
+fn cmd_io_add_service(name: &str, module: Option<&str>) -> Result<()> {
+    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(module)?;
+    let ctx = sb_pubsub::GenCtx {
+        cfg: &cfg,
+        vault: &vault,
+        workspace: &ws,
+        device: &device,
+    };
+    let outcome = sb_pubsub::service_add(&mut handle, name, &ctx)?;
+    print_outcome(&handle, &outcome);
+    Ok(())
+}
+
+fn cmd_io_edit(a: &IoEditCli) -> Result<()> {
+    let topic = if a.topic.is_some() || a.key.is_some() {
+        Some(topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?)
+    } else {
+        None
+    };
+    let (encoding, mime) = a.encoding.pick();
+    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
+    let ctx = sb_pubsub::GenCtx {
+        cfg: &cfg,
+        vault: &vault,
+        workspace: &ws,
+        device: &device,
+    };
+    let kind = sb_pubsub::find_entry(&handle.config, &a.name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no publisher, subscriber, or service named {:?} on module {:?}",
+            a.name,
+            handle.config.module
+        )
+    })?;
+    let (current_encoding, current_type) = match kind {
+        EntryKind::Publisher(i) => {
+            let p = &handle.config.publishers[i];
+            (p.encoding, p.msg_type.clone())
+        }
+        EntryKind::Subscriber(i) => {
+            let s = &handle.config.subscribers[i];
+            (s.encoding, s.msg_type.clone())
+        }
+        EntryKind::Service(_) => anyhow::bail!(
+            "services have no editable fields; edit the file in {}",
+            handle.io_dir().join("services").display()
+        ),
+    };
+    let unchanged = a.msg.is_none() && topic.is_none() && encoding.is_none();
+    if !unchanged && encoding.unwrap_or(current_encoding) == Encoding::Fb {
+        if let Some(t) = a.msg.as_deref().or(current_type.as_deref()) {
+            require_fb_compiled(&vault, t)?;
+        }
+    }
+    // `--raw [<mime>]` sets the mime (or clears it); other flags leave it to
+    // sb-pubsub, which drops it when the entry stops being raw.
+    let mime_change = (encoding == Some(Encoding::Raw)).then_some(mime);
+    let outcome = match kind {
+        _ if unchanged => sb_pubsub::regenerate_entry(&mut handle, &a.name, &ctx)?,
+        EntryKind::Publisher(_) => {
+            let args = PubEditArgs {
+                name: &a.name,
+                msg_type: a.msg.as_deref(),
+                topic: topic.as_ref(),
+                encoding,
+                mime: mime_change,
+            };
+            sb_pubsub::pub_edit(&mut handle, &args, &cfg, &vault, &ws, &device)?
+        }
+        EntryKind::Subscriber(i) => {
+            let change = SubChange {
+                msg_type: a.msg.as_deref(),
+                topic: topic.as_ref(),
+                encoding,
+                mime: mime_change,
+            };
+            edit_subscriber(&mut handle, i, &change, &ctx)?
+        }
+        EntryKind::Service(_) => unreachable!("services were refused above"),
+    };
+    print_outcome(&handle, &outcome);
+    Ok(())
+}
+
+/// Requested changes to one subscriber; `None` keeps a field.
+struct SubChange<'a> {
+    msg_type: Option<&'a str>,
+    topic: Option<&'a TopicRef>,
+    encoding: Option<Encoding>,
+    /// As in [`PubEditArgs::mime`]: `Some(None)` clears, `Some(Some(m))` sets.
+    mime: Option<Option<&'a str>>,
+}
+
+/// Change subscriber `idx` and regenerate its file. sb-pubsub has no
+/// field-level subscriber edit, so the change is applied to a copy of the
+/// module and rendered there (which checks the type against the vault);
+/// `sb.dev.yml` and the module are updated only once that succeeds. The
+/// encoding rules match `sb io edit` on a publisher.
+fn edit_subscriber(
+    handle: &mut ModuleHandle,
+    idx: usize,
+    change: &SubChange<'_>,
+    ctx: &sb_pubsub::GenCtx<'_>,
+) -> Result<sb_pubsub::MutationOutcome> {
+    let mut spec = handle.config.subscribers[idx].clone();
+    if let Some(e) = change.encoding {
+        spec.encoding = e;
+    }
+    if let Some(m) = change.msg_type {
+        spec.msg_type = Some(m.to_owned());
+    } else if spec.encoding == Encoding::Raw {
+        spec.msg_type = None;
+    }
+    match change.mime {
+        Some(m) => spec.mime = m.map(str::to_owned),
+        None if spec.encoding != Encoding::Raw => spec.mime = None,
+        None => {}
+    }
+    if let Some(t) = change.topic {
+        let clash = find_sub_colliders(&handle.config, &spec.name, t, spec.transport)
+            .into_iter()
+            .find(|c| !(c.role == "sub" && c.name == spec.name));
+        if let Some(c) = clash {
+            anyhow::bail!(
+                "topic {:?} already used by {} {:?}",
+                t.as_str(),
+                c.role,
+                c.name
+            );
+        }
+        spec.topic = t.clone();
+    }
+    spec.validate(idx, "subscribers")
+        .map_err(anyhow::Error::msg)?;
+    let name = spec.name.clone();
+    let mut next = handle.clone();
+    next.config.subscribers[idx] = spec;
+    let mut outcome = sb_pubsub::regenerate_entry(&mut next, &name, ctx)?;
+    if !outcome.dev_yml_written {
+        let body = serde_yaml::to_string(&next.config).context("serializing sb.dev.yml")?;
+        std::fs::write(&next.dev_yml_path, body)
+            .with_context(|| format!("writing {}", next.dev_yml_path.display()))?;
+        outcome.dev_yml_written = true;
+    }
+    outcome.action = Action::SubEdit;
+    *handle = next;
+    Ok(outcome)
+}
+
+fn cmd_io_rm(name: &str, module: Option<&str>) -> Result<()> {
+    let (_, _, _, mut handle, _, _) = resolve_for_pubsub(module)?;
+    let outcome = match sb_pubsub::find_entry(&handle.config, name) {
+        Some(EntryKind::Publisher(_)) => sb_pubsub::pub_rm(&mut handle, name)?,
+        Some(EntryKind::Subscriber(_)) => sb_pubsub::sub_rm_by_name(&mut handle, name)?,
+        Some(EntryKind::Service(_)) => sb_pubsub::service_rm(&mut handle, name)?,
+        None => anyhow::bail!(
+            "no publisher, subscriber, or service named {name:?} on module {:?}",
+            handle.config.module
+        ),
+    };
+    print_outcome(&handle, &outcome);
+    Ok(())
+}
+
+/// `sb io update [<module>] [--services] [--all]`: regenerate every io
+/// file of one module, or of every module in the active workspace.
+fn cmd_io_update(module: Option<&str>, services: bool, all: bool) -> Result<()> {
+    let cfg = load_config()?;
+    let home = SbHome::from_config(&cfg)?;
+    let cwd = std::env::current_dir().context("getting cwd")?;
+    let ws = active_workspace(&home)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no active workspace; run `sb ws create <name>` or `sb ws set <name>` first"
+        )
+    })?;
+    let vctx = vault_for(&cfg)?;
+    vctx.ensure_installed()?;
+    let device = device_of(&cfg);
+    let ctx = sb_pubsub::GenCtx {
+        cfg: &cfg,
+        vault: vctx.vault(),
+        workspace: &ws,
+        device: &device,
+    };
+
+    let whole = all || (module.is_none() && !cwd.join("sb.dev.yml").is_file());
+    let targets: Vec<(String, Result<ModuleHandle>)> = if whole {
+        let paths = sb_workspace::read_flow(&home, &ws)?.module_paths();
+        if paths.is_empty() {
+            anyhow::bail!("workspace {ws:?} has no modules; run `sb init <dir>` first");
+        }
+        paths
+            .into_iter()
+            .map(|(name, path)| {
+                let handle = load_module_handle(&path);
+                (name, handle)
+            })
+            .collect()
+    } else {
+        let label = module.unwrap_or(".").to_owned();
+        vec![(label, resolve_module(module, &cwd, &home))]
+    };
+
+    let mut problems = 0usize;
+    for (label, handle) in targets {
+        let report = handle.and_then(|mut h| sb_pubsub::update_all(&mut h, &ctx, services));
+        match report {
+            Ok(r) => {
+                let mut line = format!(
+                    "{}: {} written, {} unchanged, {} skipped",
+                    r.module,
+                    r.written.len(),
+                    r.unchanged.len(),
+                    r.skipped.len()
+                );
+                if !r.skipped.is_empty() {
+                    let why: Vec<String> = r
+                        .skipped
+                        .iter()
+                        .map(|(name, reason)| format!("{name}: {reason}"))
+                        .collect();
+                    line.push_str(&format!(" ({})", why.join("; ")));
+                    problems += r.skipped.len();
+                }
+                if r.legacy_rewritten > 0 {
+                    line.push_str(&format!(
+                        "; rewrote {} legacy topic entr{} as key:",
+                        r.legacy_rewritten,
+                        if r.legacy_rewritten == 1 { "y" } else { "ies" }
+                    ));
+                }
+                println!("{line}");
+            }
+            Err(e) => {
+                problems += 1;
+                eprintln!("error: {label}: {e:#}");
+            }
+        }
+    }
+    if problems > 0 {
+        anyhow::bail!("{problems} entr(y/ies) or module(s) could not be updated");
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // workspaces + init (L2)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1261,14 +1917,134 @@ fn sb_home() -> Result<SbHome> {
     SbHome::from_config(&cfg)
 }
 
+/// `sb ws create <name>`: write `./flow.yaml` naming the workspace, then
+/// install it like any other workspace package.
 fn cmd_ws_create(name: &str) -> Result<()> {
-    let home = sb_home()?;
-    sb_workspace::create_workspace(&home, name)?;
-    println!(
-        "created workspace {name} at {}",
-        home.workspace_dir(name).display()
-    );
+    sb_core::validate_identifier(name)
+        .map_err(|e| anyhow::anyhow!("invalid workspace name {name:?}: {e}"))?;
+    let cfg = load_config()?;
+    let home = SbHome::from_config(&cfg)?;
+    let cwd = std::env::current_dir().context("getting cwd")?;
+    let flow = cwd.join(sb_workspace::FLOW_FILE);
+    if flow.exists() {
+        anyhow::bail!(
+            "{} already exists; install it with `sb install .`, or create the workspace in \
+             another folder",
+            flow.display()
+        );
+    }
+    let dir = home.workspace_dir(name);
+    if dir.exists() {
+        anyhow::bail!(
+            "workspace {name:?} already exists at {}; pick another name, or remove it with \
+             `sb ws uninstall {name}`",
+            dir.display()
+        );
+    }
+    std::fs::write(&flow, format!("name: {name}\nmodules: {{}}\n"))
+        .with_context(|| format!("writing {}", flow.display()))?;
+    println!("wrote {}", flow.display());
+    let report = match sb_workspace::install_flow(&home, &flow, None) {
+        Ok(r) => r,
+        Err(e) => {
+            // Leave no half-made workspace behind.
+            let _ = std::fs::remove_file(&flow);
+            return Err(e);
+        }
+    };
+    finish_workspace_install(&cfg, &home, &report, false)
+}
+
+fn cmd_ws_install(a: &WsInstallArgs) -> Result<()> {
+    let args = InstallArgs {
+        source: a.source.clone().unwrap_or_else(|| ".".to_owned()),
+        prefetch: false,
+        dir: a.dir.clone(),
+        force: a.force,
+    };
+    cmd_install(&args, Some(PackageKind::Workspace))
+}
+
+/// `sb ws check [<name>]`: the workspace rows `sb doctor` prints, for one
+/// workspace. Fails when any row is `[FAIL]`.
+fn cmd_ws_check(name: Option<&str>) -> Result<()> {
+    let cfg = load_config()?;
+    let home = SbHome::from_config(&cfg)?;
+    let name = match name {
+        Some(n) => n.to_owned(),
+        None => active_workspace(&home)?.ok_or_else(|| {
+            anyhow::anyhow!("no active workspace; pass a name or run `sb ws set <name>`")
+        })?,
+    };
+    if !home.workspace_dir(&name).exists() {
+        anyhow::bail!("workspace {name:?} does not exist");
+    }
+    let report = sb_doctor::Report {
+        checks: workspace_checks(&cfg, &home, &name),
+    };
+    print!("{}", report.render(stdout_color()));
+    let failed = report.checks.iter().filter(|c| c.status.is_fail()).count();
+    if failed > 0 {
+        anyhow::bail!("{failed} check(s) failed");
+    }
     Ok(())
+}
+
+fn cmd_ws_update(name: &str, force: bool) -> Result<()> {
+    let cfg = load_config()?;
+    let home = SbHome::from_config(&cfg)?;
+    let report = sb_workspace::update_from_source(&home, name)?;
+    finish_workspace_install(&cfg, &home, &report, force)
+}
+
+fn cmd_ws_uninstall(name: &str, clean: bool) -> Result<()> {
+    let home = sb_home()?;
+    // Read the provenance first: the installed copy goes with the workspace.
+    let clone = sb_workspace::installed_source(&home, name)
+        .ok()
+        .flatten()
+        .and_then(|src| sb_made_clone(&home, &src));
+    let report = sb_workspace::uninstall_workspace(&home, name, clean)?;
+    println!(
+        "uninstalled workspace {name} (removed {})",
+        report.workspace_dir.display()
+    );
+    for p in &report.removed {
+        println!("  removed {}", p.display());
+    }
+    for (module, why) in &report.skipped {
+        println!("  left {module}: {why}");
+    }
+    if let Some(clone) = clone {
+        if clean {
+            std::fs::remove_dir_all(&clone)
+                .with_context(|| format!("removing {}", clone.display()))?;
+            println!("  removed clone {}", clone.display());
+        } else {
+            println!(
+                "  left clone {} (pass --clean to delete it)",
+                clone.display()
+            );
+        }
+    }
+    if report.cleared_active {
+        eprintln!(
+            "warning: {name} was the active workspace; cleared `{}`",
+            home.active_marker().display()
+        );
+    }
+    Ok(())
+}
+
+/// The repository folder of an installed workspace when sb cloned it into
+/// `<sb_home>/repos/`; `None` for a local folder or a `--dir` clone, which
+/// belong to the user.
+fn sb_made_clone(home: &SbHome, src: &sb_core::FlowSource) -> Option<PathBuf> {
+    src.url.as_ref()?;
+    let repo = src.repo_flow.parent()?;
+    let repos = home.root().join(REPOS_DIR);
+    let repos = repos.canonicalize().unwrap_or(repos);
+    (repo.starts_with(&repos) && repo != repos).then(|| repo.to_path_buf())
 }
 
 fn cmd_ws_set(name: &str) -> Result<()> {
@@ -1282,12 +2058,35 @@ fn cmd_ws_list() -> Result<()> {
     let home = sb_home()?;
     let entries = sb_workspace::list_workspaces(&home)?;
     if entries.is_empty() {
-        println!("(no workspaces — run `sb ws create <name>`)");
+        println!("(no workspaces; run `sb ws create <name>` or `sb install <repo>`)");
         return Ok(());
     }
+    let width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    let mut any_stale = false;
     for e in entries {
         let marker = if e.active { "*" } else { " " };
-        println!("{marker} {}", e.name);
+        let source = match sb_workspace::installed_source(&home, &e.name) {
+            Ok(Some(src)) => src.url.clone().unwrap_or_else(|| {
+                src.repo_flow
+                    .parent()
+                    .unwrap_or(&src.repo_flow)
+                    .display()
+                    .to_string()
+            }),
+            Ok(None) => String::new(),
+            Err(_) => "(flow.yaml unreadable)".to_owned(),
+        };
+        let stale = matches!(sb_workspace::is_stale(&home, &e.name), Ok(Some(_)));
+        any_stale |= stale;
+        let line = format!(
+            "{marker} {:<width$}  {source}{}",
+            e.name,
+            if stale { "  [stale]" } else { "" }
+        );
+        println!("{}", line.trim_end());
+    }
+    if any_stale {
+        println!("[stale]: the repo flow.yaml changed after install; run `sb install <source>`");
     }
     Ok(())
 }
@@ -1332,10 +2131,14 @@ fn cmd_init(a: InitArgs) -> Result<()> {
     if outcome.io_dir_created {
         println!("  created IO directory");
     }
-    if outcome.flow_appended {
-        println!("  registered in flow.yaml");
-    } else {
-        println!("  (already registered in flow.yaml)");
+    match (&outcome.repo_flow, outcome.flow_appended) {
+        (Some(repo), true) => println!("  registered in {}", repo.display()),
+        (Some(repo), false) => println!("  (already registered in {})", repo.display()),
+        (None, true) => println!("  registered in flow.yaml"),
+        (None, false) => println!("  (already registered in flow.yaml)"),
+    }
+    if outcome.repo_flow.is_some() {
+        println!("  installed workspace {} (active)", outcome.workspace);
     }
     Ok(())
 }
@@ -1371,18 +2174,607 @@ fn cmd_external(argv: &[String]) -> Result<ExitCode> {
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
 
-fn cmd_install(a: &InstallArgs) -> Result<()> {
-    let home = sb_home()?;
-    if matches!(
-        sb_apps::classify(&a.source),
-        Ok(sb_apps::Source::Git { .. })
-    ) {
-        eprintln!("fetching {} ...", a.source);
+/// Default home of workspace repositories `sb install <url>` clones:
+/// `<sb_home>/repos/<name>/`.
+const REPOS_DIR: &str = "repos";
+
+/// What a package root holds, by its manifest file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageKind {
+    /// `sb.app.yml`
+    App,
+    /// `flow.yaml`
+    Workspace,
+}
+
+/// The kind of the package at `root`; `shown` names it in errors (the
+/// folder, or the URL it was cloned from).
+fn package_kind(root: &Path, shown: &str) -> Result<PackageKind> {
+    let app = root.join(sb_apps::MANIFEST_FILE).is_file();
+    let flow = root.join(sb_workspace::FLOW_FILE).is_file();
+    match (app, flow) {
+        (true, true) => anyhow::bail!(
+            "{shown} has both sb.app.yml and flow.yaml; a package is one or the other"
+        ),
+        (true, false) => Ok(PackageKind::App),
+        (false, true) => Ok(PackageKind::Workspace),
+        (false, false) => anyhow::bail!(
+            "{shown} has neither sb.app.yml (an app package) nor flow.yaml (a workspace \
+             package) at its root"
+        ),
+    }
+}
+
+/// `sb install <source>`, and `sb ws install` with `only` set: install the
+/// app or workspace package `a.source` names.
+fn cmd_install(a: &InstallArgs, only: Option<PackageKind>) -> Result<()> {
+    let cfg = load_config()?;
+    let home = SbHome::from_config(&cfg)?;
+    let source = sb_apps::classify(&a.source).map_err(|e| {
+        let looks_git = a.source.contains("://") || a.source.starts_with("git@");
+        if !looks_git && !expand_tilde(&a.source).exists() {
+            anyhow::anyhow!(
+                "{}: no such folder; pass a package folder (one holding sb.app.yml or \
+                 flow.yaml) or a git URL",
+                a.source
+            )
+        } else {
+            e
+        }
+    })?;
+    match source {
+        sb_apps::Source::Path(dir) => {
+            if a.dir.is_some() {
+                anyhow::bail!(
+                    "--dir only applies to a git URL; {} is a local folder and is installed \
+                     where it is",
+                    dir.display()
+                );
+            }
+            match package_kind(&dir, &dir.display().to_string())? {
+                PackageKind::App => {
+                    refuse_app_for_ws(only, &a.source)?;
+                    install_app(&home, &a.source, a.prefetch)
+                }
+                PackageKind::Workspace => {
+                    let flow = dir.join(sb_workspace::FLOW_FILE);
+                    let report = sb_workspace::install_flow(&home, &flow, None)?;
+                    finish_workspace_install(&cfg, &home, &report, a.force)
+                }
+            }
+        }
+        sb_apps::Source::Git { url, git_ref } => {
+            install_from_git(&cfg, &home, a, &url, git_ref.as_deref(), only)
+        }
+    }
+}
+
+fn refuse_app_for_ws(only: Option<PackageKind>, source: &str) -> Result<()> {
+    if only == Some(PackageKind::Workspace) {
+        anyhow::bail!(
+            "{source} is an app package (sb.app.yml), not a workspace; install it with \
+             `sb install {source}`"
+        );
+    }
+    Ok(())
+}
+
+/// `~` and `~/...` against the home directory; anything else unchanged.
+fn expand_tilde(arg: &str) -> PathBuf {
+    match (arg.strip_prefix('~'), dirs::home_dir()) {
+        (Some(""), Some(home)) => home,
+        (Some(rest), Some(home)) if rest.starts_with(['/', '\\']) => home.join(&rest[1..]),
+        _ => PathBuf::from(arg),
+    }
+}
+
+fn install_from_git(
+    cfg: &SbCliConfig,
+    home: &SbHome,
+    a: &InstallArgs,
+    url: &str,
+    git_ref: Option<&str>,
+    only: Option<PackageKind>,
+) -> Result<()> {
+    let recorded = git_ref.map_or_else(|| url.to_owned(), |r| format!("{url}@{r}"));
+
+    // A URL that is already installed is updated in place, without cloning.
+    if only.is_none() && a.dir.is_none() && app_installed_from(home, url) {
+        return install_app(home, &a.source, a.prefetch);
+    }
+    if let Some((name, repo_dir)) = workspace_installed_from(home, &recorded) {
+        if let Some(d) = &a.dir {
+            let d = std::path::absolute(d).unwrap_or_else(|_| d.clone());
+            if d.canonicalize().unwrap_or(d) != repo_dir {
+                anyhow::bail!(
+                    "workspace {name:?} is already installed from {recorded} at {}; run \
+                     `sb ws uninstall {name}` before cloning it elsewhere",
+                    repo_dir.display()
+                );
+            }
+        }
+        eprintln!("updating {recorded} in {} ...", repo_dir.display());
+        let report = sb_workspace::update_from_source(home, &name)?;
+        return finish_workspace_install(cfg, home, &report, a.force);
+    }
+
+    eprintln!("fetching {recorded} ...");
+    let checkout = Checkout::fetch(home, url, git_ref, a.dir.as_deref())?;
+    let kind = match package_kind(checkout.path(), &recorded) {
+        Ok(k) => k,
+        Err(e) => {
+            checkout.discard();
+            return Err(e);
+        }
+    };
+    match kind {
+        PackageKind::App => {
+            checkout.discard();
+            refuse_app_for_ws(only, &a.source)?;
+            if a.dir.is_some() {
+                anyhow::bail!(
+                    "{recorded} is an app package (sb.app.yml); apps are cloned into \
+                     {}, so --dir does not apply",
+                    home.root().join(sb_apps::registry::APPS_DIR).display()
+                );
+            }
+            install_app(home, &a.source, a.prefetch)
+        }
+        PackageKind::Workspace => {
+            let root = checkout.into_workspace_root(home, url)?;
+            let flow = root.join(sb_workspace::FLOW_FILE);
+            let report = sb_workspace::install_flow(home, &flow, Some(&recorded))?;
+            finish_workspace_install(cfg, home, &report, a.force)
+        }
+    }
+}
+
+/// Whether an installed app was cloned from `url` (any ref).
+fn app_installed_from(home: &SbHome, url: &str) -> bool {
+    sb_apps::list(home.root())
+        .map(|apps| apps.iter().any(|a| a.record.url.as_deref() == Some(url)))
+        .unwrap_or(false)
+}
+
+/// The installed workspace whose `source.url` is `recorded`, with its
+/// repository folder, when that checkout still exists.
+fn workspace_installed_from(home: &SbHome, recorded: &str) -> Option<(String, PathBuf)> {
+    let entries = sb_workspace::list_workspaces(home).ok()?;
+    entries.into_iter().find_map(|e| {
+        let src = sb_workspace::installed_source(home, &e.name).ok()??;
+        if src.url.as_deref() != Some(recorded) || !src.repo_flow.is_file() {
+            return None;
+        }
+        Some((e.name, src.repo_flow.parent()?.to_path_buf()))
+    })
+}
+
+/// A checkout of a package repository, made before its kind is known.
+enum Checkout {
+    /// Cloned into a staging folder under `<sb_home>/repos/`; moved to
+    /// `<sb_home>/repos/<name>/` once the workspace name is read.
+    Staged {
+        staging: tempfile::TempDir,
+        path: PathBuf,
+    },
+    /// Cloned into `--dir`, which was missing (`created`) or empty.
+    Dir { path: PathBuf, created: bool },
+    /// `--dir` already held a clone of this URL; it was fast-forwarded.
+    Existing(PathBuf),
+}
+
+impl Checkout {
+    fn fetch(home: &SbHome, url: &str, git_ref: Option<&str>, dir: Option<&Path>) -> Result<Self> {
+        let Some(dir) = dir else {
+            let repos = home.root().join(REPOS_DIR);
+            std::fs::create_dir_all(&repos)
+                .with_context(|| format!("creating {}", repos.display()))?;
+            let staging = tempfile::Builder::new()
+                .prefix(".clone-")
+                .tempdir_in(&repos)
+                .with_context(|| format!("creating a staging folder in {}", repos.display()))?;
+            let path = staging.path().join("repo");
+            git_clone(url, git_ref, &path)?;
+            return Ok(Self::Staged { staging, path });
+        };
+        let path = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if path.exists() && !is_empty_dir(&path) {
+            if git_origin(&path).as_deref() == Some(url) {
+                git_pull_ff(&path)?;
+                return Ok(Self::Existing(path));
+            }
+            anyhow::bail!(
+                "{} already exists and is not empty; pass a new or empty --dir",
+                path.display()
+            );
+        }
+        let created = !path.exists();
+        if let Err(e) = git_clone(url, git_ref, &path) {
+            if created {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            return Err(e);
+        }
+        Ok(Self::Dir { path, created })
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Staged { path, .. } | Self::Dir { path, .. } | Self::Existing(path) => path,
+        }
+    }
+
+    /// Remove what [`Checkout::fetch`] cloned. An existing clone is kept.
+    fn discard(self) {
+        match self {
+            Self::Staged { .. } | Self::Existing(_) => {}
+            Self::Dir { path, created } => {
+                let _ = std::fs::remove_dir_all(&path);
+                if !created {
+                    let _ = std::fs::create_dir(&path);
+                }
+            }
+        }
+    }
+
+    /// Where the workspace repository lives from now on. A staged clone
+    /// moves to `<sb_home>/repos/<name>/`, `<name>` being the flow's
+    /// `name:` or else the repository folder name; an existing clone of
+    /// the same URL there is fast-forwarded and used instead.
+    fn into_workspace_root(self, home: &SbHome, url: &str) -> Result<PathBuf> {
+        let (staging, path) = match self {
+            Self::Dir { path, .. } | Self::Existing(path) => return Ok(path),
+            Self::Staged { staging, path } => (staging, path),
+        };
+        let name = staged_workspace_name(&path, url)?;
+        let dest = home.root().join(REPOS_DIR).join(&name);
+        if dest.exists() {
+            if git_origin(&dest).as_deref() == Some(url) {
+                git_pull_ff(&dest)?;
+                return Ok(dest);
+            }
+            anyhow::bail!(
+                "{} already exists and is not a clone of {url}; remove it, or pass --dir <path>",
+                dest.display()
+            );
+        }
+        std::fs::rename(&path, &dest)
+            .with_context(|| format!("moving {} to {}", path.display(), dest.display()))?;
+        drop(staging);
+        Ok(dest)
+    }
+}
+
+/// The name a freshly cloned workspace installs under: its flow's `name:`,
+/// else the repository folder name of `url`.
+fn staged_workspace_name(repo: &Path, url: &str) -> Result<String> {
+    let flow_path = repo.join(sb_workspace::FLOW_FILE);
+    let text = std::fs::read_to_string(&flow_path)
+        .with_context(|| format!("reading {} from {url}", sb_workspace::FLOW_FILE))?;
+    let flow: sb_core::WorkspaceFlow = if text.trim().is_empty() {
+        sb_core::WorkspaceFlow::default()
+    } else {
+        serde_yaml::from_str(&text)
+            .with_context(|| format!("parsing {} from {url}", sb_workspace::FLOW_FILE))?
+    };
+    let name = flow
+        .name
+        .unwrap_or_else(|| sb_apps::source::repo_dir_name(url));
+    sb_core::validate_identifier(&name).map_err(|e| {
+        anyhow::anyhow!(
+            "workspace name {name:?} (from {url}) is invalid: {e}; set `name:` in its flow.yaml"
+        )
+    })?;
+    Ok(name)
+}
+
+fn is_empty_dir(p: &Path) -> bool {
+    std::fs::read_dir(p).is_ok_and(|mut rd| rd.next().is_none())
+}
+
+fn git() -> Result<std::process::Command> {
+    let bin = which_git().ok_or_else(|| {
+        anyhow::anyhow!("`git` is not on PATH; install git to install from a URL")
+    })?;
+    Ok(std::process::Command::new(bin))
+}
+
+fn which_git() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "git.exe" } else { "git" };
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join(exe))
+            .find(|p| p.is_file())
+    })
+}
+
+/// `git clone --depth 1 [--branch <ref>] <url> <dest>`.
+fn git_clone(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<()> {
+    let mut cmd = git()?;
+    cmd.args(["clone", "--depth", "1"]);
+    if let Some(r) = git_ref {
+        cmd.args(["--branch", r]);
+    }
+    let out = cmd
+        .arg(url)
+        .arg(dest)
+        .output()
+        .context("running git clone")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git clone {url} failed ({}):\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim_end()
+        );
+    }
+    Ok(())
+}
+
+/// `origin`'s URL of the clone at `dir`, if it is one.
+fn git_origin(dir: &Path) -> Option<String> {
+    let out = git()
+        .ok()?
+        .arg("-C")
+        .arg(dir)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Fast-forward the clone at `dir`; a detached `HEAD` (a pinned tag) is
+/// left alone.
+fn git_pull_ff(dir: &Path) -> Result<()> {
+    let on_branch = git()?
+        .arg("-C")
+        .arg(dir)
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .context("running git symbolic-ref")?
+        .status
+        .success();
+    if !on_branch {
+        return Ok(());
+    }
+    let out = git()?
+        .arg("-C")
+        .arg(dir)
+        .args(["pull", "--ff-only"])
+        .output()
+        .context("running git pull")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git -C {} pull --ff-only failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The steps after a workspace's `flow.yaml` is installed, one line each:
+/// workspace, modules, each message source (import + compile into the
+/// configured vault), each module's io regeneration. Message conflicts
+/// fail the command after every step has run, unless `force`.
+fn finish_workspace_install(
+    cfg: &SbCliConfig,
+    home: &SbHome,
+    report: &sb_workspace::InstallReport,
+    force: bool,
+) -> Result<()> {
+    let verb = if report.created { "created" } else { "updated" };
+    println!("-- workspace {}: {verb}, active", report.name);
+
+    let held: Vec<&str> = report
+        .modules
+        .iter()
+        .filter(|m| !m.up)
+        .map(|m| m.name.as_str())
+        .collect();
+    let mut line = format!("-- modules: {} registered", report.modules.len());
+    if !held.is_empty() {
+        line.push_str(&format!(
+            ", {} with up: false ({})",
+            held.len(),
+            held.join(", ")
+        ));
+    }
+    println!("{line}");
+    for m in report.modules.iter().filter(|m| !m.exists) {
+        eprintln!(
+            "warning: module {}: no sb.dev.yml at {} yet; run `sb init` in its folder",
+            m.name,
+            m.dev_yml.display()
+        );
+    }
+
+    let repo_dir = sb_workspace::installed_source(home, &report.name)
+        .ok()
+        .flatten()
+        .and_then(|src| src.repo_flow.parent().map(Path::to_path_buf));
+    let vctx = configured_vault(cfg)?;
+    vctx.ensure_installed()?;
+    let conflicts = install_messages(cfg, &vctx, &report.messages, repo_dir.as_deref(), force)?;
+    install_io(cfg, &vctx, report);
+
+    if conflicts > 0 {
+        if force {
+            anyhow::bail!(
+                "{conflicts} message(s) are bundled ros2/std messages that differ from the \
+                 workspace's copies; those are never overwritten, so rename them in the workspace"
+            );
+        }
+        anyhow::bail!(
+            "{conflicts} message(s) differ from the vault copies and were not imported (their \
+             styles were not compiled); re-run with --force to overwrite the vault copies"
+        );
+    }
+    let next = if report.modules.is_empty() {
+        "sb init <module dir>"
+    } else {
+        "sb up"
+    };
+    println!("done. next: {next}");
+    Ok(())
+}
+
+/// The `--iox2` / `--proto` / `--fb` flags a `messages:` entry's
+/// `backends:` list stands for. Empty = no flags (the style's default).
+fn backend_flags_from(backends: &[String]) -> BackendFlags {
+    let has = |b: &str| backends.iter().any(|x| x == b);
+    BackendFlags {
+        iox2: has("iox2"),
+        proto: has("proto"),
+        fb: has("fb"),
+    }
+}
+
+/// Import each `messages:` source into the vault `vctx` holds and compile
+/// its style; one `-- messages:` line per source. A source with conflicts
+/// is not compiled. Returns the number of conflicting messages.
+fn install_messages(
+    cfg: &SbCliConfig,
+    vctx: &VaultCtx,
+    sources: &[sb_core::MessageSource],
+    repo_dir: Option<&Path>,
+    force: bool,
+) -> Result<usize> {
+    if sources.is_empty() {
+        println!("-- messages: none declared");
+        return Ok(0);
+    }
+    let vault = vctx.vault();
+    let mut conflicts = 0;
+    for src in sources {
+        let shown = repo_dir
+            .and_then(|d| src.path.strip_prefix(d).ok())
+            .map_or_else(
+                || src.path.display().to_string(),
+                |p| p.to_string_lossy().replace('\\', "/"),
+            );
+        let imp = vault
+            .import_style_dir(&src.style, &src.path, force)
+            .with_context(|| {
+                format!("importing {} into style {}", src.path.display(), src.style)
+            })?;
+        let counts = format!(
+            "-- messages: {} <- {shown}: {} imported, {} unchanged, {} conflicts",
+            src.style,
+            imp.imported.len(),
+            imp.unchanged.len(),
+            imp.conflicts.len()
+        );
+        if !imp.conflicts.is_empty() {
+            println!("{counts}; not compiled");
+            for c in &imp.conflicts {
+                let full = format!("{}/{c}", src.style);
+                let at = MessageName::parse(&full)
+                    .map(|n| vault.path_of(&n).display().to_string())
+                    .unwrap_or_default();
+                eprintln!("conflict: {full} differs from the vault copy at {at}");
+            }
+            conflicts += imp.conflicts.len();
+            continue;
+        }
+        let opts = CompileOpts {
+            flags: backend_flags_from(&src.backends),
+            ..CompileOpts::default()
+        };
+        let built = compile_style_in(cfg, vctx, &src.style, &opts, &mut |_| {})
+            .with_context(|| format!("compiling style {} for {shown}", src.style))?;
+        let mut names: Vec<&str> = Vec::new();
+        if src.backends.is_empty() {
+            names.extend(built.iter().map(|b| b.as_str()));
+        } else {
+            for b in &src.backends {
+                if !names.contains(&b.as_str()) {
+                    names.push(b);
+                }
+            }
+        }
+        println!("{counts}; compiled [{}]", names.join(", "));
+    }
+    Ok(conflicts)
+}
+
+/// Regenerate each installed module's io files (services excluded), one
+/// `-- io:` line per module. Entries that do not render are warnings: the
+/// workspace itself is installed, and `sb ws check` reports them too.
+fn install_io(cfg: &SbCliConfig, vctx: &VaultCtx, report: &sb_workspace::InstallReport) {
+    if report.modules.is_empty() {
+        println!("-- io: no modules");
+        return;
+    }
+    let device = device_of(cfg);
+    let ctx = sb_pubsub::GenCtx {
+        cfg,
+        vault: vctx.vault(),
+        workspace: &report.name,
+        device: &device,
+    };
+    for m in &report.modules {
+        if !m.exists {
+            println!("-- io: {} skipped (no sb.dev.yml)", m.name);
+            continue;
+        }
+        let updated = load_module_handle(&m.dev_yml)
+            .and_then(|mut handle| sb_pubsub::update_all(&mut handle, &ctx, false));
+        match updated {
+            Ok(r) => {
+                let skipped = if r.skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} skipped", r.skipped.len())
+                };
+                println!(
+                    "-- io: {} {} written, {} unchanged{skipped}",
+                    m.name,
+                    r.written.len(),
+                    r.unchanged.len()
+                );
+                for (entry, why) in &r.skipped {
+                    eprintln!("warning: {} {entry}: {why}", m.name);
+                }
+            }
+            Err(e) => {
+                println!("-- io: {} failed", m.name);
+                eprintln!("warning: {}: {e:#}", m.name);
+            }
+        }
+    }
+}
+
+/// `sb.config.yml`'s `device`, defaulting to `dev01`.
+fn device_of(cfg: &SbCliConfig) -> String {
+    cfg.device.clone().unwrap_or_else(|| "dev01".to_string())
+}
+
+/// Load the module whose `sb.dev.yml` is `dev_yml` (what `sb_pubsub`'s
+/// resolver does for one path).
+fn load_module_handle(dev_yml: &Path) -> Result<ModuleHandle> {
+    let text = std::fs::read_to_string(dev_yml)
+        .with_context(|| format!("reading {}", dev_yml.display()))?;
+    let config: sb_core::ModuleDevConfig =
+        serde_yaml::from_str(&text).with_context(|| format!("parsing {}", dev_yml.display()))?;
+    Ok(ModuleHandle {
+        dev_yml_path: dev_yml.to_path_buf(),
+        module_root: config.module_root(dev_yml),
+        legacy_topics: sb_core::legacy_topics_in(&text),
+        config,
+    })
+}
+
+/// Install an app package exactly as `sb app install` does.
+fn install_app(home: &SbHome, source: &str, prefetch: bool) -> Result<()> {
+    if matches!(sb_apps::classify(source), Ok(sb_apps::Source::Git { .. })) {
+        eprintln!("fetching {source} ...");
     }
     let opts = sb_apps::InstallOptions {
-        prefetch_override: a.prefetch.then_some(true),
+        prefetch_override: prefetch.then_some(true),
     };
-    let out = sb_apps::install(home.root(), &a.source, &opts)?;
+    let out = sb_apps::install(home.root(), source, &opts)?;
     let verb = if out.reinstalled {
         "reinstalled"
     } else {
@@ -1782,6 +3174,73 @@ fn doctor_app_checks(cfg: &SbCliConfig) -> sb_doctor::Report {
     sb_doctor::Report { checks }
 }
 
+/// `sb doctor`'s `topics` rows: legacy `topic: /...` entries in the active
+/// workspace's modules. Warnings only, like [`doctor_app_checks`].
+fn doctor_topic_checks(cfg: &SbCliConfig) -> sb_doctor::Report {
+    let checks = match module_registry_for(cfg) {
+        None => vec![sb_doctor::CheckResult {
+            name: "topics",
+            status: sb_doctor::CheckStatus::Skipped("no active workspace".to_owned()),
+        }],
+        Some(registry) => sb_doctor::check_module_topics(
+            registry
+                .iter()
+                .map(|(module, path)| (module.as_str(), path.as_path())),
+        ),
+    };
+    sb_doctor::Report { checks }
+}
+
+/// `sb doctor`'s workspace rows: [`workspace_checks`] for the active
+/// workspace, or one `[SKIP]` without one.
+fn doctor_workspace_checks(cfg: &SbCliConfig) -> sb_doctor::Report {
+    let active = SbHome::from_config(cfg)
+        .ok()
+        .and_then(|home| Some((active_workspace(&home).ok()??, home)));
+    let checks = match active {
+        None => vec![sb_doctor::CheckResult {
+            name: "workspace",
+            status: sb_doctor::CheckStatus::Skipped("no active workspace".to_owned()),
+        }],
+        Some((name, home)) => workspace_checks(cfg, &home, &name),
+    };
+    sb_doctor::Report { checks }
+}
+
+/// [`sb_doctor::check_workspace`] for installed workspace `name`, against
+/// the configured vault (where `sb install` imports messages).
+fn workspace_checks(cfg: &SbCliConfig, home: &SbHome, name: &str) -> Vec<sb_doctor::CheckResult> {
+    let fail = |msg: String| {
+        vec![sb_doctor::CheckResult {
+            name: "workspace",
+            status: sb_doctor::CheckStatus::Fail(msg),
+        }]
+    };
+    let flow = match sb_workspace::read_flow(home, name) {
+        Ok(f) => f,
+        Err(e) => {
+            return fail(format!(
+                "{name}: cannot read {}: {e:#}",
+                home.flow_yaml(name).display()
+            ));
+        }
+    };
+    let vault_root = match sb_config::resolve_messages_root(cfg) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("{name}: cannot resolve the vault: {e:#}")),
+    };
+    let stale = sb_workspace::is_stale(home, name).ok().flatten();
+    sb_doctor::check_workspace(
+        cfg,
+        &sb_doctor::WorkspaceView {
+            name,
+            flow: &flow,
+            vault_root: &vault_root,
+            stale_repo_flow: stale.as_ref().map(|(repo, _)| repo.as_path()),
+        },
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────
@@ -1850,6 +3309,12 @@ fn vault_for(cfg: &SbCliConfig) -> Result<VaultCtx> {
             return Ok(ctx);
         }
     }
+    configured_vault(cfg)
+}
+
+/// The vault `sb.config.yml` names (`messages_root`), never one discovered
+/// from cwd. Workspace installs import into this one wherever they run.
+fn configured_vault(cfg: &SbCliConfig) -> Result<VaultCtx> {
     Ok(VaultCtx {
         vault: Vault::at(sb_config::resolve_messages_root(cfg)?),
         pinned_style: None,
@@ -1966,19 +3431,34 @@ fn cmd_doctor() -> Result<()> {
             local: vctx.local,
         },
     );
-    use std::io::IsTerminal;
-    let color = std::io::stdout().is_terminal()
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    let color = stdout_color();
     println!("sb {}", env!("CARGO_PKG_VERSION"));
     print!("{}", report.render(color));
     // Installed apps: warnings only, so they never change doctor's exit code.
     print!("{}", doctor_app_checks(&cfg).render(color));
-    if report.all_ok() {
+    // Legacy `topic: /...` entries: warnings only, likewise.
+    print!("{}", doctor_topic_checks(&cfg).render(color));
+    // The active workspace (`sb ws check`): a [FAIL] there breaks `sb up`
+    // or codegen, so it counts.
+    let ws_report = doctor_workspace_checks(&cfg);
+    print!("{}", ws_report.render(color));
+    let n = report
+        .checks
+        .iter()
+        .chain(&ws_report.checks)
+        .filter(|c| c.status.is_fail())
+        .count();
+    if n == 0 {
         Ok(())
     } else {
-        let n = report.checks.iter().filter(|c| c.status.is_fail()).count();
         anyhow::bail!("{n} check(s) failed");
     }
+}
+
+/// Color the doctor table when stdout is a terminal and `NO_COLOR` is unset.
+fn stdout_color() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2067,7 +3547,7 @@ fn cmd_message_rm(name: &str) -> Result<()> {
     // Drop generated artifacts under <message_targets>/{iox2,proto,fb}/
     // so removing the .proto leaves nothing dangling that still references
     // the old type. Same vault the .proto was just removed from — see
-    // the `--out` derivation in compile_style_pass.
+    // the `--out` derivation in compile_style_in.
     let targets = vault.targets_dir(&parsed.style);
     let removed = cleanup_generated_for(&targets, &parsed);
     println!("removed {name}");
@@ -2262,27 +3742,38 @@ fn cmd_message_compile(
         anyhow::bail!("no styles found under {}", vault.root().display());
     }
 
+    let opts = CompileOpts {
+        out,
+        flags: BackendFlags { iox2, proto, fb },
+        string_cap,
+        bytes_cap,
+        vec_cap,
+        string_array_cap,
+        name_filter,
+    };
     let multi = styles.len() > 1;
     for st in &styles {
         if multi {
             println!("style {st}");
         }
-        compile_style_pass(
-            &cfg,
-            vault,
-            st,
-            out,
-            iox2,
-            proto,
-            fb,
-            string_cap,
-            bytes_cap,
-            vec_cap,
-            string_array_cap,
-            name_filter,
-        )?;
+        compile_style_in(&cfg, &vctx, st, &opts, &mut |line| println!("{line}"))?;
     }
     Ok(())
+}
+
+/// Options of one compile pass: the `sb message compile` flags.
+#[derive(Debug, Clone, Copy, Default)]
+struct CompileOpts<'a> {
+    /// Codegen destination; `None` = the style's `message_targets`.
+    out: Option<&'a Path>,
+    /// Explicit backends; none set = the style pin, else what the tools allow.
+    flags: BackendFlags,
+    string_cap: Option<u32>,
+    bytes_cap: Option<u32>,
+    vec_cap: Option<u32>,
+    string_array_cap: Option<u32>,
+    /// Compile only this message (`<style>/<ns>/<Leaf>`).
+    name_filter: Option<&'a str>,
 }
 
 /// iox2 flattening config for `style` as sb.config.yml sets it: what
@@ -2309,21 +3800,28 @@ fn iox2_codegen_config(cfg: &SbCliConfig, style: &str) -> sb_iox2_typegen::Codeg
     codegen_cfg
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compile_style_pass(
+/// Compile `style` of the vault `vctx` holds, and nothing else: the vault
+/// is never re-resolved from cwd, so a caller that wants the configured
+/// vault passes [`configured_vault`]. Progress lines go to `emit` (the CLI
+/// prints them; a workspace install drops them). Returns the backends
+/// emitted.
+fn compile_style_in(
     cfg: &SbCliConfig,
-    vault: &Vault,
+    vctx: &VaultCtx,
     style: &str,
-    out: Option<&std::path::Path>,
-    iox2: bool,
-    proto: bool,
-    fb: bool,
-    string_cap: Option<u32>,
-    bytes_cap: Option<u32>,
-    vec_cap: Option<u32>,
-    string_array_cap: Option<u32>,
-    name_filter: Option<&str>,
-) -> Result<()> {
+    opts: &CompileOpts<'_>,
+    emit: &mut dyn FnMut(&str),
+) -> Result<Vec<sb_core::Backend>> {
+    let vault = vctx.vault();
+    let CompileOpts {
+        out,
+        flags,
+        string_cap,
+        bytes_cap,
+        vec_cap,
+        string_array_cap,
+        name_filter,
+    } = *opts;
     use prost::Message;
     use prost_types::FileDescriptorSet;
 
@@ -2342,7 +3840,7 @@ fn compile_style_pass(
     } else {
         sb_vault::compile_style(vault, style, protoc, &descriptor_path)?;
     }
-    println!("wrote {}", descriptor_path.display());
+    emit(&format!("wrote {}", descriptor_path.display()));
 
     // ── 2. Codegen destination: --out override, else `message_targets` ──
     // (which itself defaults to `<message_definitions>/targets/` via the resolver).
@@ -2366,12 +3864,12 @@ fn compile_style_pass(
     let flatc_available = cfg.flatc.as_deref().is_some_and(std::path::Path::exists);
 
     // Explicit format flag must error clearly if its tool isn't available.
-    if proto && !protoc_available {
+    if flags.proto && !protoc_available {
         anyhow::bail!(
             "--proto requires `protoc` to be set + present in sb.config.yml (run `sb doctor`)"
         );
     }
-    if fb && !flatc_available {
+    if flags.fb && !flatc_available {
         anyhow::bail!(
             "--fb requires `flatc` to be set + present in sb.config.yml (run `sb doctor`)"
         );
@@ -2380,14 +3878,14 @@ fn compile_style_pass(
     let selection = resolve_backends(
         vault,
         style,
-        BackendFlags { iox2, proto, fb },
+        flags,
         ToolAvailability {
             protoc: protoc_available,
             flatc: flatc_available,
         },
     )?;
     if let Some(note) = &selection.note {
-        println!("{note}");
+        emit(note);
     }
     let want_iox2 = selection.has(sb_core::Backend::Iox2);
     let want_proto = selection.has(sb_core::Backend::Proto);
@@ -2453,7 +3951,7 @@ fn compile_style_pass(
                 n += 1;
             }
         }
-        println!("iox2: wrote {n} file(s) under {}", out.display());
+        emit(&format!("iox2: wrote {n} file(s) under {}", out.display()));
     }
 
     // protoc / flatc get THIS style's definitions dir as the include root —
@@ -2478,29 +3976,29 @@ fn compile_style_pass(
     if want_proto {
         let protoc = cfg.protoc.as_deref().expect("checked above");
         emit_proto(protoc, &defs_root, &sources, out)?;
-        println!(
+        emit(&format!(
             "proto: wrote C++/Python/C# bindings ({} source file(s)) into {}",
             sources.len(),
             out.display()
-        );
+        ));
     }
 
     // ── 5. fb (FlatBuffers via flatc: .proto → .fbs → Rust/C++/Python/C#) ──
     if want_fb {
         let flatc = cfg.flatc.as_deref().expect("checked above");
         emit_fb(flatc, &defs_root, &sources, out)?;
-        println!(
+        emit(&format!(
             "fb: wrote Rust/C++/Python/C# FlatBuffers bindings ({} source file(s)) into {}",
             sources.len(),
             out.display()
-        );
+        ));
     }
 
-    Ok(())
+    Ok(selection.backends)
 }
 
 /// The `--iox2` / `--proto` / `--fb` flags as passed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct BackendFlags {
     iox2: bool,
     proto: bool,
@@ -2850,6 +4348,25 @@ fn emit_fb(
 
         flatten_namespace_subdirs(&dest)
             .with_context(|| format!("flattening namespace dirs in {}", dest.display()))?;
+
+        // The binary schema `sb topic listen` decodes FlatBuffers frames
+        // with (sb_listen::FbLookup::bfbs_path): `<dest>/<Leaf>.bfbs`.
+        let mut cmd = Command::new(flatc);
+        cmd.arg("-b").arg("--schema");
+        for ipkg in &include_pkgs {
+            cmd.arg("-I").arg(fbs_tmp.path().join(ipkg));
+        }
+        cmd.arg("-o").arg(&dest).arg(&fbs_path);
+        let status = cmd
+            .output()
+            .with_context(|| format!("spawning flatc -b --schema for {}", fbs_path.display()))?;
+        if !status.status.success() {
+            anyhow::bail!(
+                "flatc -b --schema failed for {}: {}",
+                fbs_path.display(),
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
     }
     Ok(())
 }
@@ -3168,7 +4685,14 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
     // the flag, the wire, the Header, or the module config names. The
     // warning lands on stderr so users know why they're getting hex
     // instead of JSON.
-    let decoders = match ListenDecoders::build(transport == TransportArg::Iceoryx2) {
+    // Config and vault failures only cost decoding, so neither is fatal.
+    let cfg = load_config().ok();
+    let vctx = cfg.as_ref().and_then(|c| vault_for(c).ok());
+    let decoders = match ListenDecoders::build(
+        cfg.as_ref(),
+        vctx.as_ref(),
+        transport == TransportArg::Iceoryx2,
+    ) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("warning: dynamic decode disabled ({e:#}); rendering payload as hex");
@@ -3206,6 +4730,10 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
         no_data: a.no_data,
         keep_bytes: a.show,
         config_schema: resolved.schema.as_deref(),
+        flatbuffers: sb_listen::FbLookup {
+            flatc: cfg.as_ref().and_then(|c| c.flatc.as_deref()),
+            vault: vctx.as_ref().map(VaultCtx::vault),
+        },
     };
     let mut warned_no_schema = false;
     let mut warned_view = false;
@@ -3231,6 +4759,12 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
                 FramePoll::Closed => return Ok(()),
             },
         };
+        // A publisher that declared its payload raw (octets or text) has
+        // no schema by design; the re-render advice would be wrong.
+        let declared_raw = matches!(
+            frame.wire_tag,
+            Some(sb_listen::WireTag::Octets | sb_listen::WireTag::Text(_))
+        );
         let mut decoded = sb_listen::decode_frame_dynamic(
             transport_tag,
             &resolved.full_topic,
@@ -3239,7 +4773,7 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
             a.type_name.as_deref(),
             &ctx,
         );
-        if !a.raw && decoded.schema.is_none() && !warned_no_schema {
+        if !a.raw && !declared_raw && decoded.schema.is_none() && !warned_no_schema {
             warned_no_schema = true;
             eprintln!(
                 "warning: no schema on the wire for {}; re-render the publisher with \
@@ -3325,9 +4859,9 @@ impl ListenDecoders {
     ///   - the vault is empty (no `.proto` files),
     ///   - no style in the vault compiled (per-style failures are warned
     ///     on stderr by [`sb_listen::compile_styles`] and skipped).
-    fn build(with_iox2: bool) -> Result<Self> {
-        let cfg = load_config()?;
-        let vctx = vault_for(&cfg)?;
+    fn build(cfg: Option<&SbCliConfig>, vctx: Option<&VaultCtx>, with_iox2: bool) -> Result<Self> {
+        let cfg = cfg.ok_or_else(|| anyhow::anyhow!("sb.config.yml did not load"))?;
+        let vctx = vctx.ok_or_else(|| anyhow::anyhow!("no vault resolved"))?;
         vctx.ensure_installed()?;
         let protoc = cfg
             .protoc
@@ -3336,7 +4870,7 @@ impl ListenDecoders {
         let styles = sb_listen::compile_styles(vctx.vault(), protoc)?;
         let pool = sb_listen::pool_from_styles(&styles)?;
         let iox2 = if with_iox2 {
-            iox2_layouts_for_styles(&cfg, &styles)
+            iox2_layouts_for_styles(cfg, &styles)
         } else {
             Vec::new()
         };
@@ -3554,12 +5088,16 @@ type ModuleRegistry = std::collections::BTreeMap<String, PathBuf>;
 /// used to look up a topic's schema, which is a fallback, so every failure
 /// is silent.
 fn active_module_registry() -> Option<ModuleRegistry> {
-    let cfg = load_config().ok()?;
-    let home = SbHome::from_config(&cfg).ok()?;
+    module_registry_for(&load_config().ok()?)
+}
+
+/// [`active_module_registry`] against an already-loaded config.
+fn module_registry_for(cfg: &SbCliConfig) -> Option<ModuleRegistry> {
+    let home = SbHome::from_config(cfg).ok()?;
     let workspace = active_workspace(&home).ok()??;
     sb_workspace::read_flow(&home, &workspace)
         .ok()
-        .map(|flow| flow.modules)
+        .map(|flow| flow.module_paths())
 }
 
 /// Transport for `sb topic listen/pub`: `--transport` when given, else the
@@ -3588,18 +5126,18 @@ fn pick_transport(
         (None, Some(path)) => Ok(path.into()),
         (None, None) => anyhow::bail!(
             "cannot infer transport from {}: expected \
-             /<device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2",
+             <device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2",
             resolved.full_topic
         ),
     }
 }
 
 /// Resolve a bare-or-full topic for `sb topic listen/pub`. Builds the
-/// full path against the cwd module's `sb.dev.yml` + the active
-/// workspace + sb.config.yml's `device`. An input containing a `/` is
-/// fully-qualified and passes through, with a missing leading `/`
-/// prepended (no cwd module needed); with a `registry`, its schema is
-/// looked up in the owning module's `sb.dev.yml`.
+/// full path (the wire key, no leading `/`) against the cwd module's
+/// `sb.dev.yml` + the active workspace + sb.config.yml's `device`. An
+/// input containing a `/` is fully-qualified and passes through, with a
+/// leading `/` accepted and dropped (no cwd module needed); with a
+/// `registry`, its schema is looked up in the owning module's `sb.dev.yml`.
 fn resolve_topic_for_runtime(
     input: &str,
     registry: Option<&ModuleRegistry>,
@@ -3641,8 +5179,21 @@ fn require_active_workspace() -> Result<(SbCliConfig, SbHome, String)> {
     Ok((cfg, home, ws))
 }
 
+/// Warn (and carry on) when the active workspace's repo `flow.yaml` was
+/// edited after it was installed: `sb up` / `sb run` use the installed copy.
+fn warn_if_stale(home: &SbHome, ws: &str) {
+    if let Ok(Some((repo_flow, _))) = sb_workspace::is_stale(home, ws) {
+        let repo = repo_flow.parent().unwrap_or(&repo_flow);
+        eprintln!(
+            "warning: flow.yaml at {} is newer than the installed copy; run sb install",
+            repo.display()
+        );
+    }
+}
+
 fn cmd_up() -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
+    warn_if_stale(&home, &ws);
     let plan = sb_launch::plan_workspace(&home, &ws)?;
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
     let outcome = sb_launch::up(&plan, &tmux)?;
@@ -3660,6 +5211,7 @@ fn cmd_up() -> Result<()> {
 
 fn cmd_run(module: &str, args: &[String]) -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
+    warn_if_stale(&home, &ws);
     let (plan, pane) = sb_launch::plan_single(&home, &ws, module, sb_launch::Script::Run, args)?;
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
     let outcome = sb_launch::run_single(&plan, &pane, &tmux)?;
@@ -3819,25 +5371,6 @@ mod discovery_tests {
         fs::write(dir.join("Thing.proto"), "syntax = \"proto3\";\n").unwrap();
     }
 
-    /// A standalone message repo cloned anywhere: `message_definitions/` sits
-    /// at the repo root, so the repo IS the style. Standing in it must
-    /// resolve the style from the folder name and root the vault at the
-    /// repo's PARENT — otherwise `sb message compile` silently rebuilds the
-    /// global vault instead (the bug this guards).
-    #[test]
-    fn cwd_holding_message_definitions_is_itself_the_style() {
-        let tmp = TempDir::new().unwrap();
-        let repo = tmp.path().join("vrobots_msgs");
-        touch_proto(&repo, "message_definitions/states");
-
-        let ctx = discover_local_vault_from(&repo).expect("repo should be discovered");
-        assert_eq!(ctx.pinned_style.as_deref(), Some("vrobots_msgs"));
-        assert_eq!(ctx.vault().root(), tmp.path());
-        assert!(ctx.local, "a discovered root is never the global vault");
-        // The pin is what keeps sibling directories out of a bare compile.
-        assert_eq!(ctx.styles(), vec!["vrobots_msgs".to_string()]);
-    }
-
     /// A discovered root must never receive the forge's embedded `std/`
     /// bundle — that would scatter `ros2/message_definitions/std/` through
     /// a user's own tree on the first `sb message` call.
@@ -3854,47 +5387,6 @@ mod discovery_tests {
             !tmp.path().join("ros2").exists(),
             "std bundle leaked into the user's tree"
         );
-    }
-
-    /// The forge's own layout: cwd is a repo containing `messages/<style>/`.
-    /// Root is the `messages/` dir and no style is pinned, so every style
-    /// compiles — the pre-existing behavior, which must not regress.
-    #[test]
-    fn conventional_messages_subtree_wins_with_no_pin() {
-        let tmp = TempDir::new().unwrap();
-        touch_proto(tmp.path(), "messages/ros2/message_definitions/std");
-        touch_proto(tmp.path(), "messages/swarmbotix/message_definitions/header");
-
-        let ctx = discover_local_vault_from(tmp.path()).expect("forge layout");
-        assert_eq!(ctx.pinned_style, None);
-        assert_eq!(ctx.vault().root(), tmp.path().join("messages"));
-        assert_eq!(
-            ctx.styles(),
-            vec!["ros2".to_string(), "swarmbotix".to_string()]
-        );
-    }
-
-    /// Standing in a namespace dir INSIDE a style still resolves that style:
-    /// the walk goes up and hits `message_definitions/`'s parent.
-    #[test]
-    fn walks_up_from_a_namespace_dir_to_the_owning_style() {
-        let tmp = TempDir::new().unwrap();
-        let repo = tmp.path().join("vrobots_msgs");
-        touch_proto(&repo, "message_definitions/states");
-
-        let ctx = discover_local_vault_from(&repo.join("message_definitions").join("states"))
-            .expect("should walk up");
-        assert_eq!(ctx.pinned_style.as_deref(), Some("vrobots_msgs"));
-        assert_eq!(ctx.vault().root(), tmp.path());
-    }
-
-    /// A directory named `messages` with no `<style>/message_definitions/`
-    /// child is not a vault — matching is on shape, not on name.
-    #[test]
-    fn bare_directory_named_messages_is_not_a_vault() {
-        let tmp = TempDir::new().unwrap();
-        fs::create_dir_all(tmp.path().join("messages").join("inbox")).unwrap();
-        assert!(discover_local_vault_from(tmp.path()).is_none());
     }
 }
 
@@ -3932,55 +5424,6 @@ mod backend_tests {
         Vault::at(tmp.path().join("messages"))
     }
 
-    /// Turn `<tmp>/<name>` into something `unity_project_root` recognizes.
-    fn make_unity_project(tmp: &TempDir, name: &str) -> std::path::PathBuf {
-        let root = tmp.path().join(name);
-        fs::create_dir_all(root.join("Assets")).unwrap();
-        fs::create_dir_all(root.join("ProjectSettings")).unwrap();
-        root
-    }
-
-    #[test]
-    fn default_is_every_backend_the_box_can_generate() {
-        let tmp = TempDir::new().unwrap();
-        let v = vault_with_style(&tmp, "swarmbotix");
-        let _out = v.targets_dir("swarmbotix");
-        let s = resolve_backends(&v, "swarmbotix", NO_FLAGS, ALL_TOOLS).unwrap();
-        assert_eq!(s.backends, vec![Backend::Iox2, Backend::Proto, Backend::Fb]);
-        assert!(s.note.is_none(), "the ordinary path must stay quiet");
-    }
-
-    #[test]
-    fn missing_tools_drop_their_backends() {
-        let tmp = TempDir::new().unwrap();
-        let v = vault_with_style(&tmp, "swarmbotix");
-        let _out = v.targets_dir("swarmbotix");
-        let tools = ToolAvailability {
-            protoc: true,
-            flatc: false,
-        };
-        let s = resolve_backends(&v, "swarmbotix", NO_FLAGS, tools).unwrap();
-        assert_eq!(s.backends, vec![Backend::Iox2, Backend::Proto]);
-    }
-
-    /// `backends: []` is a real answer, not an empty config — it says "emit
-    /// nothing automatically" and must not fall through to the default.
-    /// A style inside a Unity project gets the full set. The generated C#
-    /// targets C# 9, so there is nothing to protect Unity from — narrowing
-    /// here would deprive the C++/Python/Rust consumers of the same style.
-    #[test]
-    fn unity_hosted_style_still_gets_every_backend() {
-        let tmp = TempDir::new().unwrap();
-        let unity = make_unity_project(&tmp, "virtual_robots");
-        let scripts = unity.join("Assets").join("Scripts");
-        fs::create_dir_all(scripts.join("vrobots_msgs").join("message_definitions")).unwrap();
-        let v = Vault::at(&scripts);
-
-        let s = resolve_backends(&v, "vrobots_msgs", NO_FLAGS, ALL_TOOLS).unwrap();
-        assert_eq!(s.backends, vec![Backend::Iox2, Backend::Proto, Backend::Fb]);
-        assert!(s.note.is_none(), "nothing was narrowed, so say nothing");
-    }
-
     /// An explicit pin is still honored — it is a recorded decision, not an
     /// inference about the host project.
     #[test]
@@ -3997,43 +5440,6 @@ mod backend_tests {
         let s = resolve_backends(&v, "swarmbotix", NO_FLAGS, ALL_TOOLS).unwrap();
         assert_eq!(s.backends, vec![Backend::Fb]);
         assert!(s.note.unwrap().contains("pinned"));
-    }
-
-    /// An explicit flag still wins over a pin.
-    #[test]
-    fn explicit_flag_overrides_the_pin() {
-        let tmp = TempDir::new().unwrap();
-        let v = vault_with_style(&tmp, "swarmbotix");
-        v.write_style_config(
-            "swarmbotix",
-            &sb_core::StyleConfig {
-                backends: Some(vec![Backend::Fb]),
-            },
-        )
-        .unwrap();
-        let flags = BackendFlags {
-            iox2: true,
-            proto: false,
-            fb: false,
-        };
-        let s = resolve_backends(&v, "swarmbotix", flags, ALL_TOOLS).unwrap();
-        assert_eq!(s.backends, vec![Backend::Iox2]);
-    }
-
-    #[test]
-    fn empty_pin_emits_nothing() {
-        let tmp = TempDir::new().unwrap();
-        let v = vault_with_style(&tmp, "swarmbotix");
-        v.write_style_config(
-            "swarmbotix",
-            &sb_core::StyleConfig {
-                backends: Some(vec![]),
-            },
-        )
-        .unwrap();
-        let _out = v.targets_dir("swarmbotix");
-        let s = resolve_backends(&v, "swarmbotix", NO_FLAGS, ALL_TOOLS).unwrap();
-        assert!(s.backends.is_empty());
     }
 
     /// A pin naming a backend whose tool is missing is an error, not a silent
@@ -4056,69 +5462,6 @@ mod backend_tests {
         };
         let err = resolve_backends(&v, "swarmbotix", NO_FLAGS, tools).unwrap_err();
         assert!(err.to_string().contains("flatc"), "{err}");
-    }
-
-    /// flatc emits namespace subdirs for Rust/Python; they get flattened up
-    /// into the per-message dir. The flattening must be IDEMPOTENT: the old
-    /// code skipped the move whenever the flat copy already existed, so a
-    /// second compile left the whole nested tree behind as a duplicate — and
-    /// Unity then failed on duplicate type definitions.
-    #[test]
-    fn flattening_namespace_subdirs_is_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        let msg_dir = tmp.path().join("StatesMsg");
-
-        // Simulate one flatc run: nested namespace dir + an __init__.py marker.
-        let seed = || {
-            let nested = msg_dir.join("swarmbotix").join("states");
-            fs::create_dir_all(&nested).unwrap();
-            fs::write(nested.join("StatesMsg.py"), "# generated").unwrap();
-            fs::write(nested.join("StatesMsg.rs"), "// generated").unwrap();
-            fs::write(nested.join("__init__.py"), "").unwrap();
-        };
-
-        for run in 1..=3 {
-            seed();
-            flatten_namespace_subdirs(&msg_dir).unwrap();
-
-            let files: Vec<String> = fs::read_dir(&msg_dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_file())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            let mut sorted = files.clone();
-            sorted.sort();
-            assert_eq!(
-                sorted,
-                vec!["StatesMsg.py".to_string(), "StatesMsg.rs".to_string()],
-                "run {run}: files must be flat and not accumulate"
-            );
-            assert!(
-                !msg_dir.join("swarmbotix").exists(),
-                "run {run}: the emptied namespace dir must be removed"
-            );
-        }
-    }
-
-    #[test]
-    fn unity_root_needs_both_markers() {
-        let tmp = TempDir::new().unwrap();
-        // Assets/ alone is far too generic to treat as a Unity project.
-        let only_assets = tmp.path().join("not_unity");
-        fs::create_dir_all(only_assets.join("Assets").join("deep")).unwrap();
-        assert!(sb_vault::unity_project_root(&only_assets.join("Assets").join("deep")).is_none());
-
-        let unity = make_unity_project(&tmp, "real_unity");
-        let deep = unity
-            .join("Assets")
-            .join("Scripts")
-            .join("x")
-            .join("message_targets");
-        assert_eq!(
-            sb_vault::unity_project_root(&deep).as_deref(),
-            Some(unity.as_path())
-        );
     }
 }
 
@@ -4157,77 +5500,5 @@ mod app_dispatch_tests {
                 "sb_apps::BUILTIN_NAMES lists `{b}`, which is not an sb subcommand"
             );
         }
-    }
-
-    #[test]
-    fn unknown_subcommand_parses_as_an_app_with_raw_args() {
-        let cli = Cli::try_parse_from(["sb", "camcalib", "--help", "-x", "a b"]).unwrap();
-        match cli.cmd {
-            Some(Cmd::External(argv)) => assert_eq!(argv, ["camcalib", "--help", "-x", "a b"]),
-            _ => panic!("expected an external app subcommand"),
-        }
-    }
-
-    #[test]
-    fn app_kind_answers_parse() {
-        assert_eq!(parse_app_kind("Docker"), Ok(sb_apps::AppKind::Docker));
-        assert_eq!(parse_app_kind("none"), Ok(sb_apps::AppKind::None));
-        assert!(parse_app_kind("vm").is_err());
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Topic transport
-// ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod topic_transport_tests {
-    use super::*;
-
-    /// `-t` / `--transport` take the short and path-segment spellings; with
-    /// neither a flag nor a `<transport>` segment, listen and pub refuse to
-    /// guess (there is no zenoh default any more).
-    #[test]
-    fn transport_flag_aliases_parse_and_no_flag_needs_a_path_segment() {
-        let transport_of = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().cmd {
-            Some(Cmd::Topic(TopicCmd::Listen(a))) => a.transport,
-            Some(Cmd::Topic(TopicCmd::Pub(a))) => a.transport,
-            Some(Cmd::Topic(TopicCmd::List(a))) => a.transport,
-            _ => panic!("expected sb topic listen/pub/list"),
-        };
-        let t = TransportArg::Iceoryx2;
-        assert_eq!(
-            transport_of(&["sb", "topic", "listen", "-t", "i", "/d/w/m/zenoh/x"]),
-            Some(t)
-        );
-        assert_eq!(
-            transport_of(&["sb", "topic", "pub", "--transport", "iox2", "x", "00"]),
-            Some(t)
-        );
-        assert_eq!(
-            transport_of(&["sb", "topic", "list", "--transport", "i"]),
-            Some(t)
-        );
-        let z = Some(TransportArg::Zenoh);
-        assert_eq!(transport_of(&["sb", "topic", "listen", "-t", "z", "x"]), z);
-        assert_eq!(
-            transport_of(&["sb", "topic", "pub", "-t", "zenoh", "x", "00"]),
-            z
-        );
-        assert!(Cli::try_parse_from(["sb", "topic", "listen", "-t", "tcp", "x"]).is_err());
-
-        let flag = transport_of(&["sb", "topic", "listen", "/not/canonical"]);
-        assert_eq!(flag, None);
-        let resolved =
-            sb_discover::resolve_bare_topic("/not/canonical", None, "", "", None).unwrap();
-        let err = pick_transport(flag, &resolved).unwrap_err().to_string();
-        assert!(
-            err.starts_with("cannot infer transport from /not/canonical: expected "),
-            "{err}"
-        );
-        // The segment fills in when the flag is absent; the flag wins over it.
-        let segment = sb_discover::resolve_bare_topic("/d/w/m/iox2/x", None, "", "", None).unwrap();
-        assert_eq!(pick_transport(None, &segment).unwrap(), t);
-        assert_eq!(pick_transport(z, &segment).unwrap(), TransportArg::Zenoh);
     }
 }

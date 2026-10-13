@@ -2,7 +2,7 @@
 
 Source of truth for L1 progress. Update on every state change.
 
-Last updated: 2026-05-22
+Last updated: 2026-10-13
 
 > **Reading this later:** the command transcripts below are verbatim from
 > that date and use the **two-segment** message names (`std/Header`) that
@@ -129,6 +129,10 @@ swarmbotix/
 ---
 
 ## TDD test → location map
+
+> Test suite pruned in 0.5.0 to the critical set; the files named below
+> that no longer exist were removed then. See
+> [plan/lv4_report.md](lv4_report.md) 0.5.0 note.
 
 | #  | Spec                                  | Where                                                                                                                                |
 | -- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |

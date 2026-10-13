@@ -7,8 +7,8 @@ runscript.bash** that `sb init --docker` produces, and the **per-language
 in-container entry-point** you write to consume it.
 
 Sibling doc: [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md). That one
-covers the `sb pub add` / `sb sub add` generated files and the runtime
-`TopicOverrides` API. *This* doc is everything else you need once your
+covers the files `sb io add` generates and the runtime `TopicOverrides`
+API. *This* doc is everything else you need once your
 module ships in a container.
 
 ---
@@ -26,7 +26,10 @@ own:
 - Host volume mounts, network mode, etc.
 
 These per-instance settings are *deployment* data, not source. They live in
-`~/.swarmbotix/workspaces/<ws>/flow.yaml::instances`, get baked into the
+the workspace's `flow.yaml::instances`: `sb 0.5.0+`, the repository
+`flow.yaml` when the module sits under one (committed with the code; see
+[sbcli_ws.md](sbcli_ws.md) §4), otherwise the active workspace's installed
+copy at `~/.swarmbotix/workspaces/<ws>/flow.yaml`. They get baked into the
 generated `runscript.bash` at `sb init --docker` time, and disappear if you
 rebuild for a non-docker target.
 
@@ -41,18 +44,22 @@ topic segment to match.
 
 ## 2. `flow.yaml::instances` schema
 
-A single workspace's `flow.yaml` after `sb ws create demo` + `sb init`:
+A repository's `flow.yaml` (sb 0.5.0+) after `sb ws create vision` at
+`~/Github/vision_workspace` and `sb init --cpp camera_publishers/cam_gige_ht`:
 
 ```yaml
+# ~/Github/vision_workspace/flow.yaml (the repo copy, committed)
+name: vision
 modules:
-  cam_gige_ht: /home/el/Github/vision_workspace/camera_publishers/cam_gige_ht/sb.dev.yml
+  cam_gige_ht: camera_publishers/cam_gige_ht
 ```
 
-To add two camera instances, hand-edit the file:
+To add two camera instances, hand-edit that file:
 
 ```yaml
+name: vision
 modules:
-  cam_gige_ht: /home/el/Github/vision_workspace/camera_publishers/cam_gige_ht/sb.dev.yml
+  cam_gige_ht: camera_publishers/cam_gige_ht
 
 instances:
   cam_gige_ht:
@@ -96,8 +103,14 @@ Field reference:
 > `sb` reads `flow.yaml` — not waiting for `sb up`.
 
 No management subcommand exists yet (`sb instance add/edit/rm` is on the
-backlog). Edit `flow.yaml` directly and re-run
-`sb init --docker --force` to regenerate the runscript.
+backlog). Edit the repository `flow.yaml` directly, run `sb install .` at
+the repository root so the installed copy follows (`sb up` warns while it
+is stale), and regenerate the runscript (§9).
+
+A workspace with no repository `flow.yaml` (one created before 0.5.0)
+keeps `instances:` in its installed copy,
+`~/.swarmbotix/workspaces/<ws>/flow.yaml`, where module paths are
+absolute; edit that file instead.
 
 ---
 
@@ -105,24 +118,30 @@ backlog). Edit `flow.yaml` directly and re-run
 
 ```bash
 cd ~/Github/vision_workspace/camera_publishers/cam_gige_ht
-sb init --cpp --docker          # first time: also creates sb.dev.yml etc.
-# …edit flow.yaml::instances…
-sb init --docker --force        # subsequent: regenerate runscript only
+sb init --cpp                   # adopt: sb.dev.yml, IO dir, registered in the repo flow.yaml
+# …add instances.cam_gige_ht to the repo flow.yaml (§2)…
+rm runscript.bash
+sb init --docker                # writes the docker runscript from those instances
 ```
 
 Preflight checks (each emits an actionable error and exits non-zero):
 
-1. **Active workspace** — same rule as plain `sb init`.
-2. **`flow.yaml::instances.<module>` exists and is non-empty.** Without an
-   instances list, the generated runscript would have no branches.
+1. **A registry**: the repository `flow.yaml` above the module, or else
+   the active workspace (same rule as plain `sb init`).
+2. **`flow.yaml::instances.<module>` exists and is non-empty**, read from
+   that repository `flow.yaml` when the module sits under one, else from
+   the active workspace's installed copy (sb 0.5.0+). Without an
+   instances list, the generated runscript would have no branches. The
+   error text says "the active workspace's flow.yaml" in either case.
 3. **Every instance has a `docker:` block with an `image:`.** Skipping
    `image` is the most common omission; the preflight names the offending
    instance.
 
 A successful run:
 
-- Writes `sb.dev.yml`, the IO directory, registers in `flow.yaml::modules`
-  (same as plain `sb init`).
+- Writes `sb.dev.yml`, the IO directory, and registers the module (same
+  as plain `sb init`: in the repository `flow.yaml`, followed by a
+  reinstall, or in the active workspace).
 - Writes a **docker-flavored** `runscript.bash` whose body is described
   next.
 
@@ -135,21 +154,23 @@ The body has four parts, top to bottom:
 ```bash
 #!/usr/bin/env bash
 # /abs/path/runscript.bash
-# regenerate with: sb init --docker --force
+# regenerate: delete runscript.bash, then run sb init --docker
 # …prose comment about docker variant…
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 ```
 
 **Staleness check.** Compares `mtime(flow.yaml)` to `mtime($0)`. If
-flow.yaml is newer, emits one stderr line and continues — assuming the
-existing branches are still good enough:
+flow.yaml is newer, emits one stderr line and continues, assuming the
+existing branches are still good enough. The `flow.yaml` baked in is the
+one the instances were read from: the repository copy (sb 0.5.0+) when
+the module sits under one, else the active workspace's installed copy.
 
 ```bash
-__sb_flow='/home/el/.swarmbotix/workspaces/demo/flow.yaml'
+__sb_flow='/home/el/Github/vision_workspace/flow.yaml'
 __sb_self="$PWD/$(basename "${BASH_SOURCE[0]}")"
 if [[ -f "$__sb_flow" ]] && [[ "$__sb_flow" -nt "$__sb_self" ]]; then
-  echo "warning: $__sb_flow is newer than $__sb_self — instances may be stale; regenerate with: sb init --docker --force" >&2
+  echo "warning: $__sb_flow is newer than $__sb_self — instances may be stale; regenerate: delete runscript.bash, then run sb init --docker" >&2
 fi
 ```
 
@@ -329,7 +350,7 @@ is the same shape as the others.
 The runtime override API from
 [sbcli_pubsub_consuming.md §3](sbcli_pubsub_consuming.md) was originally
 documented with a numeric `--id N`. **String IDs work the same way**:
-`--id left` produces wire topic `/<dev>/<ws>/cam_gige_ht-left/iox2/…`.
+`--id left` produces wire topic `<dev>/<ws>/cam_gige_ht-left/iox2/…`.
 Mix-and-match:
 
 | flow.yaml `id` | Wire `<module>` segment |
@@ -344,22 +365,22 @@ is no conversion step — what you write in flow.yaml is exactly what shows
 up on the wire.
 
 `is_owned` (§3.3 of the consuming doc) is **not affected** by string IDs:
-a foreign subscriber registered with a leading-slash, fully-qualified
-topic (`/dev01/ws/cam_gige_ht/iox2/frame`) still won't pair with a
+a foreign subscriber registered with `--key` (a `key:` entry such as
+`key: dev01/ws/cam_gige_ht/iox2/frame`) still won't pair with a
 publisher running as instance `left` (which writes to
-`/dev01/ws/cam_gige_ht-left/iox2/frame`). The three workarounds
+`dev01/ws/cam_gige_ht-left/iox2/frame`). The three workarounds
 documented there still apply. Use Zenoh KeyExpr wildcards if you have
 cross-module subscribers that need to fan-in across instances.
 
 ---
 
-## 7. `sb pub add` does NOT take an instance ID
+## 7. `sb io add` does NOT take an instance ID
 
-Instance IDs are a **launch-time** concept. `sb pub add` operates on the
-module:
+Instance IDs are a **launch-time** concept. `sb io add` (like the
+deprecated `sb pub add`) operates on the module:
 
 ```bash
-sb pub add image_raw --type std/ImageStamped --iox2 --module cam_gige_ht
+sb io add pub image_raw -m ros2/std/ImageStamped --iox2 --module cam_gige_ht
 ```
 
 There is no `--module cam_gige_ht-left`. The codegen writes the *base*
@@ -399,25 +420,36 @@ won't be able to open `/dev/video0` unless you add `--group-add video`
 or run privileged. The runscript doesn't add either by default; add
 extra args via flow.yaml's `args:` field if you need them.
 
-**Don't bake secrets into env.** `flow.yaml` is plaintext on disk and
-usually gitignored, but treat it like source-of-truth config, not a
-secret store. Pass tokens via `--env-file` (add to a future flow.yaml
-field once we need it) or mount a docker secret.
+**Don't bake secrets into env.** `sb 0.5.0+`: the repository `flow.yaml`
+is committed and shared with everyone who installs the workspace, so
+every `docker.env` value in it is published with the code. It is
+source-of-truth config, not a secret store. Pass tokens via
+`--env-file` (add to a future flow.yaml field once we need it) or mount a
+docker secret.
 
 ---
 
 ## 9. Regenerating after a flow.yaml edit
 
 ```bash
-# After editing ~/.swarmbotix/workspaces/<ws>/flow.yaml:
+# After editing the repository flow.yaml (sb 0.5.0+):
+cd <repo-root> && sb install .          # bring the installed copy up to date
 cd <module-root>
-sb init --docker --force
+rm runscript.bash && sb init --docker   # regenerate the runscript only
 ```
+
+Delete the runscript and run `sb init --docker` **without** `--force`:
+`--force` also rewrites `sb.dev.yml`, and the rewritten file has no
+`publishers:`, `subscribers:`, or `services:` entries
+([sbcli_init.md](sbcli_init.md) §9.4). Without `--force`, `sb init` keeps
+the existing `sb.dev.yml` and writes only the missing runscript. The
+generated runscript's own comment and staleness warning say the same:
+delete `runscript.bash`, then run `sb init --docker` without `--force`.
 
 If you forget, the next run of `runscript.bash` will emit:
 
 ```
-warning: /home/.../flow.yaml is newer than /path/runscript.bash — instances may be stale; regenerate with: sb init --docker --force
+warning: /home/.../flow.yaml is newer than /path/runscript.bash — instances may be stale; regenerate: delete runscript.bash, then run sb init --docker
 ```
 
 …and continue with the old branches. That's deliberate — running with

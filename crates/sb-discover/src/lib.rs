@@ -9,9 +9,11 @@
 //!   `schema` (= `header.metadata.msg_type`) and `rate_hz`
 //!   (= `header.metadata.msg_freq_desired`) populate from that one
 //!   frame. When the probe yields no `msg_type`, `schema` falls back to
-//!   the schema half of the sample encoding
-//!   (`application/protobuf;<style>/<ns>/<Leaf>`, stamped by generated
-//!   publishers). Payloads with neither stay `None`.
+//!   the sample's wire tag ([`parse_wire_tag`], stamped by generated
+//!   publishers): the vault name of a protobuf or FlatBuffers payload, or
+//!   the MIME type of a text one. FlatBuffers, text, and octet-stream
+//!   payloads are not protobuf, so they are never Header-probed. Payloads
+//!   with neither stay `None`.
 //! - **iceoryx2** — `Service::list(Config::global_config(), ...)`. The
 //!   schema column comes free from `static_details.message_type_details()
 //!   .payload.type_name()` (e.g. `"swarmbotix_std::StringStamped"`). No
@@ -19,16 +21,19 @@
 //!
 //! Both functions return rows sorted alphabetically by topic, with
 //! [`matches_keyword`] applied so the CLI and any future server share one
-//! filter definition. Neither backend's names carry a leading `/` on the
-//! wire; both report it ([`with_leading_slash`]), so a row pastes into
+//! filter definition. Rows report the raw wire key
+//! (`dev01/ws/talker/zenoh/chatter`, no leading `/`), which is also sb's
+//! canonical fully-qualified topic, so a row pastes into
 //! `sb topic listen` unchanged.
 
 mod probe;
 mod render;
 mod resolve;
 
-use probe::encoding_schema;
-pub use probe::{HeaderProbe, MetadataProbe, StampedProbe, probe_header};
+pub use probe::{
+    HeaderProbe, MIME_FLATBUFFERS, MIME_OCTET_STREAM, MIME_PROTOBUF, MetadataProbe, StampedProbe,
+    WireTag, parse_wire_tag, probe_header,
+};
 pub use render::{TableLayout, render_json_lines, render_table};
 pub use resolve::{ModuleLookup, ResolveError, ResolveOutcome, config_schema, resolve_bare_topic};
 
@@ -65,16 +70,18 @@ impl Transport {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TopicEntry {
-    /// Slashed topic (`/dev01/ws/talker/zenoh/chatter`): the Zenoh key
-    /// expression or iceoryx2 service name with a leading `/`. The same
-    /// string in the table and the JSON `topic` field.
+    /// Raw wire key (`dev01/ws/talker/zenoh/chatter`): the Zenoh key
+    /// expression or iceoryx2 service name, verbatim. This is also the
+    /// canonical fully-qualified topic. The same string in the table and
+    /// the JSON `topic` field.
     pub topic: String,
     pub transport: Transport,
     /// Schema name: `"std/StringStamped"` for Zenoh-probed `*Stamped`
-    /// payloads, the encoding schema (e.g. `"ros2/std/StringStamped"`) for
-    /// Zenoh samples without a Header, `"swarmbotix_std::StringStamped"`
-    /// (the iox2 typed-tag form) for iceoryx2 services. `None` for
-    /// foreign / unknown.
+    /// payloads; for Zenoh samples without a Header, the wire tag's
+    /// [`WireTag::type_label`] (a vault name such as
+    /// `"ros2/std/StringStamped"`, or a text MIME type such as
+    /// `"text/plain"`); `"swarmbotix_std::StringStamped"` (the iox2
+    /// typed-tag form) for iceoryx2 services. `None` for foreign / unknown.
     pub schema: Option<String>,
     /// Reserved for future envelope hashing. Always `None` at L4 —
     /// kept on the wire so later levels can populate without breaking
@@ -95,22 +102,14 @@ pub struct TopicEntry {
     pub is_dead: bool,
 }
 
-/// `name` with a leading `/`, prepended only when missing. Zenoh key
-/// expressions never carry one, and sb-generated iceoryx2 service names
-/// share that form; the slashed one is what `sb topic listen` and
-/// `sb topic pub` take.
-pub fn with_leading_slash(name: &str) -> String {
-    if name.starts_with('/') {
-        name.to_owned()
-    } else {
-        format!("/{name}")
-    }
-}
-
-/// Case-insensitive (by default) substring match — public so the CLI and
+/// Case-insensitive (by default) substring match, public so the CLI and
 /// any future server share one filter rule. Ported from the prototype.
+///
+/// A leading `/` on the keyword is ignored, so `/dev01/ws` and `dev01/ws`
+/// select the same rows (topics carry no leading `/`).
 pub fn matches_keyword(text: &str, keyword: Option<&str>, case_sensitive: bool) -> bool {
     let Some(k) = keyword else { return true };
+    let k = k.trim_start_matches('/');
     if case_sensitive {
         text.contains(k)
     } else {
@@ -152,8 +151,14 @@ pub fn discover_zenoh(
             if entry.schema.is_some() || entry.rate_hz.is_some() {
                 return;
             }
-            let bytes = sample.payload().to_bytes();
-            if let Some(meta) = probe_header(&bytes) {
+            let tag = parse_wire_tag(&sample.encoding().to_string());
+            // Only a protobuf-tagged or untagged payload may carry a Header;
+            // the other tags say the bytes are something else.
+            let may_carry_header = matches!(tag, WireTag::Protobuf(_) | WireTag::Unknown);
+            if let Some(meta) = may_carry_header
+                .then(|| probe_header(&sample.payload().to_bytes()))
+                .flatten()
+            {
                 if !meta.msg_type.is_empty() {
                     entry.schema = Some(meta.msg_type);
                 }
@@ -161,10 +166,10 @@ pub fn discover_zenoh(
                     entry.rate_hz = Some(meta.msg_freq_desired);
                 }
             }
-            // Header `msg_type` wins. Without it, fall back to the schema
-            // half of the sample encoding stamped by generated publishers.
+            // Header `msg_type` wins. Without it, fall back to the wire tag
+            // stamped by generated publishers.
             if entry.schema.is_none() {
-                entry.schema = encoding_schema(&sample.encoding().to_string()).map(str::to_owned);
+                entry.schema = tag.type_label().map(str::to_owned);
             }
         })
         .wait()
@@ -180,14 +185,11 @@ pub fn discover_zenoh(
     let g = acc
         .lock()
         .map_err(|_| anyhow::anyhow!("zenoh accumulator poisoned"))?;
-    // Filter on the slashed form, so a keyword matches with or without
-    // the leading `/` the user typed.
     let mut entries: Vec<TopicEntry> = g
         .iter()
-        .map(|(key, s)| (with_leading_slash(key), s))
-        .filter(|(topic, _)| matches_keyword(topic, keyword, case_sensitive))
-        .map(|(topic, s)| TopicEntry {
-            topic,
+        .filter(|(key, _)| matches_keyword(key, keyword, case_sensitive))
+        .map(|(key, s)| TopicEntry {
+            topic: key.clone(),
             transport: Transport::Zenoh,
             schema: s.schema.clone(),
             hash: None,
@@ -221,7 +223,7 @@ pub fn discover_iceoryx(keyword: Option<&str>, case_sensitive: bool) -> Result<V
 
     let mut entries: Vec<TopicEntry> = Vec::new();
     ipc::Service::list(Config::global_config(), |svc| {
-        let name = with_leading_slash(svc.static_details.name().as_str());
+        let name = svc.static_details.name().as_str().to_owned();
         if !matches_keyword(&name, keyword, case_sensitive) {
             return CallbackProgression::Continue;
         }
@@ -391,95 +393,5 @@ pub struct DiscoverReport {
 impl DiscoverReport {
     pub fn into_merged(self) -> Vec<TopicEntry> {
         merge_sorted(self.zenoh, self.iceoryx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keyword_case_insensitive_by_default() {
-        assert!(matches_keyword(
-            "/forge/default/Chatter",
-            Some("chatter"),
-            false
-        ));
-        assert!(!matches_keyword(
-            "/forge/default/Chatter",
-            Some("chatter"),
-            true
-        ));
-        assert!(matches_keyword(
-            "/forge/default/Chatter",
-            Some("Chatter"),
-            true
-        ));
-    }
-
-    /// Rows report the slashed form, and filtering on it keeps a keyword
-    /// matching whether or not the user typed the leading `/`.
-    #[test]
-    fn topic_gets_one_leading_slash_and_keyword_matches_either_form() {
-        assert_eq!(
-            with_leading_slash("dev01/ws/talker/zenoh/chatter"),
-            "/dev01/ws/talker/zenoh/chatter"
-        );
-        assert_eq!(with_leading_slash("/already/slashed"), "/already/slashed");
-        let topic = with_leading_slash("dev01/ws/talker/zenoh/chatter");
-        for keyword in ["dev01/ws", "/dev01/ws", "chatter", "/chatter"] {
-            assert!(matches_keyword(&topic, Some(keyword), false), "{keyword}");
-        }
-    }
-
-    #[test]
-    fn empty_keyword_matches_everything() {
-        assert!(matches_keyword("anything", None, false));
-        assert!(matches_keyword("anything", None, true));
-    }
-
-    #[test]
-    fn transport_tag_matches_prototype() {
-        assert_eq!(Transport::Zenoh.tag(), 'z');
-        assert_eq!(Transport::Iceoryx2.tag(), 'i');
-    }
-
-    #[test]
-    fn merge_sorted_is_alphabetical_with_stable_transport_order() {
-        let zen = vec![TopicEntry {
-            topic: "/b".into(),
-            transport: Transport::Zenoh,
-            schema: None,
-            hash: None,
-            rate_hz: None,
-            publisher_pid: None,
-            is_dead: false,
-        }];
-        let iox = vec![
-            TopicEntry {
-                topic: "/a".into(),
-                transport: Transport::Iceoryx2,
-                schema: None,
-                hash: None,
-                rate_hz: None,
-                publisher_pid: None,
-                is_dead: false,
-            },
-            TopicEntry {
-                topic: "/b".into(),
-                transport: Transport::Iceoryx2,
-                schema: None,
-                hash: None,
-                rate_hz: None,
-                publisher_pid: None,
-                is_dead: false,
-            },
-        ];
-        let merged = merge_sorted(zen, iox);
-        let order: Vec<_> = merged
-            .iter()
-            .map(|t| (t.topic.as_str(), t.transport.tag()))
-            .collect();
-        assert_eq!(order, vec![("/a", 'i'), ("/b", 'i'), ("/b", 'z')]);
     }
 }

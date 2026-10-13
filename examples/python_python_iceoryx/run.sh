@@ -36,21 +36,24 @@ export SB_CONFIG="$SB_HOME/sb.config.yml"
 PUBBER="$EXAMPLE_DIR/pubber"
 SUBBER="$EXAMPLE_DIR/subber"
 
-"$SB" ws create demo
+# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+mkdir -p "$SB_HOME/ws"
+( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
 
 # Compile the iox2-flat std vault so the generated pub/sub files can
 # importlib-load `ImageStamped.py` from the absolute path they bake in.
-"$SB" message compile --iox2 std/ImageStamped
+"$SB" message compile --iox2 ros2/std/ImageStamped
 
 "$SB" init --python "$PUBBER" --force >/dev/null
 "$SB" init --python "$SUBBER" --force >/dev/null
 
 # Same trick as the Zenoh example: subscriber points at the publisher's
 # fully-qualified topic so both ends land on the same iceoryx2 service.
-TOPIC_FULL="/dev01/demo/pubber/iox2/frame"
-( cd "$PUBBER" && "$SB" pub add -m std/ImageStamped frame --iox2 --force )
-( cd "$SUBBER" && "$SB" sub add -m std/ImageStamped "$TOPIC_FULL" --iox2 --force )
+# `--key` is used verbatim.
+TOPIC_FULL="dev01/demo/pubber/iox2/frame"
+( cd "$PUBBER" && "$SB" pub add -m ros2/std/ImageStamped frame --iox2 --force )
+( cd "$SUBBER" && "$SB" sub add -m ros2/std/ImageStamped --key "$TOPIC_FULL" --iox2 --force )
 
 # Spawn subber first so the service is open before pubber starts spraying.
 SUB_LOG="$SB_HOME/subber.log"

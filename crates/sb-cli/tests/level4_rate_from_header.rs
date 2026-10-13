@@ -49,7 +49,7 @@ fn rate_and_schema_lift_from_single_stamped_sample() {
     let handle = thread::spawn(move || {
         let session = zenoh::open(zenoh::Config::default()).wait().unwrap();
         let pubr = session.declare_publisher(key).wait().unwrap();
-        let payload = build_stamped("ros2/std/StringStamped", 10.0, "/test/lvl4/rate/stamped");
+        let payload = build_stamped("ros2/std/StringStamped", 10.0, "test/lvl4/rate/stamped");
         while !stop_t.load(Ordering::Relaxed) {
             let _ = pubr.put(payload.clone()).wait();
             thread::sleep(Duration::from_millis(50));
@@ -65,7 +65,7 @@ fn rate_and_schema_lift_from_single_stamped_sample() {
 
     let row = entries
         .iter()
-        .find(|e| e.topic == format!("/{key}"))
+        .find(|e| e.topic == key)
         .unwrap_or_else(|| panic!("publisher not seen: {entries:#?}"));
     assert_eq!(row.transport, Transport::Zenoh);
     assert_eq!(row.schema.as_deref(), Some("ros2/std/StringStamped"));

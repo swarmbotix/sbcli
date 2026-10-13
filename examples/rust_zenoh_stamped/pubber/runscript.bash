@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# /home/el/Dropbox/Projects/swarmbotix/examples/rust_zenoh_stamped/pubber/runscript.bash
+# /mnt/A4CC6455CC6423B0/Github/swarmbotix_products/sbcli_forge/sbcli/examples/rust_zenoh_stamped/pubber/runscript.bash
 # Invoked by `sb run` / `sb up`, or directly from any cwd. The `cd`
 # below pins the working dir to this script's directory (= module
 # root) so the commands below always run from the right place.
@@ -65,5 +65,5 @@ fi
 # flutter run -d linux                              # Flutter
 # : 'no command — Unity launches from the editor'   # Unity
 
-echo "TODO: edit /home/el/Dropbox/Projects/swarmbotix/examples/rust_zenoh_stamped/pubber/runscript.bash to launch this module" >&2
+echo "TODO: edit /mnt/A4CC6455CC6423B0/Github/swarmbotix_products/sbcli_forge/sbcli/examples/rust_zenoh_stamped/pubber/runscript.bash to launch this module" >&2
 exit 1

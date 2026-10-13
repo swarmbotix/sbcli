@@ -94,8 +94,7 @@ impl TopicOverrides {
     }
 }
 {% else %}
-// Foreign topic — the user passed a leading-slash path verbatim, so the
-// wire form is fixed and per-segment overrides don't apply (the path
+// Verbatim wire key (`key:` entry): overrides do not apply (the path
 // belongs to whichever module owns it). Use `open()`.
 pub const SERVICE: &str = "{{ topic_iox }}";
 {% endif %}

@@ -24,23 +24,24 @@ use std::time::Duration;
 
 use iceoryx2::prelude::*;
 use sb_listen::{
-    DecodeContext, FrameIter, FramePayload, Iox2Field, Iox2Lookup, Iox2Scalar, Iox2Struct,
-    Iox2Type, decode_frame_dynamic, listen_iceoryx,
+    DecodeContext, FbLookup, FrameIter, FramePayload, Iox2Field, Iox2Lookup, Iox2Scalar,
+    Iox2Struct, Iox2Type, decode_frame_dynamic, listen_iceoryx,
 };
 
 #[test]
 #[ignore = "live iceoryx2 — run with --ignored"]
 fn sb_topic_pub_round_trips_through_iceoryx2() {
-    // Fully-qualified topic — iox2 service names allow `/`-prefixed
-    // paths, but the CLI trims the leading `/` before opening, so both
-    // forms target the same service. Use the fully-qualified form to
-    // mirror the user-facing call.
-    let topic_full = "/test/lvl4/roundtrip/iox2/payload";
+    // The subscriber opens the canonical service name (the wire key, no
+    // leading `/`); the CLI is handed the 0.4.x slashed spelling. The
+    // round-trip only closes if `sb topic pub` drops the leading `/`
+    // before creating the service.
+    let key = "test/lvl4/roundtrip/iox2/payload";
+    let slashed_input = "/test/lvl4/roundtrip/iox2/payload";
     let (tx, rx) = mpsc::channel();
     let sub_handle = thread::spawn(move || {
         // Blocks until `sb topic pub` has created the `[u8]` service, then
         // opens it with that payload type.
-        let mut sub = match listen_iceoryx(topic_full) {
+        let mut sub = match listen_iceoryx(key) {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.send(Err(format!("listen_iceoryx: {e}")));
@@ -74,7 +75,7 @@ fn sb_topic_pub_round_trips_through_iceoryx2() {
                 "pub",
                 "--transport",
                 "iceoryx2",
-                topic_full,
+                slashed_input,
                 "deadbeef",
             ])
             .output()
@@ -84,6 +85,11 @@ fn sb_topic_pub_round_trips_through_iceoryx2() {
             "sb topic pub failed: stdout={:?} stderr={:?}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(&format!(" on {key} via ")),
+            "echo should name the slash-less wire key: {stdout}"
         );
         if let Ok(result) = rx.recv_timeout(Duration::from_millis(500)) {
             received = Some(result);
@@ -202,6 +208,7 @@ fn listen_iceoryx_opens_typed_service_and_decodes_it() {
         no_data: false,
         keep_bytes: false,
         config_schema: None,
+        flatbuffers: FbLookup::default(),
     };
     let frame = decode_frame_dynamic("iceoryx2", name, &received, false, None, &ctx);
     assert_eq!(frame.schema.as_deref(), Some("test/lvl4/MiniStamped"));

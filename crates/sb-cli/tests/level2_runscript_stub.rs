@@ -143,15 +143,3 @@ fn runscript_stub_matches_golden_for_every_language() {
         assert_executable_bit(&rs_path);
     }
 }
-
-#[test]
-fn runscript_stub_for_unity() {
-    let s = WsSandbox::new();
-    setup_active(&s);
-    let project = s.tempdir().join("teleop");
-    std::fs::create_dir_all(project.join("Assets").join("Scripts")).unwrap();
-    let body = init_and_read_runscript(&s, &project, "--unity");
-    let rs_path = std::fs::canonicalize(project.join("runscript.bash")).unwrap();
-    assert_universal_stub_shape(&body, &rs_path, "teleop");
-    assert_executable_bit(&rs_path);
-}

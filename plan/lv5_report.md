@@ -1,6 +1,6 @@
 # L5 — Launch & Production (running report)
 
-Last updated: 2026-08-06
+Last updated: 2026-10-13
 
 ---
 
@@ -208,6 +208,10 @@ path is resolved through the active workspace's `flow.yaml`, so both
 verbs work from any cwd — matching the cam_gige_ht-style "module owns
 its own launch + teardown" pattern.
 
+> Test suite pruned in 0.5.0 to the critical set; the files named below
+> that no longer exist were removed then. See
+> [plan/lv4_report.md](lv4_report.md) 0.5.0 note.
+
 | # | "Done when" / TDD item | Verification | Status |
 |---|---|---|---|
 | DW1 | 2-module hello-world round-trips via `sb up`; observable via `sb topic list`; `sb down` cleans up | [level5_e2e_hello_world.rs](../crates/sb-cli/tests/level5_e2e_hello_world.rs) → [examples/level5_hello_world/run.sh](../examples/level5_hello_world/run.sh) | ✅ |
@@ -334,9 +338,9 @@ The smoke covers every L1..L5 surface in one go:
 | L2 | `sb ws create demo && sb ws set demo` | workspace dir + active marker |
 | L2 | `sb init --rust <pubber> --force`, same for subber | sb.dev.yml + runscript.bash + flow.yaml entry |
 | L3 | `sb pub add -m ros2/std/StringStamped hello --zenoh --force` | swarmbotix_io/publishers/hello.rs scaffolded |
-| L3 | `sb sub add -m ros2/std/StringStamped /dev01/demo/pubber/hello --zenoh --force` | swarmbotix_io/subscribers/hello.rs scaffolded |
+| L3 | `sb sub add -m ros2/std/StringStamped --key dev01/demo/pubber/hello --zenoh --force` | swarmbotix_io/subscribers/hello.rs scaffolded |
 | L5 | `sb up` | tmux session sb-demo with 2 windows; both runscripts spawn |
-| L4 | `sb topic list --transport zenoh --json -t 1.0` | `/dev01/demo/pubber/hello` discovered |
+| L4 | `sb topic list --transport zenoh --json -t 1.0` | `dev01/demo/pubber/hello` discovered |
 | (live) | subber log via `tee` | `RX_HELLO data=HELLO_FROM_L5` within 12 s |
 | L5 | `sb down` | `tmux has-session -t sb-demo` returns non-zero |
 | L5 | `sb gopro --all` | both modules get a clean sb.prd.yml; greps confirm no `/home/` or `/Users/` |

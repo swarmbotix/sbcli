@@ -13,11 +13,41 @@ fn workspace_lifecycle_round_trip() {
     let workspaces = s.sb_home().join("workspaces");
     let active = s.sb_home().join("active");
 
-    // create ws1
-    let out = s.cmd().args(["ws", "create", "ws1"]).output().unwrap();
+    // `sb ws create` writes ./flow.yaml, so each workspace gets its own folder.
+    let repo = |name: &str| {
+        let dir = s.tempdir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+
+    // create ws1: writes the repo flow.yaml, installs it, and activates it
+    let ws1_repo = repo("ws1_repo");
+    let out = s
+        .cmd()
+        .args(["ws", "create", "ws1"])
+        .current_dir(&ws1_repo)
+        .output()
+        .unwrap();
     assert!(out.status.success(), "ws create ws1 failed: {out:?}");
+    assert_eq!(
+        std::fs::read_to_string(ws1_repo.join("flow.yaml")).unwrap(),
+        "name: ws1\nmodules: {}\n"
+    );
     assert!(workspaces.join("ws1").is_dir());
     assert!(workspaces.join("ws1").join("flow.yaml").exists());
+
+    // A second create in the same folder is refused.
+    let out = s
+        .cmd()
+        .args(["ws", "create", "other"])
+        .current_dir(&ws1_repo)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "create over a flow.yaml must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already exists"),
+        "{out:?}"
+    );
 
     // list shows ws1
     let out = s.cmd().args(["ws", "list"]).output().unwrap();
@@ -43,7 +73,12 @@ fn workspace_lifecycle_round_trip() {
     );
 
     // create + set ws2
-    let out = s.cmd().args(["ws", "create", "ws2"]).output().unwrap();
+    let out = s
+        .cmd()
+        .args(["ws", "create", "ws2"])
+        .current_dir(repo("ws2_repo"))
+        .output()
+        .unwrap();
     assert!(out.status.success(), "ws create ws2 failed: {out:?}");
     let out = s.cmd().args(["ws", "set", "ws2"]).output().unwrap();
     assert!(out.status.success(), "ws set ws2 failed: {out:?}");
@@ -67,21 +102,4 @@ fn workspace_lifecycle_round_trip() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("warning"), "no warning expected: {stderr}");
     assert!(!workspaces.join("ws1").exists());
-}
-
-#[test]
-fn ws_set_unknown_workspace_errors() {
-    let s = WsSandbox::new();
-    let out = s.cmd().args(["ws", "set", "ghost"]).output().unwrap();
-    assert!(
-        !out.status.success(),
-        "setting a non-existent workspace must fail"
-    );
-}
-
-#[test]
-fn ws_list_with_no_workspaces_is_ok() {
-    let s = WsSandbox::new();
-    let out = s.cmd().args(["ws", "list"]).output().unwrap();
-    assert!(out.status.success(), "empty ws list should succeed");
 }

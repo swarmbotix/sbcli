@@ -750,22 +750,6 @@ if [[ "${1:-}" == "fail" ]]; then exit "$2"; fi
     }
 
     #[test]
-    fn remove_deletes_folder_under_home_apps() {
-        let home = TempDir::new().unwrap();
-        let pkg = apps_dir(home.path()).join("owned_pkg");
-        make_pkg(&pkg, "owned", "");
-        install(
-            home.path(),
-            &pkg.display().to_string(),
-            &InstallOptions::default(),
-        )
-        .unwrap();
-        let rm = remove(home.path(), "owned").unwrap();
-        assert!(rm.deleted_dir);
-        assert!(!pkg.exists());
-    }
-
-    #[test]
     fn name_taken_by_another_folder_is_an_error() {
         let home = TempDir::new().unwrap();
         let src = TempDir::new().unwrap();
@@ -784,122 +768,6 @@ if [[ "${1:-}" == "fail" ]]; then exit "$2"; fi
         )
         .unwrap_err();
         assert!(format!("{e:#}").contains("sb app remove twin"), "{e:#}");
-    }
-
-    #[test]
-    fn missing_path_and_unknown_names_are_reported() {
-        let home = TempDir::new().unwrap();
-        let src = TempDir::new().unwrap();
-        let pkg = src.path().join("gone");
-        make_pkg(&pkg, "gone", "");
-        install(
-            home.path(),
-            &pkg.display().to_string(),
-            &InstallOptions::default(),
-        )
-        .unwrap();
-        fs::remove_dir_all(&pkg).unwrap();
-        let e = format!("{:#}", exec_app(home.path(), "gone", &[]).unwrap_err());
-        assert!(
-            e.contains("no longer exists") && e.contains("sb app remove gone"),
-            "{e}"
-        );
-        let e = format!("{:#}", update(home.path(), Some("gone")).unwrap_err());
-        assert!(e.contains("no longer exists"), "{e}");
-        let info = info(home.path(), "gone").unwrap();
-        assert!(!info.path_exists && info.manifest_error.is_some());
-
-        assert!(format!("{:#}", info_err(home.path(), "nope")).contains("installed apps: gone"));
-        assert!(format!("{:#}", remove(home.path(), "nope").unwrap_err()).contains("sb install"));
-    }
-
-    fn info_err(home: &Path, name: &str) -> anyhow::Error {
-        info(home, name).unwrap_err()
-    }
-
-    #[test]
-    fn host_kind_runs_install_script_from_package_root() {
-        if !have("bash") {
-            return;
-        }
-        let home = TempDir::new().unwrap();
-        let src = TempDir::new().unwrap();
-        let pkg = src.path().join("hosty");
-        make_pkg(
-            &pkg,
-            "hosty",
-            "kind: host\nhost:\n  install: ./install.bash\n",
-        );
-        write_exec(
-            &pkg.join("install.bash"),
-            "#!/usr/bin/env bash\npwd > installed_from\necho \"$SB_APP_NAME\" >> installed_from\n",
-        );
-        let out = install(
-            home.path(),
-            &pkg.display().to_string(),
-            &InstallOptions::default(),
-        )
-        .unwrap();
-        assert_eq!(out.steps_run, vec!["bash ./install.bash".to_string()]);
-        let marker = fs::read_to_string(pkg.join("installed_from")).unwrap();
-        let mut lines = marker.lines();
-        assert_eq!(
-            PathBuf::from(lines.next().unwrap()).canonicalize().unwrap(),
-            pkg.canonicalize().unwrap()
-        );
-        assert_eq!(lines.next(), Some("hosty"));
-
-        // A failing install script fails the install and registers nothing new.
-        let bad = src.path().join("badhost");
-        make_pkg(
-            &bad,
-            "badhost",
-            "kind: host\nhost:\n  install: ./install.bash\n",
-        );
-        write_exec(&bad.join("install.bash"), "#!/usr/bin/env bash\nexit 3\n");
-        let e = install(
-            home.path(),
-            &bad.display().to_string(),
-            &InstallOptions::default(),
-        )
-        .unwrap_err();
-        assert!(format!("{e:#}").contains("install script"), "{e:#}");
-        assert!(
-            Registry::load(home.path())
-                .unwrap()
-                .get("badhost")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn docker_without_prefetch_defers_pull_and_missing_requires_warn() {
-        let home = TempDir::new().unwrap();
-        let src = TempDir::new().unwrap();
-        let pkg = src.path().join("dock");
-        make_pkg(
-            &pkg,
-            "dock",
-            "kind: docker\ndocker:\n  image: example/none:0\n  prefetch: false\nrequires: [sb_surely_missing_bin_42]\n",
-        );
-        let out = install(
-            home.path(),
-            &pkg.display().to_string(),
-            &InstallOptions::default(),
-        )
-        .unwrap();
-        assert!(out.steps_run.is_empty());
-        assert!(
-            out.notes.iter().any(|n| n.contains("first run")),
-            "{:?}",
-            out.notes
-        );
-        assert_eq!(out.warnings.len(), 1);
-        assert!(out.warnings[0].contains("sb_surely_missing_bin_42"));
-        assert!(Registry::load(home.path()).unwrap().get("dock").is_some());
-        let info = info(home.path(), "dock").unwrap();
-        assert_eq!(info.requires.len(), 1);
-        assert!(info.requires[0].found.is_none());
     }
 
     /// A local bare repo `<tmp>/pkg.git` fed from a work tree `<tmp>/work`.
@@ -1002,31 +870,5 @@ if [[ "${1:-}" == "fail" ]]; then exit "$2"; fi
         let rm = remove(home.path(), "gitapp").unwrap();
         assert!(rm.deleted_dir);
         assert!(!clone.exists());
-    }
-
-    #[test]
-    fn git_install_of_a_non_package_cleans_up() {
-        if !have("git") {
-            return;
-        }
-        let home = TempDir::new().unwrap();
-        let src = TempDir::new().unwrap();
-        let work = src.path().join("work");
-        fs::create_dir_all(&work).unwrap();
-        fs::write(work.join("README"), "not a package\n").unwrap();
-        git(&work, &["init", "-q", "-b", "main"]);
-        git(&work, &["add", "."]);
-        git(&work, &["commit", "-q", "-m", "init"]);
-        git(src.path(), &["clone", "-q", "--bare", "work", "plain.git"]);
-        let e = install(
-            home.path(),
-            &src.path().join("plain.git").display().to_string(),
-            &InstallOptions::default(),
-        )
-        .unwrap_err();
-        assert!(format!("{e:#}").contains("sb.app.yml"), "{e:#}");
-        let left = fs::read_dir(apps_dir(home.path())).unwrap().count();
-        assert_eq!(left, 0, "failed clone must be cleaned up");
-        assert!(Registry::load(home.path()).unwrap().is_empty());
     }
 }

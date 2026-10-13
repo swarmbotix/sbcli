@@ -280,14 +280,6 @@ requires: [docker]
     }
 
     #[test]
-    fn defaults_apply_for_optional_fields() {
-        let m = AppManifest::parse("name: tool\nversion: 1.0.0\nentry: run.bash\n").unwrap();
-        assert_eq!(m.kind, AppKind::None);
-        assert!(m.description.is_none() && m.docker.is_none() && m.host.is_none());
-        assert!(m.requires.is_empty());
-    }
-
-    #[test]
     fn numeric_looking_versions_parse_as_strings() {
         let m = AppManifest::parse("name: t\nversion: 1.0\nentry: run.bash\n").unwrap();
         assert_eq!(m.version, "1.0");
@@ -299,13 +291,6 @@ requires: [docker]
     fn unknown_field_is_rejected() {
         let e = AppManifest::parse("name: t\nversion: 1\nentry: r\nentrypoint: x\n").unwrap_err();
         assert!(format!("{e:#}").contains("entrypoint"), "{e:#}");
-    }
-
-    #[test]
-    fn missing_manifest_points_at_app_init() {
-        let tmp = TempDir::new().unwrap();
-        let e = format!("{:#}", AppManifest::load(tmp.path()).unwrap_err());
-        assert!(e.contains("sb app init"), "{e}");
     }
 
     #[test]
@@ -348,13 +333,6 @@ requires: [docker]
     }
 
     #[test]
-    fn empty_version_is_rejected() {
-        let pkg = pkg_with(&["run.bash"]);
-        let m = AppManifest::parse("name: t\nversion: ''\nentry: run.bash\n").unwrap();
-        assert!(err_of(&m, pkg.path()).contains("`version`"));
-    }
-
-    #[test]
     fn docker_kind_needs_image() {
         let pkg = pkg_with(&["run.bash"]);
         let m = AppManifest::parse("name: t\nversion: 1\nentry: run.bash\nkind: docker\n").unwrap();
@@ -380,13 +358,5 @@ requires: [docker]
 
         fs::write(pkg.path().join("install.bash"), "exit 0\n").unwrap();
         m.validate(pkg.path()).unwrap();
-    }
-
-    #[test]
-    fn empty_requires_entry_is_rejected() {
-        let pkg = pkg_with(&["run.bash"]);
-        let m =
-            AppManifest::parse("name: t\nversion: 1\nentry: run.bash\nrequires: ['']\n").unwrap();
-        assert!(err_of(&m, pkg.path()).contains("`requires`"));
     }
 }

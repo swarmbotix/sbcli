@@ -80,13 +80,6 @@ impl Sandbox {
             .join("message_definitions")
     }
 
-    /// Codegen output root for the sandbox's active style.
-    pub fn targets_dir(&self) -> PathBuf {
-        self.messages_root()
-            .join(SANDBOX_STYLE)
-            .join("message_targets")
-    }
-
     /// `Command::new(sb_bin()).envs(sandbox.env())` — sets SB_CONFIG (which
     /// carries `sb_home_dir`) plus HOME for Unix.
     pub fn cmd(&self) -> Command {
@@ -105,16 +98,6 @@ impl Sandbox {
 
     pub fn home(&self) -> &Path {
         self.home.path()
-    }
-
-    /// Replace the sandbox config with `body`, re-pinning `sb_home_dir`.
-    ///
-    /// Tests that need a specific config (say, protoc set but flatc absent)
-    /// must go through this rather than writing `config_path` directly — a
-    /// bare overwrite drops the pin and the command under test then resolves
-    /// against the developer's real `~/.swarmbotix/`.
-    pub fn write_config(&self, body: &str) {
-        std::fs::write(&self.config_path, pin_sb_home(body, &self.sb_home())).unwrap();
     }
 }
 
@@ -246,21 +229,6 @@ pub fn find_bash() -> Option<PathBuf> {
 /// True if a usable bash exists. Generated `runscript.bash` files need one.
 pub fn bash_available() -> bool {
     find_bash().is_some()
-}
-
-/// Spawn `bash <script>`, with the interpreter resolved by [`find_bash`] and
-/// the script path normalized to forward slashes.
-///
-/// The normalization matters independently of which bash is chosen: a native
-/// `C:\Users\…` argument reaches bash with each backslash read as an escape,
-/// arriving mangled as `C:Usershylee…`. No-op on Unix.
-///
-/// Panics if no usable bash is present — guard with [`bash_available`].
-pub fn bash_script(script: &Path) -> Command {
-    let bash = find_bash().expect("no usable bash — guard the test with bash_available()");
-    let mut c = Command::new(bash);
-    c.arg(script.display().to_string().replace('\\', "/"));
-    c
 }
 
 /// True if the merged config exposes a working `protoc` path.

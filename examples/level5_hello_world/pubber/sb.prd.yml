@@ -2,5 +2,5 @@ module: pubber
 publishers:
 - name: hello
   topic: hello
-  type: std/StringStamped
+  type: ros2/std/StringStamped
   transport: zenoh

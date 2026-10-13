@@ -1,6 +1,6 @@
 # L4 — Topic Introspection (running report)
 
-Last updated: 2026-10-12
+Last updated: 2026-10-13
 
 ---
 
@@ -102,6 +102,43 @@ the subscriber polls — needed for the one-shot CLI invocation case.
 > `sb.dev.yml`, found through the active workspace's `flow.yaml`, types
 > frames from publishers that stamp neither an encoding nor a Header type
 > (older templates), and fills the same gap in `sb topic list`'s Zenoh rows.
+
+> **0.5.0: no leading slash anywhere.** The canonical fully-qualified topic
+> is now `device/ws/module/transport/topic`, the same string both transports
+> carry (Zenoh rejects a leading `/` in key expressions). `sb topic list`,
+> `sb topic listen`, `sb topic pub`, `sb list` and `sb service init` all
+> print that form; `listen` and `pub` still accept a leading `/` on input and
+> drop it, and `-k` ignores one in the keyword. The owned-versus-verbatim
+> marker that the slash used to carry in `sb.dev.yml` is an explicit field
+> instead: `topic: <bare>` is prefixed at codegen and may not contain `/`,
+> `key: <wire key>` is used as is (`sb pub add --key`, `sb sub add --key`,
+> `sb pub edit --key`). A legacy `topic: /x/y` reads as `key: x/y` with the
+> identical wire key, `sb doctor` warns (`topics` check), and the next write
+> of the file rewrites it. This reverses 0.4.2's slashed `sb topic list`
+> output.
+
+> **0.5.0: workspaces install from a repository; `sb io` replaces `sb pub` /
+> `sb sub`.** A workspace is now a `flow.yaml` committed at a repository root
+> (relative module paths, optional `name:`, `messages:`, `up: false`), and
+> `sb install <git-url | path>` installs it when the root holds `flow.yaml`
+> rather than `sb.app.yml`: it writes the installed copy under
+> `~/.swarmbotix/workspaces/<name>/` (absolute paths plus `source:`), imports
+> and compiles `messages:`, and regenerates every module's io. Why: the old
+> registry and `sb.dev.yml` (absolute `root:`) were host-specific and could not
+> be committed, so every consumer rebuilt a workspace by hand; a relative,
+> committed source of truth plus a derived installed copy reproduces it on any
+> host in one command. `sb io` puts publishers, subscribers, and services in one
+> name space per module (the name is the handle `edit` / `rm` take) and adds
+> `encoding: proto | fb | raw` for Zenoh entries. For L4 this means
+> `sb topic list` / `listen` read `application/flatbuffers;<type>`,
+> `text/*`, and `application/json` tags besides protobuf, and the listen JSON
+> `encoding` gains `"flatbuffers"` and `"text"`.
+> The same release pruned the test suite from 595 to 162 tests, keeping the
+> critical set: the byte-exact codegen goldens, one happy path per command,
+> the config contracts, the live transport round trips, and the
+> compatibility and data-loss guards. Test files outside those criteria were
+> deleted, so the earlier level reports that name them (lv1, lv2, lv3, lv5)
+> point back to this note.
 
 ### 2. True L3 → discovery end-to-end example
 

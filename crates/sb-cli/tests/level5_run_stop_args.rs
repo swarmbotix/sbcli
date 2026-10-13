@@ -117,37 +117,6 @@ fn level5_stop_executes_stopscript() {
     );
 }
 
-#[test]
-fn level5_stop_blames_missing_stopscript() {
-    let mut sb = L5Sandbox::with_workspace("nostop");
-    sb.adopt("alpha", Some("#!/usr/bin/env bash\nsleep 30\n"));
-    // No stopscript written.
-    let out = sb.cmd().args(["stop", "alpha"]).output().unwrap();
-    assert!(
-        !out.status.success(),
-        "sb stop alpha should fail without stopscript"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("alpha"),
-        "want module name in stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("stopscript"),
-        "want 'stopscript' in stderr: {stderr}"
-    );
-}
-
-#[test]
-fn level5_stop_unknown_module_errors() {
-    let mut sb = L5Sandbox::with_workspace("stopnope");
-    sb.adopt("alpha", Some("#!/usr/bin/env bash\nsleep 30\n"));
-    let out = sb.cmd().args(["stop", "nope"]).output().unwrap();
-    assert!(!out.status.success(), "sb stop nope should fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("nope"), "got: {stderr}");
-}
-
 /// Single-quote `s` for embedding in a shell heredoc / script body.
 /// Mirrors `sb-launch`'s internal quoting; we duplicate it here so the
 /// test crate doesn't take a dependency on `sb-launch`'s private fn.

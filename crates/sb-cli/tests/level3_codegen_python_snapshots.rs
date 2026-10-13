@@ -7,7 +7,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use sb_codegen::{CodegenInput, Kind, render};
-use sb_core::{Language, Transport};
+use sb_core::{Encoding, Language, TopicRef, Transport};
 use sb_vault::MessageName;
 
 use common::assert_or_bless;
@@ -21,7 +21,7 @@ fn input<'a>(
     kind: Kind,
     transport: Transport,
     name: &'a str,
-    topic: &'a str,
+    topic: &'a TopicRef,
     msg: &'a MessageName,
 ) -> CodegenInput<'a> {
     CodegenInput {
@@ -32,7 +32,9 @@ fn input<'a>(
         kind,
         name,
         topic,
-        msg_type: msg,
+        msg_type: Some(msg),
+        encoding: Encoding::Proto,
+        mime: None,
         transport,
         message_targets: Path::new(FIXTURE_TARGETS),
     }
@@ -41,11 +43,12 @@ fn input<'a>(
 #[test]
 fn python_publisher_zenoh_snapshot() {
     let msg = MessageName::parse("ros2/std/StringStamped").unwrap();
+    let topic = TopicRef::Owned("hello".into());
     let r = render(&input(
         Kind::Publisher,
         Transport::Zenoh,
         "hello",
-        "hello",
+        &topic,
         &msg,
     ))
     .unwrap();
@@ -56,11 +59,12 @@ fn python_publisher_zenoh_snapshot() {
 #[test]
 fn python_subscriber_zenoh_snapshot() {
     let msg = MessageName::parse("ros2/std/StringStamped").unwrap();
+    let topic = TopicRef::Owned("hello".into());
     let r = render(&input(
         Kind::Subscriber,
         Transport::Zenoh,
         "hello",
-        "hello",
+        &topic,
         &msg,
     ))
     .unwrap();
@@ -71,11 +75,12 @@ fn python_subscriber_zenoh_snapshot() {
 #[test]
 fn python_publisher_iceoryx_snapshot() {
     let msg = MessageName::parse("ros2/std/ImageStamped").unwrap();
+    let topic = TopicRef::Owned("image_raw".into());
     let r = render(&input(
         Kind::Publisher,
         Transport::Iceoryx2,
         "image_raw",
-        "image_raw",
+        &topic,
         &msg,
     ))
     .unwrap();
@@ -86,11 +91,12 @@ fn python_publisher_iceoryx_snapshot() {
 #[test]
 fn python_subscriber_iceoryx_snapshot() {
     let msg = MessageName::parse("ros2/std/ImageStamped").unwrap();
+    let topic = TopicRef::Owned("image_raw".into());
     let r = render(&input(
         Kind::Subscriber,
         Transport::Iceoryx2,
         "image_raw",
-        "image_raw",
+        &topic,
         &msg,
     ))
     .unwrap();

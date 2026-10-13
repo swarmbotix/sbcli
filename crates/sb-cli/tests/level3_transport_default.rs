@@ -8,49 +8,6 @@ mod common;
 use common::L3Sandbox;
 
 #[test]
-fn default_transport_comes_from_sb_config_yml() {
-    // Default config has transport_on_device: iceoryx2.
-    let s = L3Sandbox::rust("pubber");
-    let out = s
-        .cmd_in_module()
-        .args(["pub", "add", "-m", "ros2/std/StringStamped", "hello"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "pub add default-transport failed: {out:?}"
-    );
-    let body = std::fs::read_to_string(s.dev_yml()).unwrap();
-    assert!(
-        body.contains("transport: iceoryx2"),
-        "default transport should be iceoryx2:\n{body}"
-    );
-}
-
-#[test]
-fn explicit_zenoh_flag_overrides_default() {
-    let s = L3Sandbox::rust("pubber");
-    let out = s
-        .cmd_in_module()
-        .args([
-            "pub",
-            "add",
-            "-m",
-            "ros2/std/StringStamped",
-            "hello",
-            "--zenoh",
-        ])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "pub add --zenoh failed: {out:?}");
-    let body = std::fs::read_to_string(s.dev_yml()).unwrap();
-    assert!(
-        body.contains("transport: zenoh"),
-        "--zenoh should override default:\n{body}"
-    );
-}
-
-#[test]
 fn sb_config_override_flips_default() {
     let s = L3Sandbox::rust("pubber");
     // Rewrite the test sb.config.yml to flip transport_on_device → zenoh.

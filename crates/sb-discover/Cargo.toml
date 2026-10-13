@@ -19,6 +19,3 @@ serde_yaml = { workspace = true }
 prost = { workspace = true }
 zenoh = { workspace = true }
 iceoryx2 = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

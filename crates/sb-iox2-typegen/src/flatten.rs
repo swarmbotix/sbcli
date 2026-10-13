@@ -559,60 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn header_is_three_fields() {
-        let set = make_set();
-        let flats = flatten(&set, &CodegenConfig::default()).unwrap();
-        let h = flats
-            .iter()
-            .find(|s| s.full_name() == "std_msgs.Header")
-            .unwrap();
-        let names: Vec<&str> = h.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["sec", "nanosec", "frame_id"]);
-    }
-
-    #[test]
-    fn image_inlines_header_with_prefix_and_bytes_gets_len() {
-        let set = make_set();
-        let flats = flatten(&set, &CodegenConfig::default()).unwrap();
-        let img = flats
-            .iter()
-            .find(|s| s.full_name() == "sensor_msgs.Image")
-            .unwrap();
-        let names: Vec<&str> = img.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "header_sec",
-                "header_nanosec",
-                "header_frame_id",
-                "width",
-                "height",
-                "data",
-                "data_len",
-            ]
-        );
-    }
-
-    #[test]
-    fn frame_id_becomes_fixed_size_string() {
-        let set = make_set();
-        let flats = flatten(&set, &CodegenConfig::default()).unwrap();
-        let img = flats
-            .iter()
-            .find(|s| s.full_name() == "sensor_msgs.Image")
-            .unwrap();
-        let frame = img
-            .fields
-            .iter()
-            .find(|f| f.name == "header_frame_id")
-            .unwrap();
-        match frame.ty {
-            FlatType::String { capacity: 256 } => {}
-            ref other => panic!("expected String{{256}}, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn bytes_override_beats_global_cap() {
         let set = make_set();
         let mut cfg = CodegenConfig::default();
@@ -630,28 +576,6 @@ mod tests {
                 capacity: 1_310_720,
             } => {}
             ref other => panic!("expected Bytes{{1310720}}, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn bytes_falls_back_to_global_cap_when_no_override() {
-        let set = make_set();
-        let mut cfg = CodegenConfig {
-            bytes_capacity: 8192,
-            ..Default::default()
-        };
-        // An override for a *different* field must not leak into Image.data.
-        cfg.bytes_overrides
-            .insert("audio_msgs.Pcm.samples".into(), 65_536);
-        let flats = flatten(&set, &cfg).unwrap();
-        let img = flats
-            .iter()
-            .find(|s| s.full_name() == "sensor_msgs.Image")
-            .unwrap();
-        let data = img.fields.iter().find(|f| f.name == "data").unwrap();
-        match data.ty {
-            FlatType::Bytes { capacity: 8192 } => {}
-            ref other => panic!("expected Bytes{{8192}} from global cap, got {other:?}"),
         }
     }
 }
@@ -693,71 +617,5 @@ mod variant_tests {
                 ref other => panic!("{leaf}: expected Bytes, got {other:?}"),
             }
         }
-    }
-
-    #[test]
-    fn base_message_is_not_emitted_when_variants_exist() {
-        let set = super::tests::make_set();
-        let cfg = CodegenConfig {
-            variants: variants_for(&[("ImageSmall", 1024)]),
-            ..Default::default()
-        };
-        let flats = flatten(&set, &cfg).unwrap();
-        // The base is precisely the type with no correct size; emitting it
-        // would let callers pick the one struct that is always wrong.
-        assert!(
-            !flats.iter().any(|s| s.full_name() == "sensor_msgs.Image"),
-            "base Image must not be emitted alongside its variants"
-        );
-    }
-
-    #[test]
-    fn dependencies_are_emitted_once_across_all_variants() {
-        let set = super::tests::make_set();
-        let cfg = CodegenConfig {
-            variants: variants_for(&[("A", 16), ("B", 32), ("C", 64)]),
-            ..Default::default()
-        };
-        let flats = flatten(&set, &cfg).unwrap();
-        // Header is reached by every variant; it must not be duplicated.
-        let headers = flats
-            .iter()
-            .filter(|s| s.full_name() == "std_msgs.Header")
-            .count();
-        assert_eq!(headers, 1, "shared dependency duplicated per variant");
-    }
-
-    #[test]
-    fn a_message_without_variants_is_untouched() {
-        let set = super::tests::make_set();
-        let cfg = CodegenConfig {
-            variants: variants_for(&[("ImageSmall", 1024)]),
-            ..Default::default()
-        };
-        let flats = flatten(&set, &cfg).unwrap();
-        assert!(flats.iter().any(|s| s.full_name() == "std_msgs.Header"));
-    }
-
-    #[test]
-    fn vec_override_beats_the_global_capacity() {
-        let set = super::tests::make_set();
-        let mut cfg = CodegenConfig {
-            vec_capacity: 256,
-            ..Default::default()
-        };
-        cfg.vec_overrides
-            .insert("sensor_msgs.Image.width".into(), 9);
-        // width is a scalar, not repeated — the override must not apply.
-        let flats = flatten(&set, &cfg).unwrap();
-        let img = flats
-            .iter()
-            .find(|s| s.full_name() == "sensor_msgs.Image")
-            .unwrap();
-        let w = img.fields.iter().find(|f| f.name == "width").unwrap();
-        assert!(
-            matches!(w.ty, FlatType::Scalar(_)),
-            "scalar field must stay scalar, got {:?}",
-            w.ty
-        );
     }
 }

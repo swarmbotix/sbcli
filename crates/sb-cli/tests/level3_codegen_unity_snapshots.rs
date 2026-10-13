@@ -6,8 +6,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use sb_codegen::{CodegenInput, Kind, render, template_exists};
-use sb_core::{Language, Transport};
+use sb_codegen::{CodegenInput, Kind, render};
+use sb_core::{Encoding, Language, TopicRef, Transport};
 use sb_vault::MessageName;
 
 use common::assert_or_bless;
@@ -16,7 +16,7 @@ fn input<'a>(
     kind: Kind,
     transport: Transport,
     name: &'a str,
-    topic: &'a str,
+    topic: &'a TopicRef,
     msg: &'a MessageName,
 ) -> CodegenInput<'a> {
     CodegenInput {
@@ -27,7 +27,9 @@ fn input<'a>(
         kind,
         name,
         topic,
-        msg_type: msg,
+        msg_type: Some(msg),
+        encoding: Encoding::Proto,
+        mime: None,
         transport,
         // Unity is zenoh-only; the codegen ignores message_targets for
         // zenoh templates. Pin a placeholder so the field stays explicit.
@@ -38,11 +40,12 @@ fn input<'a>(
 #[test]
 fn unity_publisher_zenoh_snapshot() {
     let msg = MessageName::parse("ros2/std/StringStamped").unwrap();
+    let topic = TopicRef::Owned("hello".into());
     let r = render(&input(
         Kind::Publisher,
         Transport::Zenoh,
         "hello",
-        "hello",
+        &topic,
         &msg,
     ))
     .unwrap();
@@ -53,28 +56,15 @@ fn unity_publisher_zenoh_snapshot() {
 #[test]
 fn unity_subscriber_zenoh_snapshot() {
     let msg = MessageName::parse("ros2/std/StringStamped").unwrap();
+    let topic = TopicRef::Owned("hello".into());
     let r = render(&input(
         Kind::Subscriber,
         Transport::Zenoh,
         "hello",
-        "hello",
+        &topic,
         &msg,
     ))
     .unwrap();
     assert_eq!(r.rel_path, PathBuf::from("subscribers/hello.cs"));
     assert_or_bless("unity", "subscriber_zenoh_hello.cs", &r.contents);
-}
-
-#[test]
-fn unity_has_no_iceoryx_template() {
-    assert!(!template_exists(
-        Language::Unity,
-        Transport::Iceoryx2,
-        Kind::Publisher
-    ));
-    assert!(!template_exists(
-        Language::Unity,
-        Transport::Iceoryx2,
-        Kind::Subscriber
-    ));
 }

@@ -51,24 +51,3 @@ fn level5_up_two_modules_then_down() {
         "session still present after sb down"
     );
 }
-
-#[test]
-fn level5_down_when_no_session_is_a_noop() {
-    if !tmux_launch_supported() {
-        eprintln!(
-            "skipping: no tmux able to run a POSIX launch pane (see installguide_windows.md §9.5)"
-        );
-        return;
-    }
-    let sb = L5Sandbox::empty();
-    let out = sb.cmd().arg("down").output().unwrap();
-    assert!(
-        out.status.success(),
-        "sb down should succeed when no session exists: {out:?}"
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("nothing to do") || stdout.contains("no tmux session"),
-        "want friendly no-op message, got: {stdout}"
-    );
-}

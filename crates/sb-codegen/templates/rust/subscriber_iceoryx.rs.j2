@@ -94,8 +94,7 @@ impl TopicOverrides {
     }
 }
 {% else %}
-// Foreign topic — the user passed a leading-slash path verbatim, so the
-// wire form is fixed and per-segment overrides don't apply. Use `open()`.
+// Verbatim wire key (`key:` entry): overrides do not apply. Use `open()`.
 pub const SERVICE: &str = "{{ topic_iox }}";
 {% endif %}
 /// Zero-copy handle to a single published frame. Holding this keeps the

@@ -31,20 +31,24 @@ export SB_CONFIG="$SB_HOME/sb.config.yml"
 PUBBER="$EXAMPLE_DIR/pubber"
 SUBBER="$EXAMPLE_DIR/subber"
 
-"$SB" ws create demo
+# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+mkdir -p "$SB_HOME/ws"
+( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
 
 # Compile the iox2-flat std vault into this sandbox's message_targets.
 # The generated pub/sub files include! the resulting ImageStamped.rs via
 # absolute path; if we skip this step the include! fails at compile time.
-"$SB" message compile --iox2 std/ImageStamped
+"$SB" message compile --iox2 ros2/std/ImageStamped
 
 "$SB" init --rust "$PUBBER" --force >/dev/null
 "$SB" init --rust "$SUBBER" --force >/dev/null
 
-TOPIC_FULL="/dev01/demo/pubber/iox2/frame"
-( cd "$PUBBER" && "$SB" pub add -m std/ImageStamped frame --iox2 --force )
-( cd "$SUBBER" && "$SB" sub add -m std/ImageStamped "$TOPIC_FULL" --iox2 --force )
+# Subscriber points at the publisher's fully-qualified topic; `--key` is
+# used verbatim.
+TOPIC_FULL="dev01/demo/pubber/iox2/frame"
+( cd "$PUBBER" && "$SB" pub add -m ros2/std/ImageStamped frame --iox2 --force )
+( cd "$SUBBER" && "$SB" sub add -m ros2/std/ImageStamped --key "$TOPIC_FULL" --iox2 --force )
 
 # Build both before we race them.
 ( cd "$PUBBER" && cargo build --quiet --bin pub_frame )

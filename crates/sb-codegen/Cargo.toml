@@ -18,3 +18,6 @@ thiserror.workspace = true
 minijinja = { version = "2", default-features = false, features = ["builtins", "macros", "serde"] }
 include_dir.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

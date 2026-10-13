@@ -134,7 +134,9 @@ source that names one wins, and the JSON line reports which in
 2. **The transport's wire schema** (`"wire"`).
    - Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`.
      Generated Rust, Python, and C++ Zenoh publishers set it
-     ([sbcli_pubsub.md](sbcli_pubsub.md) §6.4).
+     ([sbcli_pubsub.md](sbcli_pubsub.md) §6.4). `sb 0.5.0+`:
+     `application/flatbuffers;<style>/<ns>/<Leaf>` names the type of an
+     `encoding: fb` publisher the same way; see the wire-tag table below.
    - iceoryx2: the payload type the service was created with. That name is
      language-native (`StringStamped`, `my_crate::StringStamped`), so it
      maps to the vault iox2 struct with the same leaf whose size matches the
@@ -150,18 +152,22 @@ source that names one wins, and the JSON line reports which in
    It types frames from publishers that stamp neither an encoding nor a
    Header type, such as ones rendered by older templates.
    - Bare topic: the cwd module's entry the name resolved to.
-   - Fully-qualified `/<device>/<workspace>/<module>/<zenoh|iox2>/<topic>`:
+   - Fully-qualified `<device>/<workspace>/<module>/<zenoh|iox2>/<topic>`
+     (a leading `/` is accepted and dropped, sb 0.5.0+):
      `<module>` is looked up in the active workspace's `flow.yaml`, first as
      written, then without its instance suffix (`ips_track-sb00` is found
      as `ips_track`). In that module's `sb.dev.yml`, publishers are searched
-     before subscribers for an entry whose `topic` is the path's last
-     segment (or the whole path) and whose transport is the path's. The
-     cwd `sb.dev.yml` is not consulted for a fully-qualified path.
+     before subscribers for an entry whose transport is the path's and
+     whose `topic:` is the path's last segment or whose `key:` is the whole
+     path. The cwd `sb.dev.yml` is not consulted for a fully-qualified path.
    - For a fully-qualified path, any miss skips this source without a
      message: no active workspace, a module not registered in it, an
      unreadable `sb.dev.yml`, no matching entry, or a path not in the
      five-segment form. So it works only on a machine where that workspace
-     is active and the module is registered.
+     is active and the module is registered. Only the full five-segment
+     canonical form is looked up: a four-segment legacy key such as
+     `dev01/demo/pubber/hello` never matches, even when an entry's `key:`
+     is exactly that string.
    - iceoryx2: a typed service always names its type on the wire first, so
      this source applies only to an untyped `[u8]` service (the byte slab
      `sb topic pub` creates). There, as with `--type`, the name cannot
@@ -174,6 +180,26 @@ the publisher or pass `--type`. A named type that does not decode (not in
 the vault, or bytes that do not parse) also prints hex, with `schema` and
 `schema_source` filled in so the expected type is visible. `--raw` skips
 all four sources.
+
+**Wire tags beyond protobuf (sb 0.5.0+).** Zenoh publishers generated with
+`encoding: fb` or `encoding: raw` ([sbcli_pubsub.md](sbcli_pubsub.md) §14.3)
+stamp other tags, and `sb topic listen` and `sb topic list` recognise them:
+
+| Wire tag | `sb topic list` type column | `sb topic listen` payload, `schema` | `encoding` |
+|---|---|---|---|
+| `application/protobuf;<type>` | `<type>` | decoded JSON, as above; `<type>` | `"protobuf"` |
+| `application/flatbuffers;<type>` | `<type>` | decoded through `flatc --json` against the type's compiled `<message_targets>/fb/<ns>/<Leaf>/<Leaf>.bfbs` (§5.3); `<type>` | `"flatbuffers"` |
+| `text/*`, `application/json` | the mime, e.g. `text/json` | `{"kind": "text", "text": "..."}`; the mime | `"text"` |
+| `application/octet-stream` | empty | as for an untagged sample: the Header probe and `sb.dev.yml` sources still apply, and a raw entry declares no type, so usually hex | `null` |
+
+For FlatBuffers and text the tag decides how the body is read, with
+`schema_source: "wire"`; only `--type` overrides it. A FlatBuffers frame
+whose `.bfbs` is missing, or with no `flatc` configured, prints hex with
+`schema` still set and a one-time stderr note on how to fix it (compile
+the type with `--fb`, or set `flatc:`). A text-tagged body that is not
+valid UTF-8 prints hex. On Zenoh, `encoding` in a JSON line is therefore
+`"protobuf"`, `"flatbuffers"`, `"text"`, or `null`; a frame from
+iceoryx2 keeps `"iox2"` (below).
 
 **iceoryx2 services open typed.** Before 0.4.0, `--transport iceoryx2`
 attached only to `[u8]` byte-slab services; a typed sb-generated publisher
@@ -687,6 +713,65 @@ compile (§5.1.1), so the full set is safe there.
 
 ---
 
+### 4.7 Repository messages: `flow.yaml` `messages:` (sb 0.5.0+)
+
+A workspace repository can carry its own message definitions and list
+them in its `flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.1):
+
+```yaml
+messages:
+  - { style: ros2, path: messages/custom, backends: [proto, iox2] }
+```
+
+`sb install` (and `sb ws install`, `sb ws update`) imports each entry
+into the **configured** vault (`messages_root`, never one discovered
+from the current directory) and then compiles it. There is no
+`sb message` verb for this; an install is the only writer. Each entry
+prints one line, for example
+`-- messages: ros2 <- messages/custom: 1 imported, 0 unchanged, 0 conflicts; compiled [proto, iox2]`.
+
+**Import**: `path` (relative to `flow.yaml`) is copied into
+`<messages_root>/<style>/message_definitions/` (`<defs>` below):
+
+| Source file | Lands at | Vault name |
+|---|---|---|
+| `<path>/<ns>/<Leaf>.proto` | `<defs>/<ns>/<Leaf>.proto` | `<style>/<ns>/<Leaf>` |
+| `<path>/<Leaf>.proto` (flat) | `<defs>/<dir>/<Leaf>.proto`, `<dir>` being the name of `path` itself | `<style>/<dir>/<Leaf>` |
+
+So `messages/custom/CubePoses.proto` imports as `ros2/custom/CubePoses`,
+and `messages/custom/shapes/Flat.proto` as `ros2/shapes/Flat`.
+
+- Hidden entries (`.git/`, ...) and non-`.proto` files are ignored. The
+  style directory is created when missing, so `style:` may name a new
+  style. A style name is `[A-Za-z0-9_]+`.
+- Per file: identical content already in the vault is **unchanged**;
+  different content is a **conflict** and is left alone unless the
+  install runs with `--force`; anything else is written (**imported**).
+  The forge's `ros2/std/` is never overwritten, `--force` or not.
+- A conflict fails the install: the entry is **not compiled** (its line
+  ends `; not compiled`), each conflicting message is named on stderr,
+  the remaining steps still run, and the command exits non-zero asking
+  for `--force`. A conflict with `ros2/std/` cannot be forced; rename
+  the message in the repository.
+- All or nothing per entry: when any `.proto` cannot be named
+  `<style>/<ns>/<Leaf>` (a lowercase leaf, illegal characters, nesting
+  deeper than `<ns>/`, or two files mapping to one name), nothing from
+  that directory is written and the error lists every offender.
+- Imports are additive. Uninstalling the workspace leaves the messages
+  in the vault; `sb message rm` (§4.4) removes one.
+- One style is one `protoc` include root (§1), so a repository message
+  imported into `ros2` may `import "std/Header.proto"`, and one imported
+  into its own style may import its siblings but nothing from another
+  style.
+
+**Compile**: each conflict-free entry's style is then compiled with
+the entry's `backends` (any of `proto`, `fb`, `iox2`); an entry without
+`backends` uses the normal backend selection (§4.5,
+[backend selection](#backend-selection)). An entry that will carry
+`sb io add --fb` publishers needs `fb` among its backends.
+
+---
+
 ## 5. Backends
 
 ### 5.1 `iox2` (in-tree emitter, `sb-iox2-typegen`)
@@ -870,6 +955,7 @@ iox2 backend or `prost-build` in a user crate for Rust protobuf.
 | `<Leaf>_generated.rs` | `--rust` |
 | `<Leaf>.py` | `--python` |
 | `<Leaf>.cs` | `--csharp` |
+| `<Leaf>.bfbs` | `-b --schema` (sb 0.5.0+): the binary schema `sb topic listen` decodes FlatBuffers frames with (§1.1) |
 
 ---
 

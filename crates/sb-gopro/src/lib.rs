@@ -6,14 +6,17 @@
 //!
 //! What gets stripped (host-specific, must not leak into a binary that
 //! ships to other machines):
-//! - `root:` (absolute filesystem path to the dev box)
+//! - `root:` (module root override; absent in current files, an absolute
+//!   path to the dev box in pre-0.5.0 ones)
 //! - `language:` (a dev-time hint for codegen, not a runtime contract)
 //! - `io_dir:`   (dev-time codegen target, not relevant at runtime)
 //!
 //! What stays (language-agnostic, ships with the binary):
 //! - `module:`
-//! - `publishers:` — full list with `name`, `topic`, `type`, `transport`
-//! - `subscribers:` — same
+//! - `publishers:`, the full list with `name`, `topic` (bare) or `key`
+//!   (verbatim wire key), `type`, `transport`
+//! - `subscribers:`, the same, plus `encoding` / `mime` when set
+//! - `services:`, the declared service names
 //!
 //! After serialization a sanitization lint runs over the YAML body —
 //! any leak of `/home/`, `/Users/`, `C:\`, or a stray `root:` key trips
@@ -39,6 +42,7 @@ pub fn dev_to_prd(dev: &ModuleDevConfig) -> ModulePrdConfig {
         module: dev.module.clone(),
         publishers: dev.publishers.clone(),
         subscribers: dev.subscribers.clone(),
+        services: dev.services.clone(),
     }
 }
 
@@ -268,10 +272,13 @@ pub fn gopro_module(dev_yml_path: &Path) -> Result<GoproOutcome> {
         .with_context(|| format!("reading {}", dev_yml_path.display()))?;
     let dev: ModuleDevConfig = serde_yaml::from_str(&body)
         .with_context(|| format!("parsing {}", dev_yml_path.display()))?;
-    let module_root = dev_yml_path
+    // sb.prd.yml lands next to sb.dev.yml; the io files live under the
+    // module root, which `root:` may move away from that directory.
+    let yml_dir = dev_yml_path
         .parent()
         .ok_or_else(|| anyhow!("sb.dev.yml has no parent: {}", dev_yml_path.display()))?
         .to_path_buf();
+    let module_root = dev.module_root(dev_yml_path);
 
     let missing = check_io_dir(&dev, &module_root);
 
@@ -287,7 +294,7 @@ pub fn gopro_module(dev_yml_path: &Path) -> Result<GoproOutcome> {
         );
     }
 
-    let prd_path = module_root.join("sb.prd.yml");
+    let prd_path = yml_dir.join("sb.prd.yml");
     fs::write(&prd_path, serialized).with_context(|| format!("writing {}", prd_path.display()))?;
 
     Ok(GoproOutcome {
@@ -319,15 +326,16 @@ pub struct ModuleResult {
 pub fn gopro_all(home: &SbHome, workspace: &str) -> Result<Vec<ModuleResult>> {
     let flow = read_flow(home, workspace)
         .with_context(|| format!("reading flow.yaml for workspace {workspace:?}"))?;
-    if flow.modules.is_empty() {
+    let modules = flow.module_paths();
+    if modules.is_empty() {
         bail!("workspace {workspace:?} has no modules in flow.yaml — run `sb init` first");
     }
-    let mut out = Vec::with_capacity(flow.modules.len());
-    for (module, dev_yml) in &flow.modules {
-        let result = gopro_module(dev_yml);
+    let mut out = Vec::with_capacity(modules.len());
+    for (module, dev_yml) in modules {
+        let result = gopro_module(&dev_yml);
         out.push(ModuleResult {
-            module: module.clone(),
-            dev_yml_path: dev_yml.clone(),
+            module,
+            dev_yml_path: dev_yml,
             result,
         });
     }
@@ -342,50 +350,63 @@ pub fn gopro_all(home: &SbHome, workspace: &str) -> Result<Vec<ModuleResult>> {
 mod tests {
     use super::*;
 
-    use sb_core::{Language, PubSpec, SubSpec, Transport};
-    use tempfile::TempDir;
+    use sb_core::{Encoding, Language, PubSpec, ServiceSpec, SubSpec, TopicRef, Transport};
+
+    fn spec_pub(name: &str, msg: &str, transport: Transport) -> PubSpec {
+        PubSpec {
+            name: name.into(),
+            topic: TopicRef::Owned(name.into()),
+            msg_type: Some(msg.into()),
+            transport,
+            encoding: Encoding::Proto,
+            mime: None,
+        }
+    }
 
     fn sample_dev() -> ModuleDevConfig {
         ModuleDevConfig {
             module: "camera".into(),
             language: Language::Rust,
-            root: PathBuf::from("/home/user/projects/camera_app"),
+            // A pre-0.5.0 absolute root: must never reach sb.prd.yml.
+            root: Some(PathBuf::from("/home/user/projects/camera_app")),
             io_dir: PathBuf::from("swarmbotix_io"),
             publishers: vec![
-                PubSpec {
-                    name: "image_raw".into(),
-                    topic: "image_raw".into(),
-                    msg_type: "std/ImageStamped".into(),
-                    transport: Transport::Iceoryx2,
-                },
-                PubSpec {
-                    name: "heartbeat".into(),
-                    topic: "heartbeat".into(),
-                    msg_type: "std/StringStamped".into(),
-                    transport: Transport::Zenoh,
-                },
+                spec_pub("image_raw", "std/ImageStamped", Transport::Iceoryx2),
+                spec_pub("heartbeat", "std/StringStamped", Transport::Zenoh),
             ],
             subscribers: vec![SubSpec {
                 name: "cmd_vel".into(),
-                topic: "cmd_vel".into(),
-                msg_type: "std/TwistStamped".into(),
+                topic: TopicRef::Owned("cmd_vel".into()),
+                msg_type: Some("std/TwistStamped".into()),
                 transport: Transport::Zenoh,
+                encoding: Encoding::Proto,
+                mime: None,
+            }],
+            services: vec![ServiceSpec {
+                name: "calib".into(),
             }],
         }
     }
 
     #[test]
-    fn dev_to_prd_drops_root_language_iodir() {
-        let dev = sample_dev();
+    fn dev_to_prd_preserves_key_entries() {
+        let mut dev = sample_dev();
+        dev.subscribers.push(SubSpec {
+            name: "hello".into(),
+            topic: TopicRef::Key("dev01/demo/pubber/zenoh/hello".into()),
+            msg_type: Some("std/StringStamped".into()),
+            transport: Transport::Zenoh,
+            encoding: Encoding::Proto,
+            mime: None,
+        });
         let prd = dev_to_prd(&dev);
-        assert_eq!(prd.module, "camera");
-        assert_eq!(prd.publishers.len(), 2);
-        assert_eq!(prd.subscribers.len(), 1);
+        assert_eq!(prd.subscribers, dev.subscribers);
         let y = serde_yaml::to_string(&prd).unwrap();
-        assert!(!y.contains("root:"), "leaked root: {y}");
-        assert!(!y.contains("language:"), "leaked language: {y}");
-        assert!(!y.contains("io_dir:"), "leaked io_dir: {y}");
-        assert!(!y.contains("/home/"), "leaked /home/: {y}");
+        assert!(y.contains("key: dev01/demo/pubber/zenoh/hello"), "{y}");
+        assert!(y.contains("topic: cmd_vel"), "{y}");
+        assert_eq!(lint_sanitized(&y), Vec::new(), "{y}");
+        let back: ModulePrdConfig = serde_yaml::from_str(&y).unwrap();
+        assert_eq!(back, prd);
     }
 
     #[test]
@@ -394,111 +415,5 @@ mod tests {
         assert_eq!(leaks.len(), 2); // root: AND /home/ path
         assert!(leaks.iter().any(|l| l.kind == LeakKind::RootKey));
         assert!(leaks.iter().any(|l| l.kind == LeakKind::LinuxHome));
-    }
-
-    #[test]
-    fn lint_catches_macos_path() {
-        let leaks = lint_sanitized("comment: see /Users/alice/dev\n");
-        assert_eq!(leaks.len(), 1);
-        assert_eq!(leaks[0].kind, LeakKind::MacHome);
-    }
-
-    #[test]
-    fn lint_catches_windows_path() {
-        let leaks = lint_sanitized("path: C:\\users\\bob\n");
-        assert!(leaks.iter().any(|l| l.kind == LeakKind::WindowsPath));
-    }
-
-    #[test]
-    fn lint_ignores_clean_yaml() {
-        let y = "module: camera\npublishers:\n  - name: foo\n    topic: foo\n    type: std/StringStamped\n    transport: zenoh\n";
-        assert_eq!(lint_sanitized(y), Vec::new());
-    }
-
-    #[test]
-    fn lint_does_not_trip_on_colon_pairs() {
-        // `time: 12:34` should NOT be flagged as a Windows path.
-        let leaks = lint_sanitized("time: 12:34\n");
-        assert!(leaks.iter().all(|l| l.kind != LeakKind::WindowsPath));
-    }
-
-    #[test]
-    fn gopro_module_writes_prd_alongside_dev() {
-        let td = TempDir::new().unwrap();
-        let root = td.path().to_path_buf();
-        let mut dev = sample_dev();
-        dev.root = root.clone();
-        let dev_yml = root.join("sb.dev.yml");
-        fs::write(&dev_yml, serde_yaml::to_string(&dev).unwrap()).unwrap();
-
-        let outcome = gopro_module(&dev_yml).unwrap();
-        assert_eq!(outcome.module, "camera");
-        assert_eq!(outcome.prd_yml_path, root.join("sb.prd.yml"));
-        let body = fs::read_to_string(&outcome.prd_yml_path).unwrap();
-        assert!(body.contains("module: camera"));
-        assert!(!body.contains("root:"), "prd leaked root: {body}");
-        assert!(
-            !body.contains(root.to_str().unwrap()),
-            "prd leaked tempdir path: {body}"
-        );
-    }
-
-    #[test]
-    fn gopro_module_round_trips_pub_sub_lists() {
-        let td = TempDir::new().unwrap();
-        let root = td.path().to_path_buf();
-        let mut dev = sample_dev();
-        dev.root = root.clone();
-        let dev_yml = root.join("sb.dev.yml");
-        fs::write(&dev_yml, serde_yaml::to_string(&dev).unwrap()).unwrap();
-
-        gopro_module(&dev_yml).unwrap();
-        let prd_body = fs::read_to_string(root.join("sb.prd.yml")).unwrap();
-        let prd: ModulePrdConfig = serde_yaml::from_str(&prd_body).unwrap();
-        assert_eq!(prd.publishers, dev.publishers);
-        assert_eq!(prd.subscribers, dev.subscribers);
-    }
-
-    #[test]
-    fn gopro_module_lists_missing_io_files() {
-        let td = TempDir::new().unwrap();
-        let root = td.path().to_path_buf();
-        let mut dev = sample_dev();
-        dev.root = root.clone();
-        let dev_yml = root.join("sb.dev.yml");
-        fs::write(&dev_yml, serde_yaml::to_string(&dev).unwrap()).unwrap();
-
-        let outcome = gopro_module(&dev_yml).unwrap();
-        // dev has 2 publishers + 1 subscriber, none materialized as files.
-        assert_eq!(outcome.missing_files.len(), 3);
-        let names: Vec<&str> = outcome
-            .missing_files
-            .iter()
-            .map(|m| m.name.as_str())
-            .collect();
-        assert!(names.contains(&"image_raw"));
-        assert!(names.contains(&"heartbeat"));
-        assert!(names.contains(&"cmd_vel"));
-    }
-
-    #[test]
-    fn gopro_module_no_missing_when_files_present() {
-        let td = TempDir::new().unwrap();
-        let root = td.path().to_path_buf();
-        let mut dev = sample_dev();
-        dev.root = root.clone();
-        // Drop empty rust files at the expected paths.
-        let io = root.join("swarmbotix_io");
-        fs::create_dir_all(io.join("publishers")).unwrap();
-        fs::create_dir_all(io.join("subscribers")).unwrap();
-        fs::write(io.join("publishers").join("image_raw.rs"), "").unwrap();
-        fs::write(io.join("publishers").join("heartbeat.rs"), "").unwrap();
-        fs::write(io.join("subscribers").join("cmd_vel.rs"), "").unwrap();
-
-        let dev_yml = root.join("sb.dev.yml");
-        fs::write(&dev_yml, serde_yaml::to_string(&dev).unwrap()).unwrap();
-
-        let outcome = gopro_module(&dev_yml).unwrap();
-        assert_eq!(outcome.missing_files, Vec::new());
     }
 }

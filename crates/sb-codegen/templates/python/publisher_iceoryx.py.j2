@@ -62,7 +62,7 @@ DEFAULT_MODULE = "{{ module }}"
 DEFAULT_TOPIC = "{{ topic_bare }}"
 TRANSPORT_SEGMENT = "{{ transport_segment }}"
 {% else %}
-# Foreign topic — leading-slash input, overrides don't apply.
+# Verbatim wire key (`key:` entry): overrides do not apply.
 SERVICE = "{{ topic_iox }}"
 {% endif %}
 

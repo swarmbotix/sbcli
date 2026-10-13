@@ -1,6 +1,6 @@
 module: subber
 subscribers:
 - name: hello
-  topic: /dev01/demo/pubber/hello
-  type: std/StringStamped
+  key: dev01/demo/pubber/zenoh/hello
+  type: ros2/std/StringStamped
   transport: zenoh

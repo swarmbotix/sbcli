@@ -50,7 +50,9 @@ PUBBER="$EXAMPLE_DIR/pubber"
 SUBBER="$EXAMPLE_DIR/subber"
 
 echo "--- L2: workspace + adopt both modules ---"
-"$SB" ws create demo
+# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+mkdir -p "$SB_HOME/ws"
+( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
 "$SB" init --rust "$PUBBER" --force >/dev/null
 "$SB" init --rust "$SUBBER" --force >/dev/null
@@ -74,8 +76,8 @@ EOF
 chmod +x "$SUBBER/runscript.bash"
 
 echo "--- L3: scaffold pub + sub on Zenoh ---"
-( cd "$PUBBER" && "$SB" pub add -m std/StringStamped hello --zenoh --force )
-( cd "$SUBBER" && "$SB" sub add -m std/StringStamped /dev01/demo/pubber/hello --zenoh --force )
+( cd "$PUBBER" && "$SB" pub add -m ros2/std/StringStamped hello --zenoh --force )
+( cd "$SUBBER" && "$SB" sub add -m ros2/std/StringStamped --key dev01/demo/pubber/zenoh/hello --zenoh --force )
 
 echo "--- pre-build to make `sb up` fast ---"
 ( cd "$PUBBER" && cargo build --quiet --bin hello_pubber )
@@ -88,8 +90,8 @@ sleep 3
 echo "--- L4: sb topic list (sanity check) ---"
 LIST_JSON="$SB_HOME/list.json"
 "$SB" topic list --transport zenoh --json -t 1.0 > "$LIST_JSON" 2>/dev/null || true
-# `sb topic list` reports the slashed form (sb 0.4.2+).
-if ! grep -F '"topic":"/dev01/demo/pubber/hello"' "$LIST_JSON" >/dev/null; then
+# `sb topic list` reports the raw wire key, no leading `/` (sb 0.5.0+).
+if ! grep -F '"topic":"dev01/demo/pubber/zenoh/hello"' "$LIST_JSON" >/dev/null; then
   echo "FAIL: pubber not visible in sb topic list after sb up"
   echo "--- sb topic list ---"
   cat "$LIST_JSON"

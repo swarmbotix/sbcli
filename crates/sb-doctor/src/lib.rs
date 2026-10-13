@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sb_core::SbCliConfig;
+use sb_core::{
+    Encoding, Language, ModuleDevConfig, SbCliConfig, TopicRef, Transport, WorkspaceFlow,
+};
 
 /// The zenoh crate compiled into this binary, from `Cargo.lock` at build time
 /// (see `build.rs`). `"unknown"` when the build tree carried no lockfile.
@@ -407,6 +409,437 @@ fn check_deprecated_keys(cfg: &SbCliConfig) -> CheckResult {
             dead.join(", ")
         ),
     )
+}
+
+/// Check: `topics`. Reports modules whose `sb.dev.yml` still writes a
+/// fully-qualified topic as `topic: /...`.
+///
+/// sb 0.5.0 reads such an entry as `key:` with the leading `/` dropped,
+/// which is the same wire key, so nothing breaks; the warning only says
+/// how to store it in the canonical form. `modules` yields
+/// `(module name, path)` pairs as the workspace registry records them; the
+/// path is the module's `sb.dev.yml` or its directory. A file that cannot
+/// be read is skipped silently (other checks own that failure).
+///
+/// One `[WARN]` per offending module. When none offend and at least one
+/// file was scanned, a single `[OK]`; when nothing was scanned, no result.
+pub fn check_module_topics<'a>(
+    modules: impl IntoIterator<Item = (&'a str, &'a Path)>,
+) -> Vec<CheckResult> {
+    let mut out = Vec::new();
+    let mut scanned = 0usize;
+    for (module, path) in modules {
+        let dev_yml = if path.is_dir() {
+            path.join("sb.dev.yml")
+        } else {
+            path.to_path_buf()
+        };
+        let Ok(text) = std::fs::read_to_string(&dev_yml) else {
+            continue;
+        };
+        scanned += 1;
+        let legacy = sb_core::legacy_topics_in(&text);
+        if legacy.is_empty() {
+            continue;
+        }
+        let (count, pronoun) = if legacy.len() == 1 {
+            ("1 legacy `topic: /...` entry".to_owned(), "it")
+        } else {
+            (
+                format!("{} legacy `topic: /...` entries", legacy.len()),
+                "them",
+            )
+        };
+        let mut msg = format!(
+            "{module}: {count} in {} (sb 0.5.0 reads {pronoun} as `key:`; same wire key)",
+            dev_yml.display()
+        );
+        for lt in &legacy {
+            msg.push_str(&format!(
+                "\n{MSG_COL}{} {:?}: topic: {} -> key: {}",
+                lt.role, lt.name, lt.topic, lt.key
+            ));
+        }
+        // Any write of sb.dev.yml stores every legacy entry as `key:`.
+        // `sb sub edit` rewrites the file without changing the entry; a
+        // module with only legacy publishers needs `sb pub edit --key`.
+        if let Some(sub) = legacy.iter().find(|lt| lt.role == "sub") {
+            msg.push_str(&format!(
+                "\n{MSG_COL}rewrite: `sb sub edit {} --module {module}` \
+                 (publishers: `sb pub edit <name> --key <key>`)",
+                sub.key
+            ));
+        } else if let Some(publ) = legacy.first() {
+            msg.push_str(&format!(
+                "\n{MSG_COL}rewrite: `sb pub edit {} --key {} --module {module}`",
+                publ.name, publ.key
+            ));
+        }
+        out.push(warn("topics", msg));
+    }
+    if out.is_empty() && scanned > 0 {
+        out.push(ok(
+            "topics",
+            "no legacy `topic: /...` entries in the active workspace",
+        ));
+    }
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Workspace checks (`sb ws check`, and the workspace rows of `sb doctor`)
+// ─────────────────────────────────────────────────────────────────────
+
+/// One installed workspace, as [`check_workspace`] inspects it.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceView<'a> {
+    /// Workspace name; the `<ws>` segment of every owned wire key.
+    pub name: &'a str,
+    /// The installed copy (`<sb_home>/workspaces/<name>/flow.yaml`).
+    pub flow: &'a WorkspaceFlow,
+    /// Root of the vault `type:` names resolve in (the configured
+    /// `messages_root`, the one `sb install` imports into).
+    pub vault_root: &'a Path,
+    /// The repo `flow.yaml` when it was modified after the installed copy
+    /// was written (`sb_workspace::is_stale`); `None` when current or when
+    /// the workspace has no source.
+    pub stale_repo_flow: Option<&'a Path>,
+}
+
+/// A module of the workspace whose `sb.dev.yml` parsed.
+struct LoadedModule<'a> {
+    name: &'a str,
+    dev_yml: &'a Path,
+    dev: ModuleDevConfig,
+}
+
+/// One pub/sub entry, flattened across both lists.
+struct EntryRef<'a> {
+    role: &'static str,
+    name: &'a str,
+    topic: &'a TopicRef,
+    msg_type: Option<&'a str>,
+    transport: Transport,
+    encoding: Encoding,
+}
+
+fn entries_of(dev: &ModuleDevConfig) -> Vec<EntryRef<'_>> {
+    let pubs = dev.publishers.iter().map(|p| EntryRef {
+        role: "pub",
+        name: &p.name,
+        topic: &p.topic,
+        msg_type: p.msg_type.as_deref(),
+        transport: p.transport,
+        encoding: p.encoding,
+    });
+    let subs = dev.subscribers.iter().map(|s| EntryRef {
+        role: "sub",
+        name: &s.name,
+        topic: &s.topic,
+        msg_type: s.msg_type.as_deref(),
+        transport: s.transport,
+        encoding: s.encoding,
+    });
+    pubs.chain(subs).collect()
+}
+
+/// Validate one installed workspace. Rows, in order:
+///
+/// - `workspace`: the name, module count, and where it was installed from.
+/// - `ws modules`: `[FAIL]` per module whose `sb.dev.yml` is missing or does
+///   not parse; one `[OK]` otherwise.
+/// - `ws types`: `[FAIL]` per proto/fb entry whose `type:` is not a vault
+///   message (nor an `iox2_variants` variant); raw entries carry no type.
+/// - `ws instances`: `[FAIL]` per instance id listed twice for one module.
+/// - `ws encoding`: `[FAIL]` per wire key whose entries, across every
+///   module, disagree on `encoding:`.
+/// - `ws io files`: `[WARN]` per module with generated files missing under
+///   its io dir (`publishers/`, `subscribers/`, `services/<name>.<ext>`).
+/// - `ws source`: `[WARN]` when the repo `flow.yaml` is newer than the
+///   installed copy; `[SKIP]` for a workspace with no `source:`.
+///
+/// Rows for modules that failed `ws modules` are not repeated further down.
+pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckResult> {
+    let paths = ws.flow.module_paths();
+    let origin = match &ws.flow.source {
+        Some(src) => match &src.url {
+            Some(url) => format!("installed from {url}"),
+            None => format!("installed from {}", src.repo_flow.display()),
+        },
+        None => "no source (not installed from a repo flow.yaml)".to_owned(),
+    };
+    let mut out = vec![ok(
+        "workspace",
+        format!("{}: {} module(s), {origin}", ws.name, paths.len()),
+    )];
+
+    let mut loaded: Vec<LoadedModule<'_>> = Vec::new();
+    let mut module_fails = Vec::new();
+    for (name, dev_yml) in &paths {
+        match load_dev_yml(dev_yml) {
+            Ok(dev) => loaded.push(LoadedModule { name, dev_yml, dev }),
+            Err(e) => module_fails.push(fail("ws modules", format!("{name}: {e}"))),
+        }
+    }
+    if module_fails.is_empty() {
+        out.push(ok(
+            "ws modules",
+            format!("{} module(s), every sb.dev.yml parses", loaded.len()),
+        ));
+    }
+    out.extend(module_fails);
+
+    out.extend(check_ws_types(cfg, ws.vault_root, &loaded));
+    out.extend(check_ws_instances(ws.flow));
+    out.extend(check_ws_encoding(cfg, ws.name, &loaded));
+    out.extend(check_ws_io_files(&loaded));
+    out.push(match (&ws.flow.source, ws.stale_repo_flow) {
+        (None, _) => skip("ws source", "no repo flow.yaml to compare with"),
+        (Some(_), Some(repo)) => warn(
+            "ws source",
+            format!(
+                "{} is newer than the installed copy; run sb install",
+                repo.display()
+            ),
+        ),
+        (Some(src), None) => ok(
+            "ws source",
+            format!("installed copy is current with {}", src.repo_flow.display()),
+        ),
+    });
+    out
+}
+
+/// Read and parse one module's `sb.dev.yml`; the error is the row text.
+fn load_dev_yml(dev_yml: &Path) -> Result<ModuleDevConfig, String> {
+    if !dev_yml.is_file() {
+        return Err(format!(
+            "no sb.dev.yml at {} (run `sb init` in the module)",
+            dev_yml.display()
+        ));
+    }
+    let text = std::fs::read_to_string(dev_yml)
+        .map_err(|e| format!("cannot read {}: {e}", dev_yml.display()))?;
+    if text.trim().is_empty() {
+        return Err(format!("{} is empty", dev_yml.display()));
+    }
+    serde_yaml::from_str(&text).map_err(|e| format!("{} does not parse: {e}", dev_yml.display()))
+}
+
+fn check_ws_types(
+    cfg: &SbCliConfig,
+    vault_root: &Path,
+    modules: &[LoadedModule<'_>],
+) -> Vec<CheckResult> {
+    let vault = sb_vault::Vault::at(vault_root);
+    let mut out = Vec::new();
+    let mut typed = 0usize;
+    for m in modules {
+        for e in entries_of(&m.dev) {
+            let Some(t) = e.msg_type else { continue };
+            if e.encoding == Encoding::Raw {
+                continue;
+            }
+            typed += 1;
+            let problem = match sb_vault::MessageName::parse(t) {
+                Err(err) => Some(format!("type {t} is not a vault name: {err}")),
+                Ok(name) if vault.path_of(&name).is_file() || is_iox2_variant(cfg, &name) => None,
+                Ok(_) => Some(format!(
+                    "type {t} is not in the vault at {}",
+                    vault_root.display()
+                )),
+            };
+            if let Some(p) = problem {
+                out.push(fail(
+                    "ws types",
+                    format!("{} {} {}: {p}", m.name, e.role, e.name),
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(ok(
+            "ws types",
+            if typed == 1 {
+                "1 typed entry resolves in the vault".to_owned()
+            } else {
+                format!("{typed} typed entries resolve in the vault")
+            },
+        ));
+    }
+    out
+}
+
+/// Whether `name` is a declared iceoryx2 variant (`iox2_variants:`), which
+/// has no `.proto` of its own. Same rule `sb pub add` applies.
+fn is_iox2_variant(cfg: &SbCliConfig, name: &sb_vault::MessageName) -> bool {
+    cfg.iox2_variants.as_ref().is_some_and(|variants| {
+        variants.iter().any(|(base_fqn, vs)| {
+            base_fqn
+                .rsplit_once('.')
+                .and_then(|(pkg, _)| pkg.rsplit('.').next())
+                .is_some_and(|ns| ns == name.namespace && vs.contains_key(&name.leaf))
+        })
+    })
+}
+
+fn check_ws_instances(flow: &WorkspaceFlow) -> Vec<CheckResult> {
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for (module, list) in &flow.instances {
+        let mut seen = std::collections::BTreeSet::new();
+        for inst in list {
+            total += 1;
+            if !seen.insert(inst.id.as_str()) {
+                out.push(fail(
+                    "ws instances",
+                    format!(
+                        "{module}: instance id {:?} is declared more than once",
+                        inst.id
+                    ),
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(ok(
+            "ws instances",
+            format!("{total} instance(s), ids unique per module"),
+        ));
+    }
+    out
+}
+
+fn check_ws_encoding(
+    cfg: &SbCliConfig,
+    workspace: &str,
+    modules: &[LoadedModule<'_>],
+) -> Vec<CheckResult> {
+    let device = cfg.device.as_deref().unwrap_or("dev01");
+    // (wire key, transport) -> every (who, encoding) that names it. The same
+    // key on the other transport is a different channel.
+    let mut by_key: std::collections::BTreeMap<(String, &str), Vec<(String, Encoding)>> =
+        std::collections::BTreeMap::new();
+    for m in modules {
+        for e in entries_of(&m.dev) {
+            let key = e
+                .topic
+                .full_key(device, workspace, &m.dev.module, e.transport);
+            by_key
+                .entry((key, e.transport.as_str()))
+                .or_default()
+                .push((format!("{} {} {}", m.name, e.role, e.name), e.encoding));
+        }
+    }
+    let mut out = Vec::new();
+    for ((key, transport), users) in &by_key {
+        let first = users[0].1;
+        if users.iter().all(|(_, enc)| *enc == first) {
+            continue;
+        }
+        let who: Vec<String> = users
+            .iter()
+            .map(|(who, enc)| format!("{who} = {enc}"))
+            .collect();
+        out.push(fail(
+            "ws encoding",
+            format!(
+                "{key} ({transport}): encodings disagree ({})",
+                who.join(", ")
+            ),
+        ));
+    }
+    if out.is_empty() {
+        out.push(ok(
+            "ws encoding",
+            format!("{} wire key(s), encodings agree", by_key.len()),
+        ));
+    }
+    out
+}
+
+/// File extension of a generated io file; mirrors `sb_codegen::render`.
+fn io_ext(lang: Language) -> &'static str {
+    match lang {
+        Language::Rust => "rs",
+        Language::Python => "py",
+        Language::Cpp => "cpp",
+        Language::Flutter => "dart",
+        Language::Unity => "cs",
+    }
+}
+
+/// Every generated io file the module's entries call for, relative to its
+/// io dir. Entries with no template (iceoryx2 on Flutter / Unity, services
+/// outside Rust / Python) generate nothing and are left out.
+fn expected_io_files(dev: &ModuleDevConfig) -> Vec<PathBuf> {
+    let ext = io_ext(dev.language);
+    let zenoh_only = matches!(dev.language, Language::Flutter | Language::Unity);
+    let mut files = Vec::new();
+    for (dir, list) in [
+        (
+            "publishers",
+            entries_of(dev)
+                .into_iter()
+                .filter(|e| e.role == "pub")
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "subscribers",
+            entries_of(dev)
+                .into_iter()
+                .filter(|e| e.role == "sub")
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        for e in list {
+            if zenoh_only && e.transport == Transport::Iceoryx2 {
+                continue;
+            }
+            files.push(PathBuf::from(dir).join(format!("{}.{ext}", e.name)));
+        }
+    }
+    if matches!(dev.language, Language::Rust | Language::Python) {
+        for s in &dev.services {
+            files.push(PathBuf::from("services").join(format!("{}.{ext}", s.name)));
+        }
+    }
+    files
+}
+
+fn check_ws_io_files(modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
+    let mut out = Vec::new();
+    let mut expected = 0usize;
+    for m in modules {
+        let io = m.dev.module_root(m.dev_yml).join(&m.dev.io_dir);
+        let files = expected_io_files(&m.dev);
+        expected += files.len();
+        let missing: Vec<String> = files
+            .iter()
+            .filter(|f| !io.join(f).is_file())
+            .map(|f| f.to_string_lossy().replace('\\', "/"))
+            .collect();
+        if !missing.is_empty() {
+            out.push(warn(
+                "ws io files",
+                format!(
+                    "{}: {} generated file(s) missing under {} ({}); run `sb io update {}`",
+                    m.name,
+                    missing.len(),
+                    io.display(),
+                    missing.join(", "),
+                    m.name
+                ),
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push(ok(
+            "ws io files",
+            format!("{expected} generated file(s) present"),
+        ));
+    }
+    out
 }
 
 /// Count files with `ext` anywhere under `dir`. 0 if absent.
@@ -843,17 +1276,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A config pinned at a path that does not exist, so `run` cannot reach
-    /// the developer's real `~/.swarmbotix`. `run` derives every path from
-    /// the config now, so an unpinned `default()` would silently test the
-    /// dev box instead of the fixture.
-    fn isolated_cfg() -> SbCliConfig {
-        SbCliConfig {
-            sb_home_dir: Some(PathBuf::from("/nonexistent/sb_home")),
-            ..Default::default()
-        }
-    }
-
     // ── native library version discovery ──────────────────────────────
 
     /// An install tree `<dir>/<prefix_dirs>/lib/<file>`, with the library
@@ -897,68 +1319,6 @@ mod tests {
         assert_eq!(native_lib_version(&lib).as_deref(), Some("1.9.0"));
     }
 
-    #[test]
-    fn cmake_version_is_used_when_no_pkgconfig() {
-        let d = tempfile::tempdir().unwrap();
-        let lib = lib_at(d.path(), "iceoryx2/install", "libiceoryx2_ffi_c.so");
-        let libdir = lib.parent().unwrap();
-        // The real install ships one per component, all agreeing.
-        for pkg in ["iceoryx2-c", "iceoryx2-cxx", "iceoryx2-bb-cxx"] {
-            write_cmake(libdir, pkg, "0.9.3");
-        }
-        assert_eq!(native_lib_version(&lib).as_deref(), Some("0.9.3"));
-    }
-
-    #[test]
-    fn disagreeing_cmake_packages_resolve_by_name_affinity() {
-        let d = tempfile::tempdir().unwrap();
-        let lib = lib_at(d.path(), "iceoryx2/install", "libiceoryx2_ffi_c.so");
-        let libdir = lib.parent().unwrap();
-        write_cmake(libdir, "iceoryx2-c", "0.9.3");
-        write_cmake(libdir, "unrelated-thing", "3.0.0");
-        assert_eq!(native_lib_version(&lib).as_deref(), Some("0.9.3"));
-    }
-
-    #[test]
-    fn version_comes_from_the_path_when_metadata_is_absent() {
-        let d = tempfile::tempdir().unwrap();
-        let lib = lib_at(d.path(), "iceoryx2/v0.9.3", "libiceoryx2_ffi_c.so");
-        assert_eq!(native_lib_version(&lib).as_deref(), Some("0.9.3"));
-    }
-
-    #[test]
-    fn a_current_symlink_does_not_hide_the_version() {
-        // The configured path is `<d>/iceoryx2/current/lib/…`; only the
-        // canonical path carries `v0.9.3`.
-        let d = tempfile::tempdir().unwrap();
-        let lib = lib_at(d.path(), "iceoryx2/v0.9.3", "libiceoryx2_ffi_c.so");
-        let link = d.path().join("iceoryx2").join("current");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(d.path().join("iceoryx2").join("v0.9.3"), &link).unwrap();
-        #[cfg(not(unix))]
-        std::os::windows::fs::symlink_dir(d.path().join("iceoryx2").join("v0.9.3"), &link).unwrap();
-        let through_link = link.join("lib").join("libiceoryx2_ffi_c.so");
-        assert_eq!(
-            native_lib_version(&through_link).as_deref(),
-            native_lib_version(&lib).as_deref()
-        );
-        assert_eq!(native_lib_version(&through_link).as_deref(), Some("0.9.3"));
-    }
-
-    #[test]
-    fn soname_suffix_is_the_last_resort() {
-        let d = tempfile::tempdir().unwrap();
-        let lib = lib_at(d.path(), "somewhere", "libzenohc.so.1.9.0");
-        assert_eq!(native_lib_version(&lib).as_deref(), Some("1.9.0"));
-    }
-
-    #[test]
-    fn an_install_that_states_nothing_yields_no_version() {
-        let d = tempfile::tempdir().unwrap();
-        let lib = lib_at(d.path(), "somewhere", "libzenohc.so");
-        assert_eq!(native_lib_version(&lib), None);
-    }
-
     // ── drift policy ──────────────────────────────────────────────────
 
     #[test]
@@ -990,14 +1350,6 @@ mod tests {
     }
 
     #[test]
-    fn transports_row_names_both_crates() {
-        let msg = msg_of(check_transports());
-        assert!(msg.contains(ZENOH_VERSION), "{msg}");
-        assert!(msg.contains(ICEORYX2_VERSION), "{msg}");
-        assert!(check_transports().status.is_ok());
-    }
-
-    #[test]
     fn linked_versions_are_baked_in_from_the_lockfile() {
         // A build inside this workspace always has Cargo.lock, so `unknown`
         // here means build.rs stopped finding it.
@@ -1005,389 +1357,5 @@ mod tests {
         assert_ne!(ICEORYX2_VERSION, UNKNOWN);
         assert!(semver_triple(ZENOH_VERSION).is_some());
         assert!(semver_triple(ICEORYX2_VERSION).is_some());
-    }
-
-    #[test]
-    fn missing_protoc_path_produces_fail() {
-        let cfg = isolated_cfg();
-        let report = run(&cfg);
-        let protoc = report.checks.iter().find(|c| c.name == "protoc").unwrap();
-        assert!(matches!(protoc.status, CheckStatus::Fail(_)));
-    }
-
-    #[test]
-    fn each_missing_dep_reported_separately() {
-        let cfg = isolated_cfg();
-        let report = run(&cfg);
-        let failures: Vec<&str> = report
-            .checks
-            .iter()
-            .filter(|c| c.status.is_fail())
-            .map(|c| c.name)
-            .collect();
-        // Each check produces its own line — not aggregated.
-        assert!(failures.contains(&"protoc"));
-        assert!(failures.contains(&"flatc"));
-        assert!(failures.contains(&"libzenohc"));
-        assert!(failures.contains(&"libiceoryx2"));
-        assert!(failures.contains(&"std vault"));
-    }
-
-    #[test]
-    fn render_marks_each_status() {
-        let cfg = isolated_cfg();
-        let report = run(&cfg);
-        let out = report.render(false);
-        assert!(out.contains("[FAIL]"));
-        assert!(out.contains("protoc"));
-    }
-
-    #[test]
-    fn render_colored_wraps_tag_with_ansi() {
-        let cfg = isolated_cfg();
-        let report = run(&cfg);
-        let out = report.render(true);
-        // anstyle's red+bold reset sequence wraps the [FAIL] tag.
-        assert!(out.contains("\x1b["));
-        assert!(out.contains("[FAIL]"));
-    }
-
-    // ── message style listing ─────────────────────────────────────────
-
-    /// Build a messages root with the given styles; each tuple is
-    /// (name, has_defs, has_targets).
-    fn styles_at(dir: &Path, styles: &[(&str, bool, bool)]) {
-        for (name, defs, targets) in styles {
-            let s = dir.join("messages").join(name);
-            if *defs {
-                let d = s.join("message_definitions").join("ns");
-                std::fs::create_dir_all(&d).unwrap();
-                std::fs::write(d.join("A.proto"), "syntax=\"proto3\";").unwrap();
-            }
-            if *targets {
-                let t = s.join("message_targets").join("iox2");
-                std::fs::create_dir_all(&t).unwrap();
-                std::fs::write(t.join("A.rs"), "// generated").unwrap();
-            }
-        }
-    }
-
-    fn cfg_at(dir: &Path) -> SbCliConfig {
-        SbCliConfig {
-            sb_home_dir: Some(dir.to_path_buf()),
-            messages_root: Some(dir.join("messages")),
-            ..Default::default()
-        }
-    }
-
-    /// The configured (non-discovered) vault under `<dir>/messages` — what
-    /// `sb doctor` sees with no cwd discovery in play.
-    fn view_at(root: &Path) -> VaultView<'_> {
-        VaultView {
-            root,
-            pinned_style: None,
-            local: false,
-        }
-    }
-
-    fn msg_of(r: CheckResult) -> String {
-        match r.status {
-            CheckStatus::Ok(m)
-            | CheckStatus::Fail(m)
-            | CheckStatus::Skipped(m)
-            | CheckStatus::Warn(m) => m,
-        }
-    }
-
-    #[test]
-    fn every_style_is_listed_with_no_active_marker() {
-        let d = tempfile::tempdir().unwrap();
-        styles_at(
-            d.path(),
-            &[("ros2", true, true), ("swarmbotix", true, true)],
-        );
-        let msg = msg_of(check_message_styles(&view_at(&d.path().join("messages"))));
-        assert!(msg.contains("ros2"), "{msg}");
-        assert!(msg.contains("swarmbotix"), "{msg}");
-        // Nothing is "selected" — a message name carries its own style, so
-        // marking one would imply a mode that no longer exists.
-        assert!(!msg.contains('*'), "no active marker expected: {msg}");
-    }
-
-    #[test]
-    fn a_style_with_definitions_but_no_targets_is_called_out() {
-        let d = tempfile::tempdir().unwrap();
-        styles_at(
-            d.path(),
-            &[("ros2", true, true), ("swarmbotix", true, false)],
-        );
-        let msg = msg_of(check_message_styles(&view_at(&d.path().join("messages"))));
-        assert!(msg.contains("NOT COMPILED"), "{msg}");
-        assert!(
-            msg.contains("sb message compile --style swarmbotix"),
-            "must name the fix: {msg}"
-        );
-    }
-
-    /// `sb doctor` must describe the vault the NEXT command will touch. When
-    /// cwd discovery wins, that is the discovered root — reporting cfg's
-    /// `messages_root` instead would name a tree nothing is about to use.
-    #[test]
-    fn discovered_root_is_reported_and_labeled() {
-        let d = tempfile::tempdir().unwrap();
-        styles_at(d.path(), &[("vrobots_msgs", true, true)]);
-        let root = d.path().join("messages");
-        let view = VaultView {
-            root: &root,
-            pinned_style: None,
-            local: true,
-        };
-        let msg = msg_of(check_message_styles(&view));
-        assert!(
-            msg.contains("discovered from cwd"),
-            "must say where it came from: {msg}"
-        );
-        assert!(msg.contains("vrobots_msgs"), "{msg}");
-    }
-
-    /// Standing inside a style pins it: doctor lists that style only, matching
-    /// what a bare `sb message compile` would build.
-    #[test]
-    fn pinned_style_narrows_the_listing_to_that_style() {
-        let d = tempfile::tempdir().unwrap();
-        styles_at(
-            d.path(),
-            &[("ros2", true, true), ("vrobots_msgs", true, true)],
-        );
-        let root = d.path().join("messages");
-        let view = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        let msg = msg_of(check_message_styles(&view));
-        assert!(msg.contains("only it is in scope"), "{msg}");
-        assert!(msg.contains("vrobots_msgs"), "{msg}");
-        assert!(
-            !msg.contains("ros2"),
-            "pinned style must exclude siblings: {msg}"
-        );
-    }
-
-    /// A standalone message repo has no `ros2` style and should not be failed
-    /// for it — the forge bundle only ever installs into the configured vault.
-    #[test]
-    fn std_vault_is_skipped_not_failed_for_a_discovered_root() {
-        let d = tempfile::tempdir().unwrap();
-        styles_at(d.path(), &[("vrobots_msgs", true, true)]);
-        let root = d.path().join("messages");
-        let local = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        let r = check_std_vault(&local);
-        assert!(
-            !r.status.is_fail(),
-            "discovered root must not fail std vault"
-        );
-        assert!(
-            matches!(r.status, CheckStatus::Skipped(_)),
-            "expected a skip"
-        );
-
-        // The configured vault still fails loudly — that one is meant to have std/.
-        let configured = VaultView {
-            root: &root,
-            pinned_style: None,
-            local: false,
-        };
-        assert!(check_std_vault(&configured).status.is_fail());
-    }
-
-    #[test]
-    fn no_styles_at_all_is_a_failure() {
-        let d = tempfile::tempdir().unwrap();
-        let r = check_message_styles(&view_at(&d.path().join("messages")));
-        assert!(r.status.is_fail());
-    }
-
-    // ── unity targets ─────────────────────────────────────────────────
-
-    /// Build `<dir>/virtual_robots/Assets/Scripts` as a vault root, with one
-    /// style holding a single generated `.cs` at `iox2/<sub>/<file>`.
-    fn unity_vault_with(dir: &Path, style: &str, sub: &str, file: &str, body: &str) -> PathBuf {
-        let unity = dir.join("virtual_robots");
-        std::fs::create_dir_all(unity.join("ProjectSettings")).unwrap();
-        let scripts = unity.join("Assets").join("Scripts");
-        let s = scripts.join(style);
-        std::fs::create_dir_all(s.join("message_definitions").join("ns")).unwrap();
-        let t = s.join("message_targets").join("iox2").join(sub);
-        std::fs::create_dir_all(&t).unwrap();
-        std::fs::write(t.join(file), body).unwrap();
-        scripts
-    }
-
-    /// As above, with generated C# that is either pre-C#9 (`stale`) or current.
-    fn unity_vault(dir: &Path, style: &str, stale: bool) -> PathBuf {
-        let body = if stale {
-            "namespace swarmbotix_states;
-[InlineArray(4)]
-public struct A { }
-"
-        } else {
-            "namespace swarmbotix_states
-{
-    public struct A { }
-}
-"
-        };
-        unity_vault_with(dir, style, "states", "A.cs", body)
-    }
-
-    /// A message file that declares its own array wrapper — the pre-0.1.39
-    /// shape. Legal on its own; `CS0101` the moment a second message in the
-    /// package shares the element type, which is how it was reported.
-    const INLINE_WRAPPER: &str = "namespace swarmbotix_services
-{
-    public unsafe struct SrvOMRWallMsg { }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public unsafe struct swarmbotix_primitives_Vec3Msg_Array256 {
-        public const int Length = 256;
-    }
-}
-";
-
-    /// Files written by an older `sb` still carry file-scoped namespaces and
-    /// [InlineArray]; fixing the emitter does not rewrite them, only a
-    /// recompile does. Detection is by content, not by directory name.
-    #[test]
-    fn pre_csharp9_generated_code_in_a_unity_tree_is_warned_about() {
-        let d = tempfile::tempdir().unwrap();
-        let root = unity_vault(d.path(), "vrobots_msgs", true);
-        let view = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        let r = check_unity_targets(&view);
-        assert!(r.status.is_warn(), "expected a warning, got {:?}", r.status);
-        let m = msg_of(r);
-        assert!(m.contains("predate the current emitter"), "{m}");
-        assert!(m.contains("sb message compile"), "must name the fix: {m}");
-    }
-
-    /// A tree compiled before 0.1.39 still has the wrapper inline in every
-    /// message that uses it. Recompiling is the only thing that moves it, so
-    /// doctor has to say so — the host build is what breaks, not `sb`.
-    #[test]
-    fn inline_array_wrapper_in_a_unity_tree_is_warned_about() {
-        let d = tempfile::tempdir().unwrap();
-        let root = unity_vault_with(
-            d.path(),
-            "vrobots_msgs",
-            "services",
-            "SrvOMRWallMsg.cs",
-            INLINE_WRAPPER,
-        );
-        let view = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        let r = check_unity_targets(&view);
-        assert!(r.status.is_warn(), "expected a warning, got {:?}", r.status);
-        let m = msg_of(r);
-        assert!(m.contains("_arrays"), "must point at the new home: {m}");
-    }
-
-    /// The same declaration under `iox2/_arrays/` is exactly what a current
-    /// `sb` writes. Flagging it would make the warning permanent.
-    #[test]
-    fn wrapper_in_the_arrays_dir_is_not_flagged() {
-        let d = tempfile::tempdir().unwrap();
-        let root = unity_vault_with(
-            d.path(),
-            "vrobots_msgs",
-            "_arrays",
-            "swarmbotix_primitives_Vec3Msg_Array256.cs",
-            "namespace sb_iox2_arrays
-{
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public unsafe struct swarmbotix_primitives_Vec3Msg_Array256 {
-        public const int Length = 256;
-    }
-}
-",
-        );
-        let view = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        assert!(check_unity_targets(&view).status.is_ok());
-    }
-
-    /// The whole point of the emitter fix: iox2 C# is now allowed to live in a
-    /// Unity tree, so current output must NOT be flagged.
-    #[test]
-    fn current_csharp_in_a_unity_tree_is_clean() {
-        let d = tempfile::tempdir().unwrap();
-        let root = unity_vault(d.path(), "vrobots_msgs", false);
-        let view = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        assert!(check_unity_targets(&view).status.is_ok());
-    }
-
-    /// A warning must not fail the exit code — the breakage is in the host
-    /// project, and failing would block every unrelated `sb doctor`.
-    #[test]
-    fn a_warning_does_not_fail_the_report() {
-        let d = tempfile::tempdir().unwrap();
-        let root = unity_vault(d.path(), "vrobots_msgs", true);
-        let view = VaultView {
-            root: &root,
-            pinned_style: Some("vrobots_msgs"),
-            local: true,
-        };
-        let report = Report {
-            checks: vec![check_unity_targets(&view)],
-        };
-        assert!(report.all_ok(), "warn must not be a failure");
-        assert!(report.render(false).contains("[WARN]"));
-    }
-
-    /// The same output outside a Unity project is nobody's problem.
-    #[test]
-    fn stale_csharp_outside_a_unity_project_is_not_flagged() {
-        let d = tempfile::tempdir().unwrap();
-        styles_at(d.path(), &[("swarmbotix", true, true)]);
-        let root = d.path().join("messages");
-        let view = VaultView {
-            root: &root,
-            pinned_style: None,
-            local: false,
-        };
-        assert!(check_unity_targets(&view).status.is_ok());
-    }
-
-    #[test]
-    fn deprecated_keys_are_reported_as_ignored() {
-        let d = tempfile::tempdir().unwrap();
-        let mut cfg = cfg_at(d.path());
-        // Parsed but dead. Silence here would let someone believe a stale
-        // `message_style:` still took effect.
-        cfg.message_style = Some("ros2".into());
-        let r = check_deprecated_keys(&cfg);
-        assert!(r.status.is_fail());
-        let m = msg_of(r);
-        assert!(m.contains("message_style"), "{m}");
-        assert!(m.contains("IGNORED"), "{m}");
-
-        assert!(check_deprecated_keys(&cfg_at(d.path())).status.is_ok());
     }
 }

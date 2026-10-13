@@ -12,7 +12,8 @@ fn main() {
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .expect("expected examples/rust_zenoh_stamped/pubber/ under repo root");
-    let messages = repo_root.join("messages");
+    // The ros2 style's include root, where `std/` lives.
+    let messages = repo_root.join("messages/ros2/message_definitions");
 
     let header = messages.join("std/Header.proto");
     let stamped = messages.join("std/StringStamped.proto");

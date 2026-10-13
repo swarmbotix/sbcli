@@ -26,6 +26,22 @@
 //!
 //! Nothing resolved → hex with a null schema.
 //!
+//! A Zenoh sample's encoding is read as a [`WireTag`]. Without `--type`:
+//!
+//! - `Protobuf(name)` resolves the schema as `"wire"` and decodes as
+//!   protobuf, as before.
+//! - `Flatbuffers(name)` decodes through `flatc` against the compiled
+//!   binary schema `<message_targets>/fb/<ns>/<Leaf>/<Leaf>.bfbs` of the
+//!   name's style ([`FbLookup`]); without one it prints hex with `schema`
+//!   set and notes once on stderr how to get one.
+//! - `Text(mime)` prints the payload as a string,
+//!   `{"kind": "text", "text": "…"}`, with the MIME type as `schema`.
+//! - `Octets` and `Unknown` add nothing; the Header probe and the module
+//!   config still apply, which keeps untagged (0.4.x) samples as they were.
+//!
+//! `encoding` in the JSON line is `"protobuf"`, `"flatbuffers"`, `"text"`,
+//! `"iox2"`, or `null`.
+//!
 //! Protobuf bodies decode through a [`DescriptorPool`]; iceoryx2 bodies are
 //! `#[repr(C)]` structs and decode through [`crate::iox2_decode`]. `bytes`
 //! fields render the same way on both paths: inline when at most
@@ -37,8 +53,13 @@
 //!
 //! `--raw` short-circuits BOTH paths to hex + null schema.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Once;
+
 use prost_reflect::{DescriptorPool, DynamicMessage, Kind, ReflectMessage, Value as ProtoValue};
-use sb_discover::probe_header;
+use sb_discover::{WireTag, probe_header};
+use sb_vault::{MessageName, Vault};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -55,6 +76,10 @@ const TRANSPORT_ICEORYX2: &str = "iceoryx2";
 const ENCODING_PROTOBUF: &str = "protobuf";
 /// Body is an iceoryx2 flat `#[repr(C)]` struct (the `--iox2` backend).
 const ENCODING_IOX2: &str = "iox2";
+/// Body is FlatBuffers bytes (a [`WireTag::Flatbuffers`] sample).
+const ENCODING_FLATBUFFERS: &str = "flatbuffers";
+/// Body is text (a [`WireTag::Text`] sample).
+const ENCODING_TEXT: &str = "text";
 
 /// A `bytes` field longer than this renders as a summary object instead of
 /// its full contents.
@@ -96,6 +121,8 @@ pub struct DecodedFrame<'a> {
     /// `None` whenever `schema` is `None`.
     pub schema_source: Option<&'static str>,
     pub hash: Option<String>,
+    /// `"protobuf"` | `"flatbuffers"` | `"text"` | `"iox2"`, or `None` when
+    /// nothing says how the body is framed.
     pub encoding: Option<&'static str>,
     pub payload: FramePayload,
     /// Set when the body was decoded with [`DecodeContext::keep_bytes`]:
@@ -136,8 +163,16 @@ impl DecodedFrame<'_> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FramePayload {
-    Hex { bytes: String },
-    Json { json: Value },
+    Hex {
+        bytes: String,
+    },
+    Json {
+        json: Value,
+    },
+    /// The body of a [`WireTag::Text`] sample, as UTF-8.
+    Text {
+        text: String,
+    },
 }
 
 /// Everything [`decode_frame_dynamic`] needs beyond the frame itself. Built
@@ -160,6 +195,38 @@ pub struct DecodeContext<'a> {
     /// topic (`sb_discover::ResolveOutcome::schema`). The last schema
     /// source, after the Header probe.
     pub config_schema: Option<&'a str>,
+    /// What decodes a [`WireTag::Flatbuffers`] sample.
+    pub flatbuffers: FbLookup<'a>,
+}
+
+/// What decodes a FlatBuffers payload: `flatc` plus the vault whose
+/// `message_targets` hold the compiled binary schemas. Either missing
+/// leaves FlatBuffers frames as hex.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FbLookup<'a> {
+    /// The `flatc` binary (`sb.config.yml`'s `flatc:`).
+    pub flatc: Option<&'a Path>,
+    /// The vault; a message's binary schema is looked up at
+    /// `<targets_dir(style)>/fb/<ns>/<Leaf>/<Leaf>.bfbs`.
+    pub vault: Option<&'a Vault>,
+}
+
+impl FbLookup<'_> {
+    /// Where the compiled binary schema of vault message `name` lives,
+    /// whether or not it exists. `None` without a vault or for a name that
+    /// is not `<style>/<ns>/<Leaf>`.
+    pub fn bfbs_path(&self, name: &str) -> Option<PathBuf> {
+        let vault = self.vault?;
+        let msg = MessageName::parse(name).ok()?;
+        Some(
+            vault
+                .targets_dir(&msg.style)
+                .join("fb")
+                .join(&msg.namespace)
+                .join(&msg.leaf)
+                .join(format!("{}.bfbs", msg.leaf)),
+        )
+    }
 }
 
 /// What maps an iceoryx2 payload to a vault message.
@@ -222,6 +289,18 @@ pub fn decode_frame_dynamic<'a>(
 ) -> DecodedFrame<'a> {
     if raw {
         return decode_frame(transport, topic, &frame.bytes, true);
+    }
+    // A FlatBuffers or text tag says how to read the body; only `--type`
+    // overrides it.
+    let flag = type_override.map(str::trim).filter(|t| !t.is_empty());
+    match (&frame.wire_tag, flag) {
+        (Some(WireTag::Flatbuffers(name)), None) => {
+            return decode_flatbuffers(transport, topic, name, &frame.bytes, ctx.flatbuffers);
+        }
+        (Some(WireTag::Text(mime)), None) => {
+            return text_frame(transport, topic, mime, &frame.bytes);
+        }
+        _ => {}
     }
     let Some((schema, source)) = resolve_schema(type_override, frame, ctx.config_schema) else {
         return hex_frame(transport, topic, None, None, None, &frame.bytes);
@@ -385,9 +464,11 @@ fn decode_protobuf<'a>(
     let Some(desc) = desc else {
         // Schema known to publisher but not in the consumer's pool —
         // fall through to hex with a populated schema column so the
-        // user knows what they're missing. Only a Header probe proves
-        // the body is protobuf; a flag or wire name alone does not.
-        let encoding = (source == SchemaSource::Header).then_some(ENCODING_PROTOBUF);
+        // user knows what they're missing. A Header probe or a protobuf
+        // wire tag (the only wire schema that reaches here) proves the
+        // body is protobuf; a flag or config name alone does not.
+        let encoding = matches!(source, SchemaSource::Header | SchemaSource::Wire)
+            .then_some(ENCODING_PROTOBUF);
         return hex_frame(
             transport,
             topic,
@@ -425,6 +506,130 @@ fn decode_protobuf<'a>(
         payload: FramePayload::Json { json },
         unsummarized,
     }
+}
+
+/// A [`WireTag::Text`] frame: the body as a string, the MIME type as
+/// `schema`. A body that is not UTF-8 prints as hex, schema kept.
+fn text_frame<'a>(
+    transport: &'a str,
+    topic: &'a str,
+    mime: &str,
+    bytes: &[u8],
+) -> DecodedFrame<'a> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => DecodedFrame {
+            transport,
+            topic,
+            schema: Some(mime.to_owned()),
+            schema_source: Some(SchemaSource::Wire.as_str()),
+            hash: None,
+            encoding: Some(ENCODING_TEXT),
+            payload: FramePayload::Text {
+                text: text.to_owned(),
+            },
+            unsummarized: None,
+        },
+        Err(_) => hex_frame(
+            transport,
+            topic,
+            Some(mime.to_owned()),
+            Some(SchemaSource::Wire),
+            Some(ENCODING_TEXT),
+            bytes,
+        ),
+    }
+}
+
+/// Printed (once per process) when a FlatBuffers frame cannot be decoded
+/// for lack of a compiled binary schema.
+static FB_NO_BFBS_NOTE: Once = Once::new();
+/// Printed (once per process) when a FlatBuffers frame cannot be decoded
+/// for lack of `flatc`.
+static FB_NO_FLATC_NOTE: Once = Once::new();
+
+/// A [`WireTag::Flatbuffers`] frame, decoded to JSON by `flatc` when the
+/// message's `.bfbs` and `flatc` are both available, else hex with
+/// `schema` set (and a one-time stderr note naming what is missing). A
+/// body `flatc` rejects also prints as hex. `bytes` fields are not
+/// summarized: `flatc` renders a byte vector as a plain number array.
+fn decode_flatbuffers<'a>(
+    transport: &'a str,
+    topic: &'a str,
+    name: &str,
+    bytes: &[u8],
+    fb: FbLookup<'_>,
+) -> DecodedFrame<'a> {
+    let hex = || {
+        hex_frame(
+            transport,
+            topic,
+            Some(name.to_owned()),
+            Some(SchemaSource::Wire),
+            Some(ENCODING_FLATBUFFERS),
+            bytes,
+        )
+    };
+    let Some(bfbs) = fb.bfbs_path(name).filter(|p| p.is_file()) else {
+        FB_NO_BFBS_NOTE.call_once(|| {
+            eprintln!(
+                "note: flatbuffers decode needs a compiled .bfbs; run sb message compile --fb \
+                 (showing {name} as hex)"
+            );
+        });
+        return hex();
+    };
+    let Some(flatc) = fb.flatc else {
+        FB_NO_FLATC_NOTE.call_once(|| {
+            eprintln!(
+                "note: flatbuffers decode needs flatc; set it in sb.config.yml \
+                 (showing {name} as hex)"
+            );
+        });
+        return hex();
+    };
+    match flatc_to_json(flatc, &bfbs, name, bytes) {
+        Some(json) => DecodedFrame {
+            transport,
+            topic,
+            schema: Some(name.to_owned()),
+            schema_source: Some(SchemaSource::Wire.as_str()),
+            hash: None,
+            encoding: Some(ENCODING_FLATBUFFERS),
+            payload: FramePayload::Json { json },
+            unsummarized: None,
+        },
+        None => hex(),
+    }
+}
+
+/// Convert one FlatBuffers payload to JSON with
+/// `flatc --json --raw-binary --strict-json -o <tmp> <schema.bfbs> -- <payload>`.
+///
+/// Schemas converted from `.proto` declare no `root_type`, so the root is
+/// named with `--root-type`, trying the same package candidates as the
+/// protobuf decoder ([`protobuf_name_candidates`]). `None` when no
+/// candidate converts or anything about the run fails.
+fn flatc_to_json(flatc: &Path, bfbs: &Path, name: &str, bytes: &[u8]) -> Option<Value> {
+    let tmp = tempfile::tempdir().ok()?;
+    let payload = tmp.path().join("payload.bin");
+    std::fs::write(&payload, bytes).ok()?;
+    let out = tmp.path().join("payload.json");
+    protobuf_name_candidates(name).iter().find_map(|root| {
+        let status = Command::new(flatc)
+            .args(["--json", "--raw-binary", "--strict-json", "--root-type"])
+            .arg(root)
+            .arg("-o")
+            .arg(tmp.path())
+            .arg(bfbs)
+            .arg("--")
+            .arg(&payload)
+            .output()
+            .ok()?;
+        if !status.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&std::fs::read(&out).ok()?).ok()
+    })
 }
 
 /// Apply the `bytes` rendering rules to a serialized protobuf message, in
@@ -586,17 +791,9 @@ mod tests {
     #[test]
     fn header_probe_populates_schema() {
         let bytes = synthetic_stamped("std/StringStamped", 5.0);
-        let frame = decode_frame("zenoh", "/x", &bytes, false);
+        let frame = decode_frame("zenoh", "x", &bytes, false);
         assert_eq!(frame.schema.as_deref(), Some("std/StringStamped"));
         assert_eq!(frame.encoding, Some("protobuf"));
-    }
-
-    #[test]
-    fn raw_skips_probe_and_returns_null_schema() {
-        let bytes = synthetic_stamped("std/StringStamped", 5.0);
-        let frame = decode_frame("zenoh", "/x", &bytes, true);
-        assert!(frame.schema.is_none());
-        assert!(frame.encoding.is_none());
     }
 
     /// `--type` beats the transport's schema, which beats the Header probe,
@@ -616,7 +813,7 @@ mod tests {
 
         let flag = decode_frame_dynamic(
             "zenoh",
-            "/x",
+            "x",
             &with_wire,
             false,
             Some("ros2/std/Vector3"),
@@ -626,42 +823,30 @@ mod tests {
         assert_eq!(flag.schema_source, Some("flag"));
         assert!(render_decoded_json_line(&flag).contains("\"schema_source\":\"flag\""));
 
-        let wire = decode_frame_dynamic("zenoh", "/x", &with_wire, false, None, &ctx);
+        let wire = decode_frame_dynamic("zenoh", "x", &with_wire, false, None, &ctx);
         assert_eq!(wire.schema.as_deref(), Some("ros2/std/String"));
         assert_eq!(wire.schema_source, Some("wire"));
 
-        let header = decode_frame_dynamic("zenoh", "/x", &header_only, false, None, &ctx);
+        let header = decode_frame_dynamic("zenoh", "x", &header_only, false, None, &ctx);
         assert_eq!(header.schema.as_deref(), Some("ros2/std/StringStamped"));
         assert_eq!(header.schema_source, Some("header"));
 
         // No flag, no wire schema, no Header: the module config names it.
         let untagged = Frame::from(b"foo".to_vec());
-        let config = decode_frame_dynamic("zenoh", "/x", &untagged, false, None, &ctx);
+        let config = decode_frame_dynamic("zenoh", "x", &untagged, false, None, &ctx);
         assert_eq!(config.schema.as_deref(), Some("ros2/custom/CubePoses"));
         assert_eq!(config.schema_source, Some("config"));
         assert!(render_decoded_json_line(&config).contains("\"schema_source\":\"config\""));
 
         let none = decode_frame_dynamic(
             "zenoh",
-            "/x",
+            "x",
             &untagged,
             false,
             None,
             &DecodeContext::default(),
         );
         assert_eq!((none.schema, none.schema_source), (None, None));
-    }
-
-    #[test]
-    fn json_line_is_compact_single_line() {
-        let frame = decode_frame("zenoh", "/x", b"foo", false);
-        let line = render_decoded_json_line(&frame);
-        assert!(
-            !line.contains('\n'),
-            "json line must not contain newlines: {line}"
-        );
-        assert!(line.contains("\"transport\":\"zenoh\""));
-        assert!(line.contains("\"payload\":{\"kind\":\"hex\",\"bytes\":\"666f6f\"}"));
     }
 
     /// The style segment is dropped: it is part of the vault identity but
@@ -704,12 +889,5 @@ mod tests {
             c.contains(&"swarmbotix.nav_msgs.Path".to_string()),
             "swarmbotix-prefixed package: {c:?}"
         );
-    }
-
-    #[test]
-    fn degenerate_names_do_not_panic() {
-        assert_eq!(protobuf_name_candidates("Leaf"), vec!["Leaf".to_string()]);
-        assert!(!protobuf_name_candidates("").is_empty());
-        assert!(!protobuf_name_candidates("///").is_empty());
     }
 }

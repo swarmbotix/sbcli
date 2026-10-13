@@ -18,7 +18,7 @@ fn main() -> zenoh::Result<()> {
     // hasn't quite finished its scout/declare round-trip still catches
     // at least one sample.
     for _ in 0..50 {
-        pubber.publish(b"HELLO_FROM_RUST")?;
+        pubber.publish_bytes(b"HELLO_FROM_RUST")?;
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Ok(())

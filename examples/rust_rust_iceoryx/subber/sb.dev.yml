@@ -1,9 +1,8 @@
 module: subber
 language: rust
-root: /home/el/Dropbox/Projects/swarmbotix/examples/rust_rust_iceoryx/subber
 io_dir: swarmbotix_io
 subscribers:
 - name: frame
-  topic: /dev01/demo/pubber/iox2/frame
-  type: std/ImageStamped
+  key: dev01/demo/pubber/iox2/frame
+  type: ros2/std/ImageStamped
   transport: iceoryx2

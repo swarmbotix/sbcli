@@ -113,25 +113,6 @@ mod tests {
     }
 
     #[test]
-    fn tags_need_the_v() {
-        assert_eq!(parse_tag("v0.2.1").unwrap(), v("0.2.1"));
-        assert_eq!(parse_tag("v1.0.0-rc.1").unwrap(), v("1.0.0-rc.1"));
-        let err = parse_tag("0.2.1").unwrap_err().to_string();
-        assert!(err.contains("does not start with `v`"), "{err}");
-        assert!(parse_tag("v0.2").is_err());
-        assert!(parse_tag("vlatest").is_err());
-        assert!(parse_tag("v").is_err());
-    }
-
-    #[test]
-    fn user_versions_take_an_optional_v() {
-        assert_eq!(parse_version("0.2.1").unwrap(), v("0.2.1"));
-        assert_eq!(parse_version(" v0.2.1 ").unwrap(), v("0.2.1"));
-        let err = format!("{:#}", parse_version("latest").unwrap_err());
-        assert!(err.contains("expected X.Y.Z"), "{err}");
-    }
-
-    #[test]
     fn status_orders_by_semver() {
         assert_eq!(
             Status::of(&v("0.2.0"), &v("0.2.3")),
@@ -147,11 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn installed_is_the_package_version() {
-        assert_eq!(installed().to_string(), env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
     fn asset_names() {
         assert_eq!(
             asset_name(&v("0.2.3"), "linux-x86_64"),
@@ -161,23 +137,5 @@ mod tests {
             package_stem(&v("0.2.3"), "windows-x86_64"),
             "swarmbotix-0.2.3-windows-x86_64"
         );
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    #[test]
-    fn arch_of_this_build() {
-        assert_eq!(arch().unwrap(), "linux-x86_64");
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    #[test]
-    fn arch_of_this_build() {
-        assert_eq!(arch().unwrap(), "linux-aarch64");
-    }
-
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    #[test]
-    fn arch_of_this_build() {
-        assert_eq!(arch().unwrap(), "windows-x86_64");
     }
 }

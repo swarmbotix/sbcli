@@ -1,6 +1,6 @@
 # L3 — Pub/Sub Management & Codegen (running report)
 
-Last updated: 2026-05-23
+Last updated: 2026-10-13
 
 ---
 
@@ -147,6 +147,10 @@ Plus the two `cargo check` gates (slice B):
 ---
 
 ## TDD test → location map
+
+> Test suite pruned in 0.5.0 to the critical set; the files named below
+> that no longer exist were removed then. See
+> [plan/lv4_report.md](lv4_report.md) 0.5.0 note.
 
 | # | Spec | Where |
 |---|---|---|

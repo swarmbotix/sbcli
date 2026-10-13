@@ -1,8 +1,11 @@
 //! L3 TDD #5 — generated Rust files compile inside a real Rust crate.
 //!
-//! Marked `#[ignore]` because the fixture pulls `zenoh = "1.9"` + the
-//! iceoryx2 deps from crates.io and compiles them. First run downloads
-//! ~100 MB and takes minutes; subsequent runs hit the registry cache.
+//! Marked `#[ignore]` because the fixture pulls `zenoh = "1.9"` (plus
+//! `prost`, which the generated proto publisher's typed `publish` needs)
+//! and the iceoryx2 deps from crates.io and compiles them. First run
+//! downloads ~100 MB and takes minutes; subsequent runs hit the registry
+//! cache. The iceoryx2 test also needs `protoc` in the dev-box
+//! `sb.config.yml`, because it compiles the std message with `--iox2`.
 //!
 //! Run with:
 //!
@@ -96,7 +99,9 @@ fn cargo_check(module_root: &std::path::Path) -> std::process::Output {
 #[ignore = "heavy — downloads zenoh + iceoryx2 dependencies"]
 fn generated_zenoh_publisher_compiles() {
     let s = L3Sandbox::rust("pubber_zenoh");
-    seed_cargo_crate(&s, "zenoh = \"1.9\"\n");
+    // `prost` matches the workspace pin: the generated proto publisher's
+    // `publish<M: prost::Message>` names the crate directly.
+    seed_cargo_crate(&s, "zenoh = \"1.9\"\nprost = \"0.13\"\n");
 
     let out = s
         .cmd_in_module()
@@ -125,10 +130,36 @@ fn generated_zenoh_publisher_compiles() {
 }
 
 #[test]
-#[ignore = "heavy — downloads iceoryx2 dependencies"]
+#[ignore = "heavy: downloads iceoryx2 dependencies and needs protoc"]
 fn generated_iceoryx_publisher_compiles() {
     let s = L3Sandbox::rust("pubber_iox");
     seed_cargo_crate(&s, "iceoryx2 = \"0.9\"\n");
+
+    // The generated publisher `#[path]`-includes the iox2-flat payload from
+    // `<message_targets>/iox2/std/ImageStamped/ImageStamped.rs`. The
+    // committed L3 fixture seeds only the `.h` (enough for the C++ codegen),
+    // so produce the real bindings the way an install does. This also
+    // replaces the fixture `.h` with real typegen output, which is what a
+    // user's tree holds.
+    let compile =
+        s.ws.cmd()
+            .args(["message", "compile", "--iox2", "ros2/std/ImageStamped"])
+            .output()
+            .unwrap();
+    assert!(
+        compile.status.success(),
+        "sb message compile --iox2 failed (is protoc set in sb.config.yml?):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let payload_rs =
+        s.ws.targets_dir()
+            .join("iox2/std/ImageStamped/ImageStamped.rs");
+    assert!(
+        payload_rs.is_file(),
+        "compile --iox2 did not write {}",
+        payload_rs.display()
+    );
 
     let out = s
         .cmd_in_module()

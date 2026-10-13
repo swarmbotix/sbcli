@@ -30,20 +30,8 @@ impl L3Sandbox {
         Self::with_language(module_name, "--rust")
     }
 
-    pub fn python(module_name: &str) -> Self {
-        Self::with_language(module_name, "--python")
-    }
-
-    pub fn cpp(module_name: &str) -> Self {
-        Self::with_language(module_name, "--cpp")
-    }
-
     pub fn flutter(module_name: &str) -> Self {
         Self::with_language(module_name, "--flutter")
-    }
-
-    pub fn unity(module_name: &str) -> Self {
-        Self::with_language(module_name, "--unity")
     }
 
     fn with_language(module_name: &str, lang_flag: &str) -> Self {

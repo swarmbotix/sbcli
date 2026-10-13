@@ -20,7 +20,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.4.2"
+version = "0.5.0"
 license = "Apache-2.0"
 rust-version = "1.82"
 
@@ -55,7 +55,6 @@ tempfile = "3"
 which = "7"
 prost = "0.13"
 prost-types = "0.13"
-prost-build = "0.13"
 prost-reflect = { version = "0.16", features = ["serde"] }
 zenoh = "=1.9.0"
 iceoryx2 = "=0.9.3"

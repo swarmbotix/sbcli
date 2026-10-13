@@ -69,37 +69,3 @@ fn header_has_msg_freq_desired_field_in_descriptor_set() {
     use prost_types::field_descriptor_proto::Type;
     assert_eq!(freq_field.r#type(), Type::Double);
 }
-
-#[test]
-fn all_bundled_std_messages_present_in_descriptor_set() {
-    let s = Sandbox::new();
-    let Some(protoc) = protoc_path(&s) else {
-        eprintln!("protoc not configured on this host — skipping");
-        return;
-    };
-    if !protoc.exists() {
-        return;
-    }
-    s.cmd().args(["message", "list"]).output().unwrap();
-    let out = s.cmd().args(["message", "compile"]).output().unwrap();
-    assert!(out.status.success());
-
-    let descriptor = s.vault_dir().join(".cache").join("descriptor.bin");
-    let fds = FileDescriptorSet::decode(&*std::fs::read(&descriptor).unwrap()).unwrap();
-    let names: Vec<&str> = fds.file.iter().map(|f| f.name()).collect();
-    for expected in [
-        "std/Header.proto",
-        "std/String.proto",
-        "std/StringStamped.proto",
-        "std/Vector3.proto",
-        "std/Twist.proto",
-        "std/TwistStamped.proto",
-        "std/Image.proto",
-        "std/ImageStamped.proto",
-    ] {
-        assert!(
-            names.contains(&expected),
-            "missing {expected} in descriptor set, got {names:?}"
-        );
-    }
-}

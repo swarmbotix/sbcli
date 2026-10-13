@@ -18,10 +18,14 @@ use sb_listen::{FrameIter, listen_zenoh};
 #[test]
 #[ignore = "live zenoh — run with --ignored"]
 fn sb_topic_pub_round_trips_through_zenoh() {
-    let topic_full = "/test/lvl4/roundtrip/zenoh/payload";
+    // The listener declares the canonical wire key; the CLI is handed the
+    // 0.4.x slashed spelling. The round-trip only closes if `sb topic pub`
+    // drops the leading `/` before publishing.
+    let key = "test/lvl4/roundtrip/zenoh/payload";
+    let slashed_input = "/test/lvl4/roundtrip/zenoh/payload";
     let (tx, rx) = mpsc::channel();
     let sub_handle = thread::spawn(move || {
-        let mut sub = listen_zenoh(topic_full).expect("listen_zenoh");
+        let mut sub = listen_zenoh(key).expect("listen_zenoh");
         // Block until first frame.
         let frame = sub.next_frame().expect("next_frame");
         let _ = tx.send(frame);
@@ -33,7 +37,7 @@ fn sb_topic_pub_round_trips_through_zenoh() {
     let sandbox = Sandbox::new();
     let out = sandbox
         .cmd()
-        .args(["topic", "pub", topic_full, "deadbeef"])
+        .args(["topic", "pub", slashed_input, "deadbeef"])
         .output()
         .expect("sb topic pub");
     assert!(
@@ -41,6 +45,11 @@ fn sb_topic_pub_round_trips_through_zenoh() {
         "sb topic pub failed: stdout={:?} stderr={:?}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("published 4 byte(s) on {key} via Zenoh")),
+        "echo should name the slash-less wire key: {stdout}"
     );
 
     let frame = rx

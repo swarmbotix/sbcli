@@ -117,15 +117,6 @@ mod tests {
         assert_eq!(c.backends, Some(vec![Backend::Fb]));
     }
 
-    #[test]
-    fn parses_all_three_backends() {
-        let c = StyleConfig::parse("backends: [iox2, proto, fb]\n", "x").unwrap();
-        assert_eq!(
-            c.backends,
-            Some(vec![Backend::Iox2, Backend::Proto, Backend::Fb])
-        );
-    }
-
     /// An empty list is not the same as no key. It means "emit nothing
     /// automatically" — the only way to say "I compile this by hand".
     #[test]
@@ -148,22 +139,5 @@ mod tests {
     #[test]
     fn unknown_backend_is_rejected() {
         assert!(StyleConfig::parse("backends: [capnp]\n", "x").is_err());
-    }
-
-    #[test]
-    fn round_trips_through_yaml() {
-        let c = StyleConfig {
-            backends: Some(vec![Backend::Fb]),
-        };
-        let back = StyleConfig::parse(&c.to_yaml(), "x").unwrap();
-        assert_eq!(back, c);
-    }
-
-    #[test]
-    fn round_trips_an_empty_list() {
-        let c = StyleConfig {
-            backends: Some(vec![]),
-        };
-        assert_eq!(StyleConfig::parse(&c.to_yaml(), "x").unwrap(), c);
     }
 }

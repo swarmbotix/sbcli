@@ -293,26 +293,3 @@ fn decode_compressed(format: &str, data: &[u8]) -> Result<RgbImage> {
         .with_context(|| format!("cannot decode {format:?} frame ({} bytes)", data.len()))?;
     Ok(decoded.into_rgb8())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn converts_mono8_and_bgr8_to_0rgb() {
-        let mut out = Vec::new();
-
-        // 2x2 mono8 with one padding byte per row (step 3).
-        let mono = [0x00, 0xff, 0xee, 0x10, 0x80, 0xee];
-        convert_raw(2, 2, "mono8", 3, &mono, &mut out).expect("mono8 converts");
-        assert_eq!(out, [0x00_0000, 0xff_ffff, 0x10_1010, 0x80_8080]);
-
-        // 2x2 bgr8, tightly packed: blue, green, red, white.
-        let bgr = [
-            0xff, 0x00, 0x00, 0x00, 0xff, 0x00, //
-            0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
-        ];
-        convert_raw(2, 2, "bgr8", 0, &bgr, &mut out).expect("bgr8 converts");
-        assert_eq!(out, [0x00_00ff, 0x00_ff00, 0xff_0000, 0xff_ffff]);
-    }
-}

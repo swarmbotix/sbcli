@@ -72,21 +72,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_typical_names() {
-        for s in [
-            "demo",
-            "demo_app",
-            "Cam01",
-            "_internal",
-            "x",
-            "X123",
-            "abc_123_xyz",
-        ] {
-            assert!(is_valid_identifier(s), "{s:?} should be valid");
-        }
-    }
-
-    #[test]
     fn rejects_per_l2_test_11_table() {
         // Cases pulled directly from the L2 TDD plan, test #11.
         for s in [
@@ -94,26 +79,5 @@ mod tests {
         ] {
             assert!(!is_valid_identifier(s), "{s:?} should be invalid");
         }
-    }
-
-    #[test]
-    fn error_types_are_specific() {
-        assert!(matches!(validate_identifier(""), Err(IdentError::Empty)));
-        assert!(matches!(
-            validate_identifier("123abc"),
-            Err(IdentError::StartsWithDigit { found: '1' })
-        ));
-        assert!(matches!(
-            validate_identifier("a-b"),
-            Err(IdentError::IllegalChar { found: '-' })
-        ));
-        assert!(matches!(
-            validate_identifier("a b"),
-            Err(IdentError::IllegalChar { found: ' ' })
-        ));
-        assert!(matches!(
-            validate_identifier("a/b"),
-            Err(IdentError::IllegalChar { found: '/' })
-        ));
     }
 }

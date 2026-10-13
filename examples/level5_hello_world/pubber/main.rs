@@ -11,7 +11,7 @@ use prost::Message;
 use swarmbotix_std::{Header, StringStamped, header::Metadata};
 use zenoh::Wait;
 
-const TOPIC_FULL: &str = "/dev01/demo/pubber/hello";
+const TOPIC_FULL: &str = "dev01/demo/pubber/zenoh/hello";
 const DECLARED_RATE_HZ: f64 = 10.0;
 
 fn build_stamped() -> Vec<u8> {
@@ -39,7 +39,7 @@ fn main() -> zenoh::Result<()> {
     // Publish at ~10 Hz forever — `sb up` runs us under tmux, `sb down`
     // kills the session and us with it.
     loop {
-        pubber.publish(&payload)?;
+        pubber.publish_bytes(&payload)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

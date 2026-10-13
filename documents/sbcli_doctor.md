@@ -28,6 +28,12 @@ a hard-coded checklist:
    is read off the install and checked against the linked crate.
 4. **Message vault** — `<message_definitions>/std/` must contain the
    forge-bundled `.proto` files; offers to re-install on miss.
+5. **Workspace topics** (sb 0.5.0+): pub/sub entries in the active
+   workspace's modules that still use the pre-0.5.0 `topic: /...`
+   spelling.
+6. **Workspace** (sb 0.5.0+): the `sb ws check` validation rows for the
+   active workspace (module files, message types, instance ids,
+   encodings per wire key, generated io files, staleness).
 
 No state is written. No network calls. No build / compile happens.
 Doctor is safe to run at any time, including during ongoing pub/sub
@@ -69,14 +75,17 @@ list. Each entry corresponds to one dependency.
 | 8 | `unity targets` | Scans each style's `message_targets/` that sits inside a Unity project and counts generated `.cs` files a current `sb` would not have written. **Warns, never fails** — the breakage is in the host project, not in `sb`. | `messages_root:` |
 | 9 | `config keys` | Reports `message_style` / `message_definitions` / `message_targets` if still present. They parse but do nothing, which is the combination that silently misleads. | any stale `sb.config.yml` |
 | 10 | `std vault` | Walks `<messages_root>/ros2/message_definitions/std/` and confirms the expected forge files are present. Always the ros2 style — that is where `std/` lives. | `messages_root:` |
-| 11 | `app` | One line per installed app package (`sb 0.2.1+`): its kind, whether its folder still exists, and whether each binary in its `requires` list is on `PATH`. **Warns, never fails**, and prints nothing when no apps are installed. Details in [sbcli_app.md](sbcli_app.md) §9. | `<sb_home>/apps.yml` |
+| 11 | `topics` | Scans the modules registered in the active workspace for publisher / subscriber entries still written as `topic: /<wire key>` (sb 0.5.0+). One `[WARN]` per offending module. **Warns, never fails**: such an entry is read as `key:` and works unchanged. `[SKIP]` with no active workspace. Details in §4.10. | the active workspace's `flow.yaml` and its modules' `sb.dev.yml` |
+| 12 | `workspace`, `ws *` | The `sb ws check` rows for the active workspace (sb 0.5.0+): `workspace` (summary), `ws modules`, `ws types`, `ws instances`, `ws encoding` (each `[FAIL]` per problem), `ws io files` and `ws source` (`[WARN]`). A `[FAIL]` here **fails doctor**: it breaks `sb up` or codegen. `[SKIP] workspace` with no active workspace. Details in §4.11. | the active workspace's installed `flow.yaml` (and through its `source:` the repo copy), its modules' `sb.dev.yml`, the configured vault |
+| 13 | `app` | One line per installed app package (`sb 0.2.1+`): its kind, whether its folder still exists, and whether each binary in its `requires` list is on `PATH`. **Warns, never fails**, and prints nothing when no apps are installed. Details in [sbcli_app.md](sbcli_app.md) §9. | `<sb_home>/apps.yml` |
 
 Checks 1, 2, 4, 5 and 6 share the same structure (`CheckResult` from
 `sb_doctor`). Checks 7, 8 and 9 have their own logic because they don't
 run a subprocess and aren't a `dlopen` — they inspect the on-disk style
 tree, the generated C# in it, and the config as parsed. Check 3 touches
 neither the config nor the disk: its two numbers are baked into the
-binary when it is built (§4.9).
+binary when it is built (§4.9). Checks 11 and 12 read the active
+workspace, not the host's tooling (§4.10, §4.11).
 
 **Check 10 always looks at ros2.** `std/` ships there and the embedded
 bundle installs there, so the check is not affected by what anyone happens
@@ -129,6 +138,19 @@ sb <version>
 [OK]   unity targets no stale generated C# in a Unity tree
 [OK]   config keys  no deprecated keys
 [OK]   std vault    /home/el/.swarmbotix/messages/ros2/message_definitions/std populated
+[OK]   topics       no legacy `topic: /...` entries in the active workspace
+```
+
+`sb 0.5.0+` follows the `topics` row with the workspace rows (§4.11):
+
+```
+[OK]   workspace    ws_ips: 2 module(s), installed from https://github.com/acme/ws_ips.git
+[OK]   ws modules   2 module(s), every sb.dev.yml parses
+[OK]   ws types     3 typed entries resolve in the vault
+[OK]   ws instances 0 instance(s), ids unique per module
+[OK]   ws encoding  3 wire key(s), encodings agree
+[OK]   ws io files  4 generated file(s) present
+[OK]   ws source    installed copy is current with /home/el/ws_ips/flow.yaml
 ```
 
 Three rows carry versions, and they are three different facts. `transports`
@@ -167,7 +189,9 @@ Field widths:
   6 chars wide.
 - Column 2: check name, padded to 12 chars (`protoc`, `flatc`,
   `transports`, `libzenohc`, `libiceoryx2`, `tmux`, `message styles`,
-  `unity targets`, `config keys`, `std vault`). Two names overflow that pad and push
+  `unity targets`, `config keys`, `std vault`, `topics`, and sb 0.5.0+
+  `workspace`, `ws modules`, `ws types`, `ws instances`, `ws encoding`,
+  `ws io files`, `ws source`). Two names overflow that pad and push
   column 3 to the right — `message styles` (14) and `unity targets`
   (13). Do not align a parser on a fixed column offset.
 - Column 3: free-form `<path> (<details>)` or `<reason>`. Continuation
@@ -193,10 +217,15 @@ sees.
 Only `[FAIL]` moves the exit code: `Report::all_ok()` is "no check
 failed", so a run of nothing but `[OK]`, `[SKIP]` and `[WARN]` exits 0.
 
-`[WARN]` exists for two situations today: stale generated C# under a
-Unity tree (§4.7), and a native transport library whose version differs
-from the crate `sb` links (§4.3, §4.4). Both break a *host* project
-rather than `sb`. Failing there would block every unrelated `sb doctor`
+`[WARN]` exists for four situations today: stale generated C# under a
+Unity tree (§4.7), a native transport library whose version differs
+from the crate `sb` links (§4.3, §4.4), and (sb 0.5.0+) legacy
+`topic: /...` entries in the active workspace (§4.10) and missing
+generated io files or a stale installed copy in the active workspace
+(§4.11). The first two
+break a *host* project rather than `sb`; the third breaks nothing, since
+`sb` reads such an entry as `key:`, but flags a file the next `sb pub` /
+`sb sub` write will rewrite. Failing there would block every unrelated `sb doctor`
 on the box until someone fixed a tree `sb` does not own; staying silent
 is what let the breakage accumulate in the first place. If you want
 warnings to be fatal in CI, grep for the tag:
@@ -501,6 +530,75 @@ Official releases are always built in-tree, so this line should not
 appear in an installed `sb`; if it does, the build did not come from the
 release procedure and the two `lib*` rows will not be version-checked.
 
+### 4.10 `topics` (sb 0.5.0+)
+
+```
+[OK]   topics       no legacy `topic: /...` entries in the active workspace
+[SKIP] topics       no active workspace
+```
+
+Scans the modules registered in the active workspace's `flow.yaml` for
+publisher and subscriber entries still written in the pre-0.5.0 form
+`topic: /<wire key>`. Since 0.5.0 the canonical topic has no leading
+`/`, and an entry carries either `topic: <bare>` or `key: <wire key>`.
+A legacy entry is read as `key: <wire key>` with the `/` dropped, which
+is the wire key it always produced, so nothing is broken; the row exists
+so the old spelling is rewritten before someone copies it into a new
+entry. See [sbcli_pubsub.md](sbcli_pubsub.md) §13.9.
+
+Each module that holds legacy entries gets one `[WARN] topics` row
+naming the module and its `sb.dev.yml`, then a continuation line per
+entry with its role, name, the legacy `topic:` form, and its `key:`
+equivalent, and finally the command that rewrites the file:
+
+```
+[WARN] topics       subber: 1 legacy `topic: /...` entry in /path/to/subber/sb.dev.yml (sb 0.5.0 reads it as `key:`; same wire key)
+                    sub "hello": topic: /dev01/demo/pubber/zenoh/hello -> key: dev01/demo/pubber/zenoh/hello
+                    rewrite: `sb sub edit dev01/demo/pubber/zenoh/hello --module subber` (publishers: `sb pub edit <name> --key <key>`)
+```
+
+A module whose legacy entries are all publishers is pointed at
+`sb pub edit <name> --key <key> --module <module>` instead. Any `sb pub`
+/ `sb sub` command that writes the module's `sb.dev.yml` rewrites every
+legacy entry in it as `key:` and prints
+`  rewrote N legacy topic entry|entries as key: in <path>`; `sb sub edit`
+writes the file for exactly this reason when it holds legacy entries.
+
+Like `unity targets`, the row **warns, never fails**: the exit code is
+untouched. With no active workspace there is nothing to scan, and the
+row is `[SKIP]`. A module whose `sb.dev.yml` cannot be read is skipped
+here; other checks and commands report that failure.
+
+### 4.11 `workspace` and `ws *` (sb 0.5.0+)
+
+```
+[SKIP] workspace    no active workspace
+```
+
+The rows `sb ws check` prints ([sbcli_ws.md](sbcli_ws.md) §5.3), for
+the active workspace:
+
+| Row | `[OK]` shows | Problem tag | Reports |
+|---|---|---|---|
+| `workspace` | name, module count, source (URL or repo `flow.yaml`, or `no source`) | `[FAIL]` | the installed copy, or the vault root, cannot be read |
+| `ws modules` | every `sb.dev.yml` parses | `[FAIL]` per module | ``no sb.dev.yml at <path> (run `sb init` in the module)``, an empty file, or a parse error |
+| `ws types` | how many typed entries resolve | `[FAIL]` per entry | a proto / fb `type:` that is not in the configured vault nor an `iox2_variants` name |
+| `ws instances` | instance count | `[FAIL]` per duplicate | an instance id declared twice for one module |
+| `ws encoding` | how many wire keys agree | `[FAIL]` per wire key | entries on one key, across modules, that disagree on `encoding:` |
+| `ws io files` | how many generated files exist | `[WARN]` per module | generated files missing under the io dir, with ``run `sb io update <module>` `` |
+| `ws source` | the installed copy is current | `[WARN]`; `[SKIP]` with no `source:` | the repo `flow.yaml` is newer than the installed copy (``run sb install``) |
+
+A module that fails `ws modules` is left out of the rows below it.
+
+Unlike `topics`, a **`[FAIL]` here fails doctor**: a missing module, an
+unknown type, a duplicate instance id, or an encoding disagreement
+breaks `sb up` or codegen, so it counts toward the exit code. Missing
+generated files and a stale installed copy are fixed by one command
+each (`sb io update`, `sb install`) and only warn. Types are checked
+against the configured vault (`messages_root`), the one `sb install`
+imports into, even when doctor's `message styles` row describes a vault
+discovered from the current directory.
+
 ---
 
 ## 5. Exit code and error reporting
@@ -519,6 +617,7 @@ sb <version>
                     ...
 [OK]   config keys  no deprecated keys
 [OK]   std vault    ...
+[OK]   topics       ...
 error: 1 check(s) failed
 $ echo $?
 1
@@ -561,6 +660,7 @@ sb <version>
 [OK]   unity targets no stale generated C# in a Unity tree
 [OK]   config keys  no deprecated keys
 [FAIL] std vault    /home/user/.swarmbotix/messages/ros2/message_definitions/std missing 8 expected file(s) (run `sb message list` to install)
+[SKIP] topics       no active workspace
 error: 1 check(s) failed
 ```
 
@@ -585,6 +685,7 @@ sb <version>
 [OK]   unity targets no stale generated C# in a Unity tree
 [OK]   config keys  no deprecated keys
 [OK]   std vault    /home/el/.swarmbotix/messages/ros2/message_definitions/std populated
+[OK]   topics       no legacy `topic: /...` entries in the active workspace
 ```
 
 Exit code 0. This is the expected steady state.
@@ -696,9 +797,10 @@ sb itself shells out to. Not validated:
 - **Generated code freshness.** Doctor doesn't compare
   `<targets>/` mtimes against `<defs>/` mtimes. Use
   `sb message compile` to refresh.
-- **`flow.yaml` referential integrity.** Doctor doesn't check that
-  every entry in every workspace's `flow.yaml` points at an
-  existing `sb.dev.yml`. That's a swarmctl concern (L6).
+- **Other workspaces.** The workspace rows (sb 0.5.0+, §4.11)
+  validate the **active** workspace only. Workspaces that are installed
+  but not active are not checked; `sb ws check <name>` covers one of
+  them.
 
 ---
 

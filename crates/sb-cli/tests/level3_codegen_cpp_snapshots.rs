@@ -6,7 +6,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use sb_codegen::{CodegenInput, Kind, render};
-use sb_core::{Language, Transport};
+use sb_core::{Encoding, Language, TopicRef, Transport};
 use sb_vault::MessageName;
 
 use common::{assert_or_bless, assert_or_bless_with};
@@ -25,7 +25,7 @@ fn input<'a>(
     kind: Kind,
     transport: Transport,
     name: &'a str,
-    topic: &'a str,
+    topic: &'a TopicRef,
     msg: &'a MessageName,
     targets: &'a Path,
 ) -> CodegenInput<'a> {
@@ -37,7 +37,9 @@ fn input<'a>(
         kind,
         name,
         topic,
-        msg_type: msg,
+        msg_type: Some(msg),
+        encoding: Encoding::Proto,
+        mime: None,
         transport,
         message_targets: targets,
     }
@@ -46,12 +48,13 @@ fn input<'a>(
 #[test]
 fn cpp_publisher_zenoh_snapshot() {
     let msg = MessageName::parse("ros2/std/StringStamped").unwrap();
+    let topic = TopicRef::Owned("hello".into());
     let targets = fixture_targets();
     let r = render(&input(
         Kind::Publisher,
         Transport::Zenoh,
         "hello",
-        "hello",
+        &topic,
         &msg,
         &targets,
     ))
@@ -63,12 +66,13 @@ fn cpp_publisher_zenoh_snapshot() {
 #[test]
 fn cpp_subscriber_zenoh_snapshot() {
     let msg = MessageName::parse("ros2/std/StringStamped").unwrap();
+    let topic = TopicRef::Owned("hello".into());
     let targets = fixture_targets();
     let r = render(&input(
         Kind::Subscriber,
         Transport::Zenoh,
         "hello",
-        "hello",
+        &topic,
         &msg,
         &targets,
     ))
@@ -80,13 +84,14 @@ fn cpp_subscriber_zenoh_snapshot() {
 #[test]
 fn cpp_publisher_iceoryx_snapshot() {
     let msg = MessageName::parse("ros2/std/ImageStamped").unwrap();
+    let topic = TopicRef::Owned("image_raw".into());
     let targets = fixture_targets();
     let targets_str = targets.to_string_lossy().into_owned();
     let r = render(&input(
         Kind::Publisher,
         Transport::Iceoryx2,
         "image_raw",
-        "image_raw",
+        &topic,
         &msg,
         &targets,
     ))
@@ -103,13 +108,14 @@ fn cpp_publisher_iceoryx_snapshot() {
 #[test]
 fn cpp_subscriber_iceoryx_snapshot() {
     let msg = MessageName::parse("ros2/std/ImageStamped").unwrap();
+    let topic = TopicRef::Owned("image_raw".into());
     let targets = fixture_targets();
     let targets_str = targets.to_string_lossy().into_owned();
     let r = render(&input(
         Kind::Subscriber,
         Transport::Iceoryx2,
         "image_raw",
-        "image_raw",
+        &topic,
         &msg,
         &targets,
     ))

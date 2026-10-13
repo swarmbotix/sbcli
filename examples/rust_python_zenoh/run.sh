@@ -34,7 +34,9 @@ PUBBER="$EXAMPLE_DIR/pubber_rust"
 SUBBER="$EXAMPLE_DIR/subber_python"
 
 # 1. Workspace + adopt both modules.
-"$SB" ws create demo
+# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+mkdir -p "$SB_HOME/ws"
+( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
 "$SB" init --rust   "$PUBBER" --force >/dev/null
 "$SB" init --python "$SUBBER" --force >/dev/null
@@ -43,12 +45,12 @@ SUBBER="$EXAMPLE_DIR/subber_python"
 #    re-runnable without manual cleanup.
 #
 # Cross-module pub/sub needs an aligned topic. By default `sb pub add hello`
-# scopes the topic under the publisher's module (`/dev01/demo/pubber_rust/hello`).
+# scopes the topic under the publisher's module (`dev01/demo/pubber_rust/zenoh/hello`).
 # The Python subscriber lives in a different module, so we pass the same
-# fully-qualified topic to `sb sub add` — `sb` honours leading `/` verbatim.
-TOPIC_FULL="/dev01/demo/pubber_rust/hello"
-( cd "$PUBBER" && "$SB" pub add -m std/StringStamped hello --zenoh --force )
-( cd "$SUBBER" && "$SB" sub add -m std/StringStamped "$TOPIC_FULL" --zenoh --force )
+# fully-qualified topic to `sb sub add --key`; `--key` is used verbatim.
+TOPIC_FULL="dev01/demo/pubber_rust/zenoh/hello"
+( cd "$PUBBER" && "$SB" pub add -m ros2/std/StringStamped hello --zenoh --force )
+( cd "$SUBBER" && "$SB" sub add -m ros2/std/StringStamped --key "$TOPIC_FULL" --zenoh --force )
 
 # 3. Spawn the Python subscriber.
 PY_LOG="$SB_HOME/subber.log"

@@ -27,7 +27,7 @@ use zenoh::Wait;
 
 /// Match the topic `run.sh` passes to `sb pub add` so the L4 discovery
 /// observes us under the fully-qualified path the user expects.
-const TOPIC_FULL: &str = "/dev01/demo/pubber/chatter";
+const TOPIC_FULL: &str = "dev01/demo/pubber/zenoh/chatter";
 /// What `sb topic list` should report in the rate column for this
 /// publisher. Wire publish cadence is independent of this — the design
 /// payoff is exactly that.
@@ -58,7 +58,7 @@ fn main() -> zenoh::Result<()> {
     // 5 seconds of publishes — gives `sb topic list -t 0.5` plenty of
     // headroom even if it starts after this loop is partway through.
     for _ in 0..50 {
-        pubber.publish(&payload)?;
+        pubber.publish_bytes(&payload)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Ok(())

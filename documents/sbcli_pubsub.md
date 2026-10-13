@@ -1,12 +1,21 @@
-# `sb pub` / `sb sub` / `sb list` — Pub/Sub Reference
+# `sb io` / `sb pub` / `sb sub` / `sb list`: Pub/Sub Reference
 
 Official reference for the `sb pub`, `sb sub`, and `sb list`
-subcommand surfaces: module resolution, validation, mutation
-semantics, transport selection, conflict-policy flags, per-language
+subcommand surfaces and, `sb 0.5.0+`, for `sb io`, the surface that
+replaces them: module resolution, validation, mutation semantics,
+transport selection, encodings, conflict-policy flags, per-language
 codegen, and the operational guarantees that govern when files are
 written, regenerated, or removed.
 
 This document is normative for behavior shipped at L3.
+
+**sb 0.5.0+: use `sb io` (§14).** It manages publishers, subscribers,
+and services in one name space per module, adds the `encoding:` choice
+(`proto`, `fb`, `raw`), and regenerates a whole module with
+`sb io update`. `sb pub`, `sb sub`, `sb list`, and `sb service` keep
+working as documented here but are deprecated and receive no new
+features. Sections 1 to 13 describe the model both surfaces share:
+resolution, schema, codegen, and conflict policy.
 
 The canonical spec is `requirements.md` in the sbcli **source
 repository** — a maintainer document that is not part of your install;
@@ -38,22 +47,28 @@ The verb surface is:
 ```
 sb list                            [--module <name>]
 sb pub list                        [--module <name>]
-sb pub add  -m <MsgType> <topic>   [-n <name>] [--iox2 | --zenoh]
+sb pub add  -m <MsgType> (<topic> | --key <WIRE_KEY>)
+                                   [-n <name>] [--iox2 | --zenoh]
                                    [--force | --skip-existing]
                                    [--module <name>]
-sb pub edit <name>                 [-m <MsgType>] [-t <topic>]
+sb pub edit <name>                 [-m <MsgType>] [-t <topic> | --key <WIRE_KEY>]
                                    [--module <name>]
 sb pub rm   <name>                 [--module <name>]
 sb sub list                        [--module <name>]
-sb sub add  -m <MsgType> <topic>   [--iox2 | --zenoh]
+sb sub add  -m <MsgType> (<topic> | --key <WIRE_KEY>)
+                                   [--iox2 | --zenoh]
                                    [--force | --skip-existing]
                                    [--module <name>]
-sb sub edit <topic>                [--module <name>]
-sb sub rm   <topic>                [--module <name>]
+sb sub edit <topic-or-key>         [--module <name>]
+sb sub rm   <topic-or-key>         [--module <name>]
 ```
 
 `-m` is **reserved for `MsgType`**. Module selection uses the
 long-only flag `--module <name>` to avoid the clash.
+
+`<topic>` is a bare name that `sb` prefixes at codegen; `--key` takes a
+verbatim wire key instead (sb 0.5.0+). Each entry carries exactly one
+of the two (§4).
 
 ---
 
@@ -67,8 +82,10 @@ Per module:
 └─ <io_dir>/                                    # WRITE + DELETE
    ├─ publishers/
    │  └─ <name>.<ext>                           # one per publisher
-   └─ subscribers/
-      └─ <name>.<ext>                           # one per subscriber
+   ├─ subscribers/
+   │  └─ <name>.<ext>                           # one per subscriber
+   └─ services/
+      └─ <name>.<ext>                           # one per service (sb 0.5.0+; Rust and Python)
 ```
 
 `<io_dir>` defaults to `swarmbotix_io` (or `Assets/Scripts/swarmbotix_io`
@@ -95,8 +112,8 @@ The lookup chain (highest priority first):
 1. **`--module <name>` given AND `./<name>/sb.dev.yml` exists** in
    the current working directory.
 2. **`--module <name>` given AND active workspace's `flow.yaml`
-   has `<name>`** — the value is the absolute path to its
-   `sb.dev.yml`.
+   has `<name>`**: the value in the installed copy is the absolute
+   path to its `sb.dev.yml` ([sbcli_ws.md](sbcli_ws.md) §4.3).
 3. **No `--module` flag → `./sb.dev.yml` in cwd**. Errors if absent.
 
 If `--module <name>` is given and neither rule 1 nor rule 2 hits, the
@@ -121,6 +138,10 @@ sibling, rule 2 workspace) require the resolved file to exist; a
 registered-but-missing entry in `flow.yaml` is treated as a miss for
 that rule, **and** the path is included in the error tail.
 
+`sb io` (§14) and `sb service` resolve their module through the same
+chain. The module root is then the directory holding `sb.dev.yml`
+unless the file sets `root:` (§4.1).
+
 ---
 
 ## 4. Schema — `PubSpec` and `SubSpec`
@@ -136,7 +157,7 @@ publishers:
     transport: iceoryx2
 subscribers:
   - name: cmd_vel
-    topic: /dev01/nav/teleop/zenoh/cmd_vel
+    key: dev01/nav/teleop/zenoh/cmd_vel
     type: ros2/std/TwistStamped
     transport: zenoh
 ```
@@ -144,18 +165,76 @@ subscribers:
 | Field | Type | Set by | Notes |
 |---|---|---|---|
 | `name` | identifier | `-n` flag or topic's last segment | Drives the generated filename + the struct name (PascalCase). Must satisfy `validate_identifier`. |
-| `topic` | string | `<topic>` positional | Bare (`image_raw`) or fully-qualified (`/dev01/ws/cam/iox2/image_raw`). Codegen prepends the `/<device>/<workspace>/<module>/<transport>/` prefix only if no leading `/`. When fully-qualified, the `<transport>` segment must match the entry's `transport` field. |
-| `type` | string | `-m` / `--msg` flag | Must parse as `<style>/<namespace>/<Leaf>` and exist in the vault (see §5.1). Stored verbatim, e.g. `ros2/std/ImageStamped`. Two-segment names are rejected — see [sbcli_messages.md](sbcli_messages.md) §2. |
+| `topic` | string | `<topic>` positional, or `-t` on `sb pub edit` | An owned, bare topic (`image_raw`). Codegen prepends `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. An entry carries exactly one of `topic` and `key` (sb 0.5.0+). |
+| `key` | string | `--key` flag | A verbatim wire key (`dev01/nav/teleop/zenoh/cmd_vel`), used as is: no prefix is prepended and no `<transport>` segment is injected. A leading `/` given to `--key` is dropped. An entry carries exactly one of `topic` and `key` (sb 0.5.0+). |
+| `type` | string | `-m` / `--msg` flag | Must parse as `<style>/<namespace>/<Leaf>` and exist in the vault (see §5.1). Stored verbatim, e.g. `ros2/std/ImageStamped`. Two-segment names are rejected; see [sbcli_messages.md](sbcli_messages.md) §2. `sb 0.5.0+`: required unless `encoding: raw`, which takes none. |
 | `transport` | enum (`zenoh` / `iceoryx2`) | `--zenoh` / `--iox2` or sb.config.yml default | See §7 for default resolution. |
+| `encoding` | enum (`proto` / `fb` / `raw`) | `--proto` / `--fb` / `--raw` on `sb io` (§14.3) | `sb 0.5.0+`. Payload framing, default `proto` and omitted on disk when `proto`. Zenoh only: an iceoryx2 payload is always the fixed-layout struct generated from the `.proto`, so an iceoryx2 entry omits the key (an explicit `encoding: proto` is accepted). `fb` carries FlatBuffers bytes of `type`; `raw` carries opaque bytes with no vault type. |
+| `mime` | string | the value after `--raw` | `sb 0.5.0+`. Raw only, optional: the payload's content type, e.g. `text/json`. It becomes the wire tag (§6.4). |
 
 `deny_unknown_fields` is on for both records; hand-edited fields outside
-the schema are rejected on read.
+the schema are rejected on read. So is an entry that carries both
+`topic` and `key`, or neither, a `topic` containing `/`, and an empty
+`key` (error texts in §12). The one exception is a `topic: /...` entry
+written before 0.5.0: it is read as `key:` (§13.9).
+
+`sb 0.5.0+` also enforces the encoding rules on read: `raw` takes no
+`type`, every other encoding needs one, `mime` needs `raw`, and an
+encoding other than `proto` needs `transport: zenoh` (error texts in
+§12). When an entry breaks several rules, the topic error is reported
+first, then the transport one.
 
 `SubSpec` is identical in shape to `PubSpec`, but `sb sub *` keys
-subscribers by **topic** rather than name (because subscribers are
-fan-out and a single name doesn't uniquely identify one). Internally
+subscribers by **topic or key** rather than name (because subscribers
+are fan-out and a single name doesn't uniquely identify one). Internally
 the `name` is still derived (it's the generated filename) but the
-user-facing API only ever takes the topic.
+user-facing API only ever takes the topic or key: `sb sub edit` and
+`sb sub rm` match their argument against both, ignoring a leading `/`
+(sb 0.5.0+). `sb io` (§14) addresses every entry by name instead, which
+the shared name space below makes unambiguous.
+
+### 4.1 Module-level fields (sb 0.5.0+)
+
+Besides `publishers:` and `subscribers:`, `sb.dev.yml` carries:
+
+| Field | Type | Notes |
+|---|---|---|
+| `module` | identifier | Written by `sb init`, see [sbcli_init.md](sbcli_init.md) §4. |
+| `language` | enum | Same. Selects the templates. |
+| `root` | path, optional | The module root. Absent (what `sb init` writes since 0.5.0): the directory holding `sb.dev.yml`. Relative: resolved against that directory. Absolute: used as is, which is how files written before 0.5.0 keep working. |
+| `io_dir` | relative path | Default `swarmbotix_io` (`Assets/Scripts/swarmbotix_io` for Unity), resolved against the module root. |
+| `services` | list of `{ name }` | One request/response router per entry, rendered to `<io_dir>/services/<name>.<ext>` (Rust and Python). See [sbcli_reqres.md](sbcli_reqres.md) §2. |
+
+```yaml
+module: ips_track
+language: python
+io_dir: swarmbotix_io
+publishers:
+  - name: pose
+    topic: pose
+    type: ros2/std/StringStamped
+    transport: zenoh
+  - name: status
+    topic: status
+    transport: zenoh
+    encoding: raw
+    mime: text/json
+subscribers:
+  - name: cmd
+    key: dev01/ws_ips/planner/zenoh/cmd
+    type: ros2/std/TwistStamped
+    transport: zenoh
+services:
+  - name: calib
+```
+
+**Names are unique within a module.** Publishers, subscribers, and
+services share one name space: a name is the generated file's stem and
+the handle `sb io edit` / `sb io rm` take, so it must identify exactly
+one entry. Adding an entry whose name is already used by any of the
+three is refused (§5.2). The check runs when an entry is added, not
+when the file is read, so a hand-edited duplicate loads but the next
+add on that name is refused.
 
 ---
 
@@ -189,7 +268,9 @@ publish `swarmbotix/images/Image720pRgb8` and subscribe to
 
 No protoc / compile step runs — `sb pub add` is a metadata operation,
 not a codegen one. It does **not** require the message to have been
-`sb message compile`'d. The generated pub/sub file references the
+`sb message compile`'d. `sb 0.5.0+`: an `encoding: raw` entry has no
+`type` and skips this lookup; `sb io add --fb` is the one case that
+does need compiled output (§14.3). The generated pub/sub file references the
 type by name only; whether the user has Rust / Python / C++ bindings
 ready for it at compile/runtime is independent.
 
@@ -198,25 +279,26 @@ ready for it at compile/runtime is independent.
 Each add scans the module's existing publishers + subscribers and
 reports every entry that would collide on:
 
-- **Same name** (publisher only — sub names are derived from topics).
-- **Same topic** (across publishers AND subscribers — a topic can have
-  at most one role per module unless the user explicitly opts out via
-  `--force`; see §8).
+- **Same name**: any publisher, subscriber, or (sb 0.5.0+) service on
+  the module, since they share one name space (§4.1). A service
+  collider is listed as `service "<name>" (same name)`.
+- **Same topic/key** (across publishers AND subscribers: a topic or
+  key can have at most one role per module unless the user explicitly
+  opts out via `--force`; see §8).
 
 If any collisions are found, the verb's behaviour depends on the
 conflict policy resolved in §8. The default is to error.
 
 ### 5.3 Default-name derivation
 
-When the user omits `-n` on `sb pub add`, the name is derived as the
-**last `/`-separated segment** of the topic:
+When the user omits `-n` on `sb pub add`, the name is derived from
+the topic or key: a bare topic is its own name, and a key gives its
+**last `/`-separated segment**:
 
-| `<topic>` | derived name |
+| `<topic>` / `--key` | derived name |
 |---|---|
 | `hello` | `hello` |
-| `/dev01/ws/cam/image_raw` | `image_raw` |
-| `nested/path/leaf` | `leaf` |
-| `/` | `/` (then fails identifier validation) |
+| `--key dev01/ws/cam/iox2/image_raw` | `image_raw` |
 
 `sb sub add` always derives the name this way (no `-n` flag).
 
@@ -231,7 +313,8 @@ non-empty, ASCII letter/`_` first, then alphanumerics/`_`.
 ## 6. Codegen
 
 After `sb.dev.yml` mutation, the matching template renders into
-`<io_dir>/{publishers,subscribers}/<name>.<ext>`.
+`<io_dir>/{publishers,subscribers}/<name>.<ext>`, or, for a service
+(sb 0.5.0+), `<io_dir>/services/<name>.<ext>`.
 
 ### 6.1 Cell matrix
 
@@ -265,10 +348,10 @@ defined in `crates/sb-codegen/src/lib.rs`. Variables exposed:
 | `module` | `pubber` | Module name from `sb.dev.yml`. |
 | `workspace` | `demo` | Active workspace name. |
 | `device` | `dev01` | From merged `sb.config.yml`. |
-| `topic_full` | `/dev01/demo/pubber/iox2/image_raw` | Fully-qualified path including `<transport>` segment. If the user passed `--topic` with a leading `/`, used verbatim (and must already include the `<transport>` segment); otherwise prepended with `/<device>/<workspace>/<module>/<transport>/`. |
-| `topic_zenoh` | `dev01/demo/pubber/zenoh/image_raw` | `topic_full` without the leading `/`. Zenoh KeyExpr forbids leading slashes. |
-| `topic_iox` | `dev01/demo/pubber/iox2/image_raw` | Identical to `topic_zenoh`. iceoryx2 0.9 `ServiceName::new` accepts `/` (per upstream's own example `ServiceName::new("My/Funk/ServiceName")`), so no transliteration. Kept as a distinct name for template-side clarity. |
-| `topic_bare` | `image_raw` | Last segment of the input topic (the transport segment is **not** the bare topic). |
+| `topic_full` | `dev01/demo/pubber/iox2/image_raw` | The wire key, including the `<transport>` segment, with no leading `/` (sb 0.5.0+). A `topic:` entry builds it as `<device>/<workspace>/<module>/<transport>/<topic>`; a `key:` entry uses its key as is (and must already include any `<transport>` segment it wants). |
+| `topic_zenoh` | `dev01/demo/pubber/iox2/image_raw` | Identical to `topic_full` (sb 0.5.0+). Zenoh KeyExpr forbids a leading `/`, and the canonical form has none. |
+| `topic_iox` | `dev01/demo/pubber/iox2/image_raw` | Identical to `topic_full`. iceoryx2 0.9 `ServiceName::new` accepts `/` (per upstream's own example `ServiceName::new("My/Funk/ServiceName")`), so no transliteration. Kept as a distinct name for template-side clarity. |
+| `topic_bare` | `image_raw` | The bare topic of a `topic:` entry, or the last segment of a `key:` (the transport segment is **not** the bare topic). |
 | `transport_segment` | `iox2` / `zenoh` | The literal string used in the path. `iox2` for iceoryx2, `zenoh` for zenoh. |
 | `msg_namespace` | `std` | The MsgType's namespace. |
 | `msg_leaf` | `ImageStamped` | The MsgType's leaf. |
@@ -277,50 +360,53 @@ defined in `crates/sb-codegen/src/lib.rs`. Variables exposed:
 | `is_zenoh` / `is_iceoryx` | bool | For Jinja branching. |
 | `is_publisher` / `is_subscriber` | bool | Mirrored from the kind. |
 | `role` | `publisher` / `subscriber` | String form. |
-| `is_owned` | bool | True when the user passed a bare topic, so the full path is built from device/workspace/module/transport/bare here at codegen. False when the user passed a leading-slash topic verbatim — in that case the path "belongs" to whoever owns it and per-segment overrides don't apply. Templates gate the `TopicOverrides` emission on this flag (§6.5). |
+| `is_owned` | bool | True for a `topic:` entry: the full key is built from device/workspace/module/transport/topic here at codegen. False for a `key:` entry: the key is used verbatim, so the path "belongs" to whoever owns it and per-segment overrides don't apply. Templates gate the `TopicOverrides` emission on this flag (§6.5). |
+| `encoding` | `proto` / `fb` / `raw` | sb 0.5.0+. The entry's `encoding:`; `is_proto` / `is_fb` / `is_raw` are the matching bools. |
+| `mime` | `text/json` | sb 0.5.0+. The entry's `mime:`, raw only. |
+| `wire_tag` | `application/protobuf;ros2/std/ImageStamped` | sb 0.5.0+. The Zenoh encoding string the entry stamps (§6.4). |
+| `service_name` / `is_default_service` | `calib` / bool | sb 0.5.0+, services only. A service named `service` is the module's default and serves on the bare service base ([sbcli_reqres.md](sbcli_reqres.md) §3). Services render `<lang>/service_app.<ext>.j2`. |
 
-### 6.3 Topic naming: one canonical identity, one wire form per leading-slash rule
+### 6.3 Topic naming: one canonical identity, one wire form
 
-A pub/sub entry has **one canonical topic identity**, derived once
-from `(device, workspace, module, transport, <topic positional>)` at
-codegen time. The wire form for both transports is **identical** —
-the canonical form with the leading `/` stripped. Only the
-`<transport>` segment (`iox2` vs `zenoh`) differentiates two entries
-with the same bare name.
+A pub/sub entry has **one canonical topic identity**. For a `topic:`
+entry it is derived once from `(device, workspace, module, transport,
+topic)` at codegen time; for a `key:` entry it is the key itself. The
+canonical form **is** the wire form, byte for byte, on both transports
+(sb 0.5.0+). Only the `<transport>` segment (`iox2` vs `zenoh`)
+differentiates two entries with the same bare name.
 
-**Canonical form** (what `sb list`, `sb topic *`, docs, log output,
-and comments inside generated files all use):
+**Canonical form** (what `sb topic *`, docs, log output, comments
+inside generated files, and the wire all use):
 
 ```
-/<device>/<workspace>/<module>/<transport>/<bare_topic>
+<device>/<workspace>/<module>/<transport>/<bare_topic>
 ```
 
 `<transport>` is the literal `iox2` or `zenoh`, taken from the
-entry's transport. This is `topic_full` in the template context. The
-leading `/` is part of the canonical form. The one exception: if the
-user passes a topic that already starts with `/` (e.g.
-`/flat/path/hello`), the positional is used verbatim and the
-`<device>/<workspace>/<module>/<transport>` prefix is **not**
-prepended (see §13.7).
+entry's transport. This is `topic_full` in the template context. It
+has no leading `/`. A `key:` entry is not assembled: its key is used
+verbatim and the `<device>/<workspace>/<module>/<transport>` prefix is
+**not** prepended (see §13.7).
 
-**The conversion rule** — applied deterministically at template
+**The conversion rule**, applied deterministically at template
 render time, no user input:
 
 ```
 transport_segment = "iox2" if transport == iceoryx2 else "zenoh"
-topic_full   = /<device>/<workspace>/<module>/<transport_segment>/<bare_topic>   # canonical
-topic_zenoh  = topic_full[1:]                                                    # strip leading /
-topic_iox    = topic_zenoh                                                       # same wire form
-topic_bare   = topic_full.rsplit('/', 1)[-1]                                     # last segment
+topic_full   = <device>/<workspace>/<module>/<transport_segment>/<topic>     # topic: entry
+topic_full   = <key>                                                         # key: entry, verbatim
+topic_zenoh  = topic_full                                                    # same string
+topic_iox    = topic_full                                                    # same string
+topic_bare   = <topic>, or the last segment of <key>
 ```
 
-**Worked example** — `sb pub add -m ros2/std/StringStamped hello --iox2
+**Worked example**: `sb pub add -m ros2/std/StringStamped hello --iox2
 --module app2_cpp` in workspace `ws1` on device `dev01`:
 
 | Template var       | Value                                     | Where it appears                                                  |
 |--------------------|-------------------------------------------|-------------------------------------------------------------------|
-| `topic_full`       | `/dev01/ws1/app2_cpp/iox2/hello`          | `sb list`, `sb topic *`, comments in generated code, docs         |
-| `topic_zenoh`      | `dev01/ws1/app2_cpp/iox2/hello`           | (unused for this entry — transport is iceoryx2)                   |
+| `topic_full`       | `dev01/ws1/app2_cpp/iox2/hello`           | `sb topic *`, comments in generated code, docs                    |
+| `topic_zenoh`      | `dev01/ws1/app2_cpp/iox2/hello`           | (unused for this entry: transport is iceoryx2)                    |
 | `topic_iox`        | `dev01/ws1/app2_cpp/iox2/hello`           | iceoryx2 `ServiceName::new(...)` argument, generated `*_SERVICE`  |
 | `topic_bare`       | `hello`                                   | Generated filename + `struct_name_base` (PascalCase: `Hello`)     |
 | `transport_segment`| `iox2`                                    | Embedded in `topic_full`                                          |
@@ -339,41 +425,34 @@ auto pub = session.declare_publisher(KeyExpr("dev01/ws1/app2_cpp/zenoh/hello"));
 ```
 
 The two refer to **different logical topics** that happen to share a
-bare name — exactly the collision-avoidance the transport segment
-buys us. `sb list` shows them as
-`/dev01/ws1/app2_cpp/iox2/hello` and
-`/dev01/ws1/app2_cpp/zenoh/hello`.
+bare name, which is exactly the collision avoidance the transport
+segment buys us. `sb topic list` shows them as
+`dev01/ws1/app2_cpp/iox2/hello` and
+`dev01/ws1/app2_cpp/zenoh/hello`; `sb list` shows each entry's stored
+`topic`, `hello`, with its transport (§9.7).
 
 Because the canonical form carries the transport, `sb topic listen` and
 `sb topic pub` read it from the `<transport>` segment (sb 0.4.1+):
-`sb topic listen /dev01/ws1/app2_cpp/iox2/hello` subscribes on iceoryx2
+`sb topic listen dev01/ws1/app2_cpp/iox2/hello` subscribes on iceoryx2
 with no flag, and `-t zenoh` / `-t iox2` is needed only for a path that is
 not in this form (§13.7).
 
-**Why the leading-`/` trim:**
+**Canonical and wire form are the same string (sb 0.5.0+).** Zenoh key
+expressions forbid a leading `/` (zenoh-keyexpr rejects it at parse
+time), and iceoryx2 service names accept `/` freely (the upstream docs
+use `ServiceName::new("My/Funk/ServiceName")` as the canonical example),
+so one slash-less string serves both transports, the CLI, and the docs.
+Before 0.5.0 the canonical form carried a leading `/` that codegen
+stripped for the wire; there is no longer a second spelling to
+translate between.
 
-- **Slash form (`topic_full`)** is the human-facing canonical
-  identity. Always what users type and what `sb` shows.
-- **Zenoh key expressions** forbid leading slashes (zenoh-keyexpr
-  rejects them at parse time). So `topic_zenoh` strips exactly that
-  one character.
-- **iceoryx2 service names** accept `/` freely — the upstream docs
-  literally use `ServiceName::new("My/Funk/ServiceName")` as the
-  canonical example. So `topic_iox` is the same string as
-  `topic_zenoh`. (Earlier versions of `sb` encoded `/` as `__`
-  thinking iceoryx2 forbade slashes; that was wrong, fixed in
-  0.1.7.)
-
-**Pairing publisher ↔ subscriber across modules.** Two endpoints
-land on the same wire iff they render the **same** `topic_zenoh`
-(for zenoh) or `topic_iox` (for iceoryx2). Because both derive
-deterministically from `topic_full`, this reduces to: *both ends
-must produce the same canonical topic.* When the subscriber lives
-in a different module from the publisher, the subscriber must use
-the publisher's **fully-qualified** form (with leading `/`) as its
-`<topic>` positional — otherwise its `<module>` segment will be its
-own module name, not the publisher's, and the rendered service name
-/ key won't match. See §10.1 and §10.4.
+**Pairing publisher and subscriber across modules.** Two endpoints
+land on the same wire iff they render the **same** `topic_full`. Two
+`topic:` entries in different modules never do: each end's `<module>`
+segment is its own module name. So when the subscriber lives in a
+different module from the publisher, the subscriber uses `--key` with
+the publisher's full key (here `--key dev01/ws1/app2_cpp/iox2/hello`).
+See §10.1 and §10.4.
 
 ### 6.4 Per-language output shape
 
@@ -383,9 +462,9 @@ in comments and take raw bytes / typed payloads at the API boundary.
 
 | Language | Zenoh payload | iceoryx2 payload |
 |---|---|---|
-| Rust | `&[u8]` | typed `T: ZeroCopySend + Copy + 'static` (generic) |
-| Python | `bytes` | typed `ctypes.Structure` subclass (parameter to `__init__`) |
-| C++ | `std::vector<uint8_t>` + raw-pointer overload | `template <typename T>` |
+| Rust | `&[u8]`; sb 0.5.0+ `proto` entries also take a prost message | typed `T: ZeroCopySend + Copy + 'static` (generic) |
+| Python | `bytes`; sb 0.5.0+ `proto` entries also take a protobuf message | typed `ctypes.Structure` subclass (parameter to `__init__`) |
+| C++ | `std::vector<uint8_t>` + raw-pointer overload; sb 0.5.0+ `proto` entries also take a protobuf message | `template <typename T>` |
 | Flutter | `Uint8List` | n/a |
 | Unity | `byte[]` (P/Invoke into `zenoh.dll`) | n/a |
 
@@ -407,10 +486,31 @@ this tag before the Header probe ([sbcli_messages.md](sbcli_messages.md)
 §1.1). The Flutter and Unity Zenoh templates are unchanged and set no
 encoding. A publisher file generated before 0.4.0 carries no tag until it
 is re-rendered, for example with `sb pub edit <name> -m <its current type>`
-(§9.2); `sb message compile` does not rewrite publisher files. Until then,
+(§9.2), or (sb 0.5.0+) with `sb io update`; `sb message compile` does not
+rewrite publisher files. Until then,
 `sb topic listen` types its frames by the Header probe, `--type`, or
 (sb 0.4.1+) the entry's `type` in the module's `sb.dev.yml`
 ([sbcli_messages.md](sbcli_messages.md) §1.1).
+
+**Encodings and typed wrappers (sb 0.5.0+).** The wire tag follows the
+entry's `encoding:` (§4, §14.3), and so does the API of the generated
+Rust, Python, and C++ Zenoh wrappers:
+
+| `encoding` | Wire tag | Publisher | Subscriber |
+|---|---|---|---|
+| `proto` (default) | `application/protobuf;<style>/<ns>/<Leaf>` | `publish(msg)` serializes a protobuf message; `publish_bytes(...)` sends serialized bytes | `try_recv_latest()` (bytes) plus a typed receive |
+| `fb` | `application/flatbuffers;<style>/<ns>/<Leaf>` | bytes only: build the buffer with the bindings `sb message compile --fb` emits | bytes only |
+| `raw` | the entry's `mime:`, else `application/octet-stream` | bytes only | bytes only |
+
+The typed receive is `try_recv_latest_msg::<M>()` in Rust (prost; the
+module needs the `prost` crate), `try_recv_latest_msg(MsgClass)` in
+Python (the `_pb2` class), and `try_recv_latest_msg<Message>()` in C++,
+which returns `std::nullopt` when the payload does not parse. Each
+generated file exports the tag it stamps or expects as `WIRE_TAG`
+(Rust, Python) or `<Name>_WIRE_TAG` (C++). The
+Flutter (Dart) and Unity (C#) Zenoh wrappers stay bytes-only and set no
+tag, whatever the encoding. iceoryx2 wrappers are unaffected: their
+payload is always the typed struct.
 
 Each generated file leads with an **Example usage** block showing how
 to import the class from the user's `main` and how to populate the
@@ -428,7 +528,7 @@ This is the supported way to run N instances of the same module
 (swarm semantics) — see [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md)
 §3, §10. The user's `main()` parses `--id N` (or any other flag),
 constructs a `TopicOverrides { module: format!("{}-{}", DEFAULT_MODULE, id) }`,
-and the publisher opens on `/dev/ws/<module>-<id>/<transport>/<topic>`.
+and the publisher opens on `dev/ws/<module>-<id>/<transport>/<topic>`.
 
 **Emitted alongside the class** (when `is_owned == true`):
 
@@ -460,18 +560,19 @@ Any change to this contract (return type, access pattern, lifetime rules) **must
 
 **C++ binding shape (sb 0.1.23+).** The C++ template targets the pinned iceoryx2 install at `/opt/iceoryx2/current` (0.9.3 as of sb 0.1.40), not upstream `iceoryx2-cxx`. Three call-site differences are baked into the publisher/subscriber templates: `bb::Expected` is unwrapped via an inline `detail::expect_or_throw` helper (no `.expect()` member exists in v0.9.x); `SampleMut` is sent via the free function `iox2::send(std::move(s))`, not a member; `write_payload(T&&)` takes an rvalue, so the const-ref `publish(const Payload&)` API copies into an rvalue (`write_payload(Payload(msg))`). The `#include` for the payload header is also a **basename** (`#include "<Leaf>.h"`) so the file is portable across host and Docker builds — the user's build system must add `-I<message_targets>/iox2/<pkg>/<Leaf>`. See [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md) §5.2 (CMake snippet) and §9.1 (migration / diagnose).
 
-**`is_owned == false` (foreign topic):** the user passed a leading-slash
-path verbatim (e.g. `sb sub add /dev01/demo/cam/iox2/image_raw`). The
-template skips the override machinery and emits a single
-`SERVICE = "<verbatim>"` const. Rationale: that path belongs to whoever
+**`is_owned == false` (foreign topic, a `key:` entry):** the user
+passed a verbatim wire key (e.g.
+`sb sub add -m ros2/std/ImageStamped --key dev01/demo/cam/iox2/image_raw --iox2`).
+The template skips the override machinery and emits a single
+`SERVICE = "<verbatim>"` const. Rationale: that key belongs to whoever
 owns it; the subscriber is just listening, and per-segment overrides
 on the subscriber side don't change which key the publisher writes to.
 
-This is a deliberate limitation — and the most common gotcha for swarm
+This is a deliberate limitation, and the most common gotcha for swarm
 patterns with cross-module subscribers. The consuming doc §10.4
 documents the manual workaround (subscribers construct the wire path
 in `main()` from raw segments and call the iceoryx2 / zenoh API
-directly). A future sb release may parse leading-slash inputs into
+directly). A future sb release may parse `key:` entries into
 segments and emit `TopicOverrides` for those too; until then, plan
 swarm subscribers around this rule.
 
@@ -489,7 +590,7 @@ pub const SERVICE: &str = "{{ topic_iox }}";
 
 When editing a template, both branches must compile against the
 corresponding language toolchain. The L3 codegen snapshots cover the
-owned case; foreign-topic cases are exercised by integration tests in
+owned case; foreign-topic (`key:`) cases are exercised by integration tests in
 `crates/sb-cli/tests/level3_pub_add_mutation.rs` and the L4 e2e tests.
 
 ### 6.6 Golden snapshot tests
@@ -538,9 +639,9 @@ decisions (e.g. L6's swarmctl placement engine).
 Override per-invocation with the explicit flag:
 
 ```bash
-sb pub add -m ros2/std/StringStamped /chatter --zenoh        # explicit
-sb pub add -m ros2/std/ImageStamped /image_raw --iox2        # explicit
-sb pub add -m ros2/std/StringStamped /chatter                # uses config default (iceoryx2)
+sb pub add -m ros2/std/StringStamped chatter --zenoh         # explicit
+sb pub add -m ros2/std/ImageStamped image_raw --iox2         # explicit
+sb pub add -m ros2/std/StringStamped chatter                 # uses config default (iceoryx2)
 ```
 
 `$SB_CONFIG` and per-workspace overrides flow through the standard
@@ -606,7 +707,20 @@ removes the publisher. Documented in
 
 ## 9. Subcommands
 
-### 9.1 `sb pub add -m <MsgType> <topic> [OPTIONS]`
+`sb pub`, `sb sub`, and `sb list` are deprecated in favour of `sb io` (§14) from sb 0.5.0: they keep working as described in this section but receive no new features, so `encoding:`, `mime:`, and services are reachable only through `sb io`.
+
+### 9.1 `sb pub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
+
+`<topic>` is a bare name (sb 0.5.0+). A positional containing `/`,
+leading or inner, is refused, and the error spells out the `--key`
+form:
+
+```
+error: topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello
+```
+
+`--key <WIRE_KEY>` stores a `key:` entry instead of a `topic:` one; a
+leading `/` on its value is dropped. The two conflict.
 
 **Effects (in order)**:
 
@@ -620,7 +734,8 @@ removes the publisher. Documented in
 5. Resolve transport (§7).
 6. Render the template (§6) and write
    `<io_dir>/publishers/<name>.<ext>` (creating subdirs as needed).
-7. Append the new `PubSpec` to `sb.dev.yml`. Write back.
+7. Append the new `PubSpec` to `sb.dev.yml`. Write back, rewriting
+   any legacy `topic: /...` entries in the file as `key:` (§13.9).
 8. Print the outcome.
 
 Output (Force path, with overwrite):
@@ -636,24 +751,31 @@ added publisher on module pubber
 
 ```bash
 sb pub edit hello -m ros2/std/StringStamped
-sb pub edit hello -t /new/topic
-sb pub edit hello -m ros2/std/Header -t /other/topic
+sb pub edit hello -t new_topic
+sb pub edit hello --key new/topic
+sb pub edit hello -m ros2/std/Header -t other_topic
 ```
 
 **Effects (in order)**:
 
 1. Resolve module (§3).
-2. Error if at least one of `-m`, `-t` is not given:
-   `"at least one of -m/--msg or -t/--topic is required"`.
+2. Error if none of `-m`, `-t`, `--key` is given:
+   `"at least one of -m/--msg, -t/--topic, or --key is required"`.
 3. Find the publisher by `<name>`. Error if missing:
    `"publisher <name> not found on module <module>"`.
 4. Clone the spec. Apply requested mutations:
    - `-m`: validate new MsgType. Update spec's `type`.
-   - `-t`: check the new topic doesn't collide with **other**
-     publishers/subscribers (the edited publisher's own current
-     topic is excluded). Update spec's `topic`.
-5. Re-render the file (same path — `<name>` doesn't change on edit).
-6. Replace the spec in the list. Write `sb.dev.yml`.
+   - `-t`: a bare topic only; a value containing `/` is refused, as
+     for `sb pub add` (§9.1). Check the new topic doesn't collide with
+     **other** publishers/subscribers (the edited publisher's own
+     current topic is excluded). The entry becomes `topic: <new>`,
+     replacing its `topic` or `key`.
+   - `--key` (sb 0.5.0+): a verbatim wire key, leading `/` dropped.
+     Same collision check. The entry becomes `key: <new>`, replacing
+     its `topic` or `key`. Conflicts with `-t`.
+5. Re-render the file (same path: `<name>` doesn't change on edit).
+6. Replace the spec in the list. Write `sb.dev.yml`, rewriting any
+   legacy `topic: /...` entries as `key:` (§13.9).
 
 `edit` does **not** support changing the transport — see §6.7. To
 change transport: `rm` + `add`.
@@ -677,8 +799,8 @@ edited publisher on module pubber
 5. Write back `sb.dev.yml`.
 
 Removing a publisher does **not** remove a subscriber on the same
-topic — they're independent entries. Use `sb sub rm <topic>` for the
-subscriber.
+topic; they're independent entries. Use `sb sub rm <topic-or-key>` for
+the subscriber.
 
 Output:
 
@@ -692,20 +814,25 @@ If the generated file was already absent (e.g. you deleted it
 manually before running `rm`), the `removed` line is omitted but the
 YAML write still happens.
 
-### 9.4 `sb sub add -m <MsgType> <topic> [OPTIONS]`
+### 9.4 `sb sub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
 
-Same shape as `sb pub add` (§9.1) except:
+Same shape as `sb pub add` (§9.1), including the `/`-in-topic error
+and `--key`, except:
 
-- `-n` flag is not exposed; the name is always derived from the
-  topic's last segment.
+- `-n` flag is not exposed; the name is always derived from the bare
+  topic, or from the key's last segment.
 - The collider check considers same-topic conflicts against both
   publishers and subscribers.
 
-### 9.5 `sb sub edit <topic> [--module <name>]`
+### 9.5 `sb sub edit <topic-or-key> [--module <name>]`
 
 ```bash
-sb sub edit /dev01/demo/cam/iox2/image_raw
+sb sub edit dev01/demo/cam/iox2/image_raw
 ```
+
+The argument matches an entry's `topic` or its `key`. A leading `/` is
+ignored, so `/dev01/demo/cam/iox2/image_raw` finds the same entry
+(sb 0.5.0+).
 
 `sub edit` is **regenerate-from-current-state**, not "change the
 fields." Useful when `sb.config.yml`'s `device:` or
@@ -715,7 +842,8 @@ generated file without removing-and-readding the subscriber.
 **Effects (in order)**:
 
 1. Resolve module.
-2. Find the subscriber by `<topic>`. Error if missing.
+2. Find the subscriber by `<topic-or-key>`. Error if missing:
+   `subscriber for topic/key "<x>" not found on module "<m>"`.
 3. Validate the spec's stored MsgType (in case the vault has
    changed under the subscriber).
 4. Re-render the file from current spec values.
@@ -727,26 +855,30 @@ regenerated subscriber on module subber
   wrote /path/to/subber/swarmbotix_io/subscribers/image_raw.py
 ```
 
-`sb sub edit` does **not** write `sb.dev.yml` (the spec is unchanged
-— only the file is). That's by design.
+`sb sub edit` does **not** write `sb.dev.yml` for the entry it
+regenerates (the spec is unchanged; only the file is). That's by
+design. The exception (sb 0.5.0+) is a file that still holds legacy
+`topic: /...` entries: those are rewritten as `key:` (§13.9).
 
-### 9.6 `sb sub rm <topic> [--module <name>]`
+### 9.6 `sb sub rm <topic-or-key> [--module <name>]`
 
-Same shape as `sb pub rm` (§9.3) but keyed by topic.
+Same shape as `sb pub rm` (§9.3) but keyed by topic or key, matched as
+in §9.5 (a leading `/` is ignored).
 
 ### 9.7 `sb list [--module <name>]`
 
 Renders both publishers and subscribers in a single table:
 
 ```
-role  name       type               topic                            transport
--------------------------------------------------------------------------------
-pub   hello      std/StringStamped  hello                            zenoh
-sub   image_raw  std/ImageStamped   /dev01/demo/cam/iox2/image_raw   iceoryx2
+role  name       type               topic                          transport
+----------------------------------------------------------------------------
+pub   hello      std/StringStamped  hello                          zenoh
+sub   image_raw  std/ImageStamped   dev01/demo/cam/iox2/image_raw  iceoryx2
 ```
 
-Columns: role, name, type, topic, transport. Widths auto-fit per
-invocation. An empty module renders:
+Columns: role, name, type, topic, transport. The topic column shows the
+entry's `topic`, or its `key` as stored, never with a leading `/`
+(sb 0.5.0+). Widths auto-fit per invocation. An empty module renders:
 
 ```
 (no publishers or subscribers)
@@ -779,13 +911,13 @@ sb init --rust /path/to/pubber
 ( cd /path/to/pubber && sb pub add -m ros2/std/StringStamped hello --zenoh )
 
 sb init --python /path/to/subber
-( cd /path/to/subber && sb sub add -m ros2/std/StringStamped /dev01/demo/pubber/zenoh/hello --zenoh )
+( cd /path/to/subber && sb sub add -m ros2/std/StringStamped --key dev01/demo/pubber/zenoh/hello --zenoh )
 ```
 
-The subscriber uses the **publisher's fully-qualified topic** so both
+The subscriber uses `--key` with the **publisher's full key** so both
 ends land on the same wire. If both used the bare `hello`, the
-publisher would publish on `/dev01/demo/pubber/zenoh/hello` and the
-subscriber would listen on `/dev01/demo/subber/zenoh/hello` —
+publisher would publish on `dev01/demo/pubber/zenoh/hello` and the
+subscriber would listen on `dev01/demo/subber/zenoh/hello`:
 different keys; no traffic. See `examples/rust_python_zenoh/run.sh`
 for a working end-to-end script.
 
@@ -810,7 +942,7 @@ scratch:
 
 ```bash
 for pub in hello world; do
-  sb pub add -m ros2/std/StringStamped "/dev01/demo/api/zenoh/$pub" --zenoh --force
+  sb pub add -m ros2/std/StringStamped --key "dev01/demo/api/zenoh/$pub" --zenoh --force
 done
 ```
 
@@ -828,33 +960,39 @@ $ echo $?
 
 The script can be re-run any number of times safely.
 
-### 10.4 Cross-module pub/sub via fully-qualified topic
+### 10.4 Cross-module pub/sub via `--key`
 
 Two modules in the same workspace, one publishes a sensor reading the
-other reads. The subscriber needs the publisher's fully-qualified
-topic:
+other reads. The subscriber passes the publisher's full key with
+`--key`:
 
 ```bash
 sb pub add -m ros2/std/ImageStamped image_raw --iox2 --module camera
-# camera publishes on /dev01/demo/camera/iox2/image_raw
+# camera publishes on dev01/demo/camera/iox2/image_raw
 
-sb sub add -m ros2/std/ImageStamped /dev01/demo/camera/iox2/image_raw --iox2 --module detector
+sb sub add -m ros2/std/ImageStamped --key dev01/demo/camera/iox2/image_raw --iox2 --module detector
 # detector listens on the same key
 ```
 
 ### 10.5 Regenerate after a config change
 
 Bumped `device:` from `dev01` to `dev02` in `sb.config.yml`. Old
-generated files still reference `dev01`. Sweep:
+generated files still reference `dev01`. `sb 0.5.0+`: regenerate in one
+command (§14.6):
 
 ```bash
-for module in /paths/to/each/module/; do
-  ( cd "$module" && sb sub edit /dev01/.../iox2/image_raw )   # picks up new device
-done
+sb io update --all            # every module in the active workspace
+sb io update camera           # one module
 ```
 
-Or just `rm` + `add` each entry. `sub edit` only re-renders the file
-without changing the YAML.
+`sb io update` re-renders every publisher and subscriber from
+`sb.dev.yml` without changing the YAML; services only with
+`--services`. Only `topic:` entries pick up the new device; a `key:`
+entry is verbatim, so its key keeps naming `dev01` until you change it
+(`sb io edit <name> --key <new key>`).
+
+Before 0.5.0 the sweep was `sb sub edit <topic>` per subscriber (which
+re-renders without changing the YAML) and `rm` + `add` per publisher.
 
 ### 10.6 List everything across a workspace
 
@@ -916,7 +1054,7 @@ that error is reachable only if a future language is added to
 ### 11.4 Vault drift mid-edit
 
 If you `sb message rm` a type while a publisher references it, then
-re-run `sb pub edit <pub> -t /new/topic`, the validation step in
+re-run `sb pub edit <pub> -t new_topic`, the validation step in
 `pub_edit` re-checks the stored type. If it's gone from the vault,
 edit fails:
 
@@ -943,21 +1081,46 @@ Stable wordings (substring-asserted by integration tests in
 | MsgType missing | `message "<m>" not in vault. Run \`sb message list\` to see available types.` |
 | Identifier | `invalid publisher name "<n>": <reason>` / `invalid subscriber name "<n>" (derived from topic): <reason>` |
 | Publisher missing on edit/rm | `publisher "<n>" not found on module "<m>"` |
-| Subscriber missing on edit/rm | `subscriber for topic "<t>" not found on module "<m>"` |
+| Subscriber missing on edit/rm | `subscriber for topic/key "<x>" not found on module "<m>"` (sb 0.5.0+) |
 | Already exists (default policy) | `sb pub add blocked by N existing entr<y|ies>:\n  - <role> "<n>" on topic "<t>" (<reason>)\n  ...\nRe-run with --force to overwrite, --skip-existing to no-op, or \`cd\` to a TTY and re-run for an interactive prompt.` |
-| `pub edit` with no mutation flag | `at least one of -m/--msg or -t/--topic is required` |
+| `pub edit` with no mutation flag | `at least one of -m/--msg, -t/--topic, or --key is required` (sb 0.5.0+) |
+| `<topic>` positional containing `/` | `topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello` (sb 0.5.0+) |
+| `sb.dev.yml` load: entry has both `topic` and `key` | `publishers[0]: exactly one of topic: or key: is required (both given)` (sb 0.5.0+) |
+| `sb.dev.yml` load: entry has neither | `publishers[0]: exactly one of topic: or key: is required (neither given)` (sb 0.5.0+) |
+| `sb.dev.yml` load: `topic` contains `/` (not a leading one, §13.9) | `publishers[0]: topic "a/b" may not contain '/'; use key: for a verbatim wire key`, followed by a parenthetical naming the equivalent `key: <device>/<ws>/<module>/<transport>/a/b` (sb 0.5.0+) |
+| `sb.dev.yml` load: empty `key` | `publishers[0]: key: is empty` (sb 0.5.0+) |
+| `sb.dev.yml` load: raw entry with a `type` | `publishers[0]: encoding: raw takes no type:` (sb 0.5.0+) |
+| `sb.dev.yml` load: no `type`, encoding not raw | `publishers[0]: type: is required unless encoding: raw` (sb 0.5.0+) |
+| `sb.dev.yml` load: `mime` without raw | `publishers[0]: mime: is only valid with encoding: raw` (sb 0.5.0+) |
+| `sb.dev.yml` load: `fb` / `raw` on iceoryx2 | `publishers[0]: encoding: is only valid for transport: zenoh` (sb 0.5.0+) |
+| Name already used on the module | `name "<n>" is already used by <publisher\|subscriber\|service> "<n>" on module "<m>"; publishers, subscribers, and services share one name space` (sb 0.5.0+) |
+| `sb io add --raw --iox2` | `iceoryx2 payloads are typed; use a message with a bytes field and --iox2` (sb 0.5.0+) |
+| `sb io add` / `edit --fb` without compiled FlatBuffers | `flatbuffers backend not compiled for style <style>; run sb message compile <type> --fb` (sb 0.5.0+) |
+| `sb io edit` / `rm` unknown name | `no publisher, subscriber, or service named "<n>" on module "<m>"` (sb 0.5.0+) |
+| Transport not inferable (`sb topic listen` / `pub`, no `-t`) | `cannot infer transport from not/canonical: expected <device>/<ws>/<module>/<zenoh\|iox2>/<topic>, or pass -t zenoh\|iox2` |
 | Structural-impossible (Flutter/Unity iceoryx) | `<lang> has no iceoryx2 path — Flutter and Unity run on mobile / sandboxed game runtimes where shared memory is unavailable. Use --zenoh.` |
 | Not-yet-implemented (future languages) | `<lang> <transport> codegen is not yet implemented at this point in L3 ...` |
+
+The load errors name the offending list and index: `publishers[<i>]`
+or `subscribers[<i>]`.
 
 ---
 
 ## 13. Edge cases and gotchas
 
-### 13.1 Topic = pure leading slash
+### 13.1 Topic containing `/`
 
-`sb pub add -m ... /` would derive name `""` (empty) and fail
-identifier validation. Don't do that; topic must have at least one
-non-slash character.
+`<topic>` (and `-t` on `sb pub edit`) is a bare name. Any `/` in it,
+leading or inner, is refused (sb 0.5.0+):
+
+```
+error: topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello
+```
+
+To address a full wire key, pass it with `--key` (§13.7). Before 0.5.0
+a leading `/` marked a verbatim path and an inner `/`
+(`nested/path/leaf`) was prefixed like any bare name; neither spelling
+is accepted on the command line any more.
 
 ### 13.2 Editing the topic to one that exists as a subscriber
 
@@ -1010,34 +1173,37 @@ user fills in the proto and runs `sb message compile`, the generated
 bindings appear under `<message_targets>/`, ready for the user to wire
 into their `main.rs` / `main.py` / etc.
 
-### 13.6 `--name` with a topic that has no slash
+### 13.6 `--name` with a bare topic
 
 ```bash
 sb pub add -m ros2/std/StringStamped hello -n other --zenoh
 ```
 
 Stores `name: other, topic: hello`. The generated filename is
-`publishers/other.rs`; the topic-namespace prefix is
-`/dev01/<ws>/<module>/zenoh/hello`. Useful when the natural name
+`publishers/other.rs`; the wire key is
+`dev01/<ws>/<module>/zenoh/hello`. Useful when the natural name
 collides with something else but the topic should keep its bare form.
 
-### 13.7 Topic with a leading `/` overrides namespace prefixing
+### 13.7 `--key` bypasses namespace prefixing (sb 0.5.0+)
 
 ```bash
-sb pub add -m ros2/std/StringStamped /flat/path/hello --zenoh
+sb pub add -m ros2/std/StringStamped --key flat/path/hello --zenoh
 ```
 
-`topic_full` is `/flat/path/hello` verbatim, **not**
-`/dev01/<ws>/<module>/zenoh/flat/path/hello`. Useful for legacy ROS2
-topics or for cross-workspace traffic. The user is responsible for
-including any `<transport>` segment they want; `sb` does not inject
-it when the topic is leading-slash-prefixed. The derived name is
-still `hello` (last segment).
+`topic_full` is `flat/path/hello` verbatim, **not**
+`dev01/<ws>/<module>/zenoh/flat/path/hello`. Useful for legacy ROS2
+topics, for cross-workspace traffic, and for subscribing to another
+module's publisher (§10.4). The user is responsible for including any
+`<transport>` segment they want; `sb` does not inject it into a key.
+The derived name is still `hello` (last segment). A leading `/` on the
+value (`--key /flat/path/hello`) is dropped. Before 0.5.0 the same
+effect came from a positional topic with a leading `/`; that spelling
+is now refused (§13.1).
 
 `sb topic listen` and `sb topic pub` read the transport only from the
-five-segment form, so for a path like this one pass `-t zenoh` or
+five-segment form, so for a key like this one pass `-t zenoh` or
 `-t iox2` (sb 0.4.1+); without it they exit 1 with
-`cannot infer transport from /flat/path/hello`.
+`cannot infer transport from flat/path/hello: expected <device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2`.
 
 ### 13.8 `sb sub list` with no module errors with a more useful message
 
@@ -1049,3 +1215,213 @@ active workspace:
 ```bash
 sb pub list --module pubber
 ```
+
+### 13.9 Legacy `topic: /...` entries (configs written before 0.5.0)
+
+An `sb.dev.yml` or `sb.prd.yml` written before 0.5.0 may hold entries
+whose `topic` starts with `/`:
+
+```yaml
+subscribers:
+  - name: image_raw
+    topic: /dev01/demo/cam/iox2/image_raw
+    type: ros2/std/ImageStamped
+    transport: iceoryx2
+```
+
+sb 0.5.0+ reads such an entry as `key: dev01/demo/cam/iox2/image_raw`:
+the leading `/` is dropped and the rest is used verbatim, which is the
+same wire key the entry produced before. Generated code, `is_owned`
+(false), and pairing are unchanged, and reading the file never
+rewrites it.
+
+- `sb doctor` reports each module of the active workspace that holds
+  legacy entries on a `[WARN] topics` row naming the module, each
+  entry with its old and new spelling, and the command that rewrites
+  the file ([sbcli_doctor.md](sbcli_doctor.md) §4.10). The warning
+  never fails doctor.
+- Any `sb pub` / `sb sub` command that writes the file (`add`, `edit`,
+  `rm`) rewrites every legacy entry in it as `key:` and says so:
+
+  ```
+    rewrote 1 legacy topic entry as key: in /path/to/subber/sb.dev.yml
+  ```
+
+  (`entries` when the count is not 1.)
+
+A legacy entry with an inner `/` but no leading one (`topic: a/b`) is
+**not** carried over. Before 0.5.0 it was prefixed like a bare name;
+now the file fails to load with
+`subscribers[0]: topic "a/b" may not contain '/'; use key: for a verbatim wire key`,
+followed by a parenthetical naming the key it used to produce. Replace
+the entry by hand with that key,
+`key: <device>/<ws>/<module>/<transport>/a/b` (your own device,
+workspace, module, and transport), to keep the same wire key.
+
+---
+
+## 14. `sb io` (sb 0.5.0+)
+
+`sb io` is the module-interface surface that replaces `sb pub`,
+`sb sub`, `sb list`, and `sb service init`. It edits the same
+`sb.dev.yml` and renders the same files (§2, §6), with three additions:
+one name space for publishers, subscribers, and services (§4.1); the
+`encoding:` choice (§14.3); and `sb io update`, which regenerates a
+module's `swarmbotix_io/` without changing its YAML (§14.6).
+
+```
+sb io add pub (<topic> | --key <WIRE_KEY>) -m <Type> [--zenoh | --iox2] [--proto | --fb] [-n <name>]
+                                   [--force | --skip-existing] [--module <name>]
+sb io add pub (<topic> | --key <WIRE_KEY>) --raw [<mime>] [--zenoh] [-n <name>] ...
+sb io add sub ...                                   the same forms as `add pub`
+sb io add service <name>                            [--module <name>]
+sb io edit <name> [-m <Type>] [-t <topic> | --key <WIRE_KEY>] [--proto | --fb | --raw [<mime>]]
+                                   [--module <name>]
+sb io rm   <name>                                   [--module <name>]
+sb io list                                          [--module <name>]   (alias: sb io ls)
+sb io update [<module> | --all] [--services]
+```
+
+Every verb except `update` acts on one module, resolved as in §3
+(`--module <name>`, else the `sb.dev.yml` in the current directory).
+Mutations print the same lines as `sb pub` / `sb sub` (§9.1), for
+example `added service on module api`.
+
+### 14.1 `sb io add pub` / `sb io add sub`
+
+| Argument | Meaning |
+|---|---|
+| `<topic>` | A bare name, stored as `topic:` and prefixed at codegen. May not contain `/` (§9.1, §13.1). |
+| `--key <WIRE_KEY>` | A verbatim wire key instead, stored as `key:` (§13.7). The way to subscribe to another module's publisher. Conflicts with `<topic>`. |
+| `-m <Type>` | Vault message, `<style>/<namespace>/<Leaf>` (§5.1). Required unless `--raw`; refused with `--raw`. |
+| `--zenoh` / `--iox2` | Transport. Without a flag, `--fb` and `--raw` entries use Zenoh (the only transport they allow), and a `proto` entry uses the config default (§7: `transport_on_device`, iceoryx2 unless set). |
+| `--proto` / `--fb` / `--raw [<mime>]` | Encoding, default `--proto` (§14.3). Because the mime is optional, put `--raw [<mime>]` after the topic, or the topic is read as the mime. |
+| `-n`, `--name <n>` | Entry name. Default: the bare topic, or the key's last segment (§5.3). Needed when that name is already used by another entry of any kind on the module (§4.1). |
+| `--force` / `--skip-existing` | Conflict policy for a name or topic collision, with the interactive prompt when neither is given on a terminal (§8). |
+
+**Effects (in order)**: resolve the module (§3); validate the type
+against the vault (§5.1) and the transport / encoding / type / mime
+combination (§14.3); check the name is free across publishers,
+subscribers, and services and find topic collisions (§5.2); render
+`<io_dir>/publishers/<name>.<ext>` or `subscribers/<name>.<ext>` (§6);
+write `sb.dev.yml`, rewriting any legacy `topic: /...` entries as
+`key:` (§13.9).
+
+```bash
+sb io add pub pose -m ros2/std/StringStamped --zenoh               # proto, the default
+sb io add pub image_raw -m ros2/std/ImageStamped --iox2            # iceoryx2: always the typed struct
+sb io add pub imu -m swarmbotix/sensors/Imu --zenoh --fb           # FlatBuffers bytes
+sb io add pub status --zenoh --raw text/json                       # raw bytes tagged text/json
+sb io add pub blob --zenoh --raw                                   # raw bytes tagged application/octet-stream
+sb io add sub --key dev01/ws_ips/ips_track/zenoh/pose -m ros2/std/StringStamped --zenoh --name track_pose
+```
+
+### 14.2 `sb io add service <name>`
+
+Appends `{ name: <name> }` to `services:` and renders
+`<io_dir>/services/<name>.<ext>`, a request/response router over Zenoh
+queryables. Rust and Python modules only. The name must satisfy the
+identifier rule (§5.4) and be unused by any entry on the module. The
+router, its routes, and its key layout are described in
+[sbcli_reqres.md](sbcli_reqres.md).
+
+### 14.3 Encodings
+
+| Flag | Stored as | `type:` | Transport | Wire tag | Generated Rust / Python / C++ API |
+|---|---|---|---|---|---|
+| `--proto` (default) | nothing (`proto` is the default) | required | `zenoh` or `iox2` | `application/protobuf;<type>` (zenoh) | typed and bytes (§6.4) |
+| `--fb` | `encoding: fb` | required | `zenoh` | `application/flatbuffers;<type>` | bytes |
+| `--raw [<mime>]` | `encoding: raw`, plus `mime: <mime>` when given | none | `zenoh` | `<mime>`, else `application/octet-stream` | bytes |
+
+Rules, checked when an entry is added or edited and again whenever
+`sb.dev.yml` is read (§12):
+
+- **Zenoh only.** `--raw` or `--fb` with `--iox2` is an error: an
+  iceoryx2 payload is always the fixed-layout struct generated from the
+  `.proto` (`--raw --iox2` answers
+  `iceoryx2 payloads are typed; use a message with a bytes field and --iox2`).
+- **`--fb` needs compiled FlatBuffers.** The type's FlatBuffers output
+  (`<message_targets>/fb/<ns>/<Leaf>/`) must exist, or the add or edit
+  is refused with
+  `flatbuffers backend not compiled for style <style>; run sb message compile <type> --fb`
+  ([sbcli_messages.md](sbcli_messages.md) §4.5, §5.3).
+- **`<mime>` is `type/subtype`**, optionally followed by `;`
+  parameters, with no whitespace. `application/protobuf` and
+  `application/flatbuffers` are refused for a raw entry, because
+  listeners read those tags as a typed payload.
+- **Both ends agree.** A subscriber must use the encoding of the
+  publisher it listens to. `sb ws check` reports a wire key whose
+  entries disagree ([sbcli_ws.md](sbcli_ws.md) §5.3).
+
+How `sb topic listen` and `sb topic list` read each tag:
+[sbcli_messages.md](sbcli_messages.md) §1.1.
+
+### 14.4 `sb io edit <name>`
+
+Changes the publisher or subscriber called `<name>` in place, or, with
+no flag at all, only regenerates its file (what `sb sub edit` did).
+A service has no editable fields
+(``services have no editable fields; edit the file in <io_dir>/services``);
+an unknown name answers
+`no publisher, subscriber, or service named "<name>" on module "<module>"`.
+The flags:
+
+| Flag | Change |
+|---|---|
+| `-m <Type>` | New message type. |
+| `-t <topic>` | New bare topic (`topic:`); no `/` (§9.1). |
+| `--key <WIRE_KEY>` | New verbatim key (`key:`). Conflicts with `-t`. |
+| `--proto` / `--fb` / `--raw [<mime>]` | New encoding. Switching to `--raw` drops the stored `type`; switching away from raw drops the stored `mime` and needs `-m`. |
+
+The new topic or key is checked against the module's other entries
+(§5.2), the result against §14.3, and then the file is re-rendered (its
+name does not change) and `sb.dev.yml` is written. The transport cannot
+be edited (§6.7): `sb io rm` then `sb io add`.
+
+### 14.5 `sb io rm <name>` and `sb io list`
+
+`sb io rm <name>` removes the publisher, subscriber, or service called
+`<name>` from `sb.dev.yml` and deletes its generated file. Deleting a
+service file discards any routes written in it.
+
+`sb io list` (alias `sb io ls`) prints the `sb list` table (§9.7) for
+every publisher, subscriber, and service on the module. It never
+writes.
+
+### 14.6 `sb io update [<module> | --all] [--services]`
+
+Regenerates `swarmbotix_io/` from `sb.dev.yml` without changing the
+YAML.
+
+- Targets `<module>` (resolved as `--module` is, §3); else the module in
+  the current directory when it holds `sb.dev.yml`; else, or with
+  `--all`, every module registered in the active workspace, including
+  `up: false` ones. That last form is the step `sb install` runs
+  ([sbcli_ws.md](sbcli_ws.md) §5.2). An active workspace is required in
+  every form, since its name is the `<workspace>` segment of each owned
+  key.
+- Every publisher and subscriber is re-rendered. A file whose rendered
+  bytes already match the file on disk is reported unchanged and not
+  touched. An entry that cannot render (its type is no longer in the
+  vault, or there is no template for its language and transport) is
+  reported as skipped with the reason, and the other entries still run.
+- Services are regenerated only with `--services`. Their files are
+  routers you edit, and regenerating one overwrites your routes.
+- The one write to `sb.dev.yml`: legacy `topic: /...` entries are
+  rewritten as `key:` (§13.9).
+
+One line per module:
+
+```
+ips_track: 2 written, 1 unchanged, 0 skipped
+calib: 0 written, 1 unchanged, 1 skipped (status: <why it did not render>)
+```
+
+A skipped entry or a module that fails to load makes the command exit
+non-zero (`<n> entr(y/ies) or module(s) could not be updated`) after
+every target has run.
+
+Run it after changing `device:`, after a workspace is renamed or
+reinstalled under another name, after pulling an `sb.dev.yml` edited
+elsewhere, and after upgrading `sb` (so the files pick up new
+templates).

@@ -84,7 +84,7 @@ fn listen_dynamic_decodes_stringstamped_data_field_to_json() {
             timestamp_ns: 1_700_000_000_000_000_000,
             frame_id: "world".into(),
             ros2_metadata: Some(MetadataProbe {
-                topic_full_name: format!("/{}", key),
+                topic_full_name: key.to_string(),
                 msg_type: "ros2/std/StringStamped".into(),
                 msg_freq_desired: 10.0,
             }),

@@ -1963,12 +1963,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multimap"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
 name = "nanorand"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2242,16 +2236,6 @@ dependencies = [
 
 [[package]]
 name = "petgraph"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
-dependencies = [
- "fixedbitset",
- "indexmap 2.14.0",
-]
-
-[[package]]
-name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
@@ -2477,26 +2461,6 @@ checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
 dependencies = [
  "bytes",
  "prost-derive 0.14.3",
-]
-
-[[package]]
-name = "prost-build"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
-dependencies = [
- "heck",
- "itertools 0.14.0",
- "log",
- "multimap",
- "once_cell",
- "petgraph 0.7.1",
- "prettyplease",
- "prost 0.13.5",
- "prost-types 0.13.5",
- "regex",
- "syn 2.0.117",
- "tempfile",
 ]
 
 [[package]]
@@ -2990,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "sb-apps"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3004,14 +2968,13 @@ dependencies = [
 
 [[package]]
 name = "sb-cli"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
  "dirs",
  "iceoryx2",
  "prost 0.13.5",
- "prost-build",
  "prost-reflect",
  "prost-types 0.13.5",
  "sb-apps",
@@ -3040,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "sb-codegen"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "include_dir",
@@ -3048,12 +3011,13 @@ dependencies = [
  "sb-core",
  "sb-vault",
  "serde",
+ "serde_yaml",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "sb-config"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3064,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "sb-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -3073,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "sb-discover"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "iceoryx2",
@@ -3082,14 +3046,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "tempfile",
  "thiserror 2.0.18",
  "zenoh",
 ]
 
 [[package]]
 name = "sb-doctor"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -3097,35 +3060,34 @@ dependencies = [
  "sb-config",
  "sb-core",
  "sb-vault",
+ "serde_yaml",
  "tempfile",
  "which",
 ]
 
 [[package]]
 name = "sb-gopro"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "sb-core",
  "sb-workspace",
  "serde_yaml",
- "tempfile",
 ]
 
 [[package]]
 name = "sb-iox2-typegen"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "prost 0.13.5",
  "prost-types 0.13.5",
- "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "sb-launch"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "sb-core",
@@ -3137,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "sb-listen"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "iceoryx2",
@@ -3157,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "sb-pubsub"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3168,12 +3130,13 @@ dependencies = [
  "sb-workspace",
  "serde",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "sb-update"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "semver",
@@ -3187,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "sb-vault"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "include_dir",
@@ -3200,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "sb-workspace"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5092,7 +5055,7 @@ dependencies = [
  "lazy_static",
  "nonempty-collections",
  "once_cell",
- "petgraph 0.8.3",
+ "petgraph",
  "phf",
  "rand 0.8.6",
  "rustc_version",

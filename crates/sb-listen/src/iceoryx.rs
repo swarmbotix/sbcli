@@ -97,6 +97,10 @@ const DISCOVERY_POLL: Duration = Duration::from_millis(200);
 /// Subscribe to the iox2 publish-subscribe service `topic_full_name`,
 /// opened with the payload type it was created with, whatever that type is.
 ///
+/// `topic_full_name` is the canonical topic, which is the service name
+/// itself. The canonical form has no leading `/`; one is tolerated and
+/// stripped (as is a trailing one).
+///
 /// Blocks until the service exists, re-reading the registry every 200 ms
 /// and saying so once on stderr. A service that disappears between being
 /// listed and being opened is waited for again.
@@ -176,6 +180,7 @@ impl IceoryxFrames {
             Frame {
                 bytes: raw.to_vec(),
                 wire_schema: self.payload.wire_schema(),
+                wire_tag: None,
             }
         }))
     }
@@ -266,7 +271,8 @@ impl FrameIter for IceoryxFrames {
 
 /// Publish a single `[u8]` slab on `topic_full_name`. The service must be a
 /// `[u8]` slab or not exist yet; a typed service fails to open
-/// (`IncompatibleTypes`).
+/// (`IncompatibleTypes`). `topic_full_name` is the canonical topic (no
+/// leading `/`); a stray leading or trailing `/` is tolerated and stripped.
 ///
 /// The post-send sleep is a hack against a subtle iox2 ordering: when
 /// `publish_iceoryx_raw` is called from the CLI (one-shot subprocess) and

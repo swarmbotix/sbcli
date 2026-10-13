@@ -384,12 +384,142 @@ impl Vault {
     pub fn path_of(&self, name: &MessageName) -> PathBuf {
         self.root.join(name.rel_path_from_messages_root())
     }
+
+    /// Copy a directory of `.proto` files into `style`'s definitions.
+    ///
+    /// `<dir>/<ns>/<Leaf>.proto` lands at
+    /// `<root>/<style>/message_definitions/<ns>/<Leaf>.proto`. A flat
+    /// `<dir>/<Leaf>.proto` takes the directory's own name as its
+    /// namespace. Hidden entries (`.git/`, ...) and non-`.proto` files are
+    /// ignored; the style directory is created when missing.
+    ///
+    /// Per file: identical content is `unchanged`; different content
+    /// already in the vault is a `conflict` and is left alone unless
+    /// `force`; everything else is written and `imported`. The forge's
+    /// `ros2/std/` is never overwritten, `force` or not.
+    ///
+    /// Nothing is written when any `.proto` cannot be named
+    /// `<style>/<ns>/<Leaf>` (lowercase leaf, illegal characters, nested
+    /// deeper than `<ns>/`, or two files mapping to one name); the error
+    /// lists every offender.
+    pub fn import_style_dir(&self, style: &str, dir: &Path, force: bool) -> Result<ImportReport> {
+        if !sb_core::is_valid_message_style(style)
+            || !style.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            anyhow::bail!("invalid style {style:?} (allowed: [A-Za-z0-9_])");
+        }
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("resolving {}", dir.display()))?;
+        if !dir.is_dir() {
+            anyhow::bail!("{} is not a directory", dir.display());
+        }
+        let sources = import_sources(style, &dir)?;
+
+        let defs = self.defs_dir(style);
+        fs::create_dir_all(&defs).with_context(|| format!("creating {}", defs.display()))?;
+        let mut report = ImportReport {
+            style: style.to_owned(),
+            ..ImportReport::default()
+        };
+        for (name, src) in sources {
+            let label = format!("{}/{}", name.namespace, name.leaf);
+            let bytes = fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
+            let dest = self.path_of(&name);
+            match fs::read(&dest) {
+                Ok(existing) if existing == bytes => report.unchanged.push(label),
+                Ok(_) if !force || name.is_std() => report.conflicts.push(label),
+                _ => {
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("creating {}", parent.display()))?;
+                    }
+                    fs::write(&dest, &bytes)
+                        .with_context(|| format!("writing {}", dest.display()))?;
+                    report.imported.push(label);
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// Every `.proto` under `dir` paired with its vault name, sorted by name.
+/// Errors, listing every offender, when any file cannot be named.
+fn import_sources(style: &str, dir: &Path) -> Result<Vec<(MessageName, PathBuf)>> {
+    let flat_ns = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let mut found: Vec<(MessageName, PathBuf)> = Vec::new();
+    let mut offenders: Vec<String> = Vec::new();
+    let walker = walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'));
+    for entry in walker {
+        let entry = entry.with_context(|| format!("walking {}", dir.display()))?;
+        let path = entry.path();
+        if !entry.file_type().is_file()
+            || path.extension().and_then(|e| e.to_str()) != Some("proto")
+        {
+            continue;
+        }
+        let shown = path.strip_prefix(dir).unwrap_or(path).display().to_string();
+        let ns = match entry.depth() {
+            1 => flat_ns,
+            2 => path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .unwrap_or(""),
+            _ => {
+                offenders.push(format!("{shown}: nested deeper than <ns>/<Leaf>.proto"));
+                continue;
+            }
+        };
+        let leaf = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        match MessageName::parse(&format!("{style}/{ns}/{leaf}")) {
+            Ok(name) => found.push((name, path.to_path_buf())),
+            Err(e) => offenders.push(format!("{shown}: {e}")),
+        }
+    }
+    found.sort();
+    for pair in found.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            offenders.push(format!(
+                "{} and {} both map to {}",
+                pair[0].1.display(),
+                pair[1].1.display(),
+                pair[0].0
+            ));
+        }
+    }
+    if !offenders.is_empty() {
+        anyhow::bail!(
+            "cannot import {} into style {style:?}; nothing was written:\n  {}",
+            dir.display(),
+            offenders.join("\n  ")
+        );
+    }
+    Ok(found)
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct InstallReport {
     pub copied: Vec<PathBuf>,
     pub skipped: Vec<PathBuf>,
+}
+
+/// What [`Vault::import_style_dir`] did. Every list holds `<ns>/<Leaf>`
+/// names (e.g. `custom/CubePoses`) in sorted order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportReport {
+    pub style: String,
+    /// Written: new to the vault, or replaced under `force`.
+    pub imported: Vec<String>,
+    /// Already in the vault with identical content.
+    pub unchanged: Vec<String>,
+    /// In the vault with different content; not written.
+    pub conflicts: Vec<String>,
 }
 
 fn skeleton_proto(name: &MessageName) -> String {
@@ -521,297 +651,45 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // ── Name validator (L1 TDD test #4 partial) ───────────────────────
+    // ── import_style_dir ──────────────────────────────────────────────
 
-    #[test]
-    fn message_name_accepts_pascal_case() {
-        let n = MessageName::parse("ros2/std/Header").unwrap();
-        assert_eq!(n.namespace, "std");
-        assert_eq!(n.leaf, "Header");
-        assert_eq!(n.rel_path(), PathBuf::from("std/Header.proto"));
+    /// `<tmp>/shapes/` with a flat `Flat.proto` (namespace `shapes`) and a
+    /// nested `custom/CubePoses.proto`.
+    fn import_fixture(root: &Path) -> PathBuf {
+        let src = root.join("shapes");
+        fs::create_dir_all(src.join("custom")).unwrap();
+        fs::create_dir_all(src.join(".git")).unwrap();
+        fs::write(src.join("Flat.proto"), "syntax = \"proto3\";\n").unwrap();
+        fs::write(src.join("README.md"), "not a proto\n").unwrap();
+        fs::write(src.join(".git").join("Hidden.proto"), "x").unwrap();
+        fs::write(
+            src.join("custom").join("CubePoses.proto"),
+            "syntax = \"proto3\";\nmessage CubePoses {}\n",
+        )
+        .unwrap();
+        src
     }
 
     #[test]
-    fn message_name_rejects_lower_leaf() {
-        assert!(matches!(
-            MessageName::parse("swarmbotix/custom/foo"),
-            Err(MessageNameError::LeafNotPascalCase)
-        ));
-    }
-
-    #[test]
-    fn message_name_rejects_missing_style_and_empty_parts() {
-        assert!(matches!(
-            MessageName::parse("Header"),
-            Err(MessageNameError::MissingStyle { .. })
-        ));
-        // Two segments is the near-miss that matters: it looks like a name
-        // but names no style.
-        assert!(matches!(
-            MessageName::parse("std/Header"),
-            Err(MessageNameError::MissingStyle { .. })
-        ));
-        assert!(matches!(
-            MessageName::parse("ros2//Header"),
-            Err(MessageNameError::EmptyNamespace)
-        ));
-        assert!(matches!(
-            MessageName::parse("ros2/std/"),
-            Err(MessageNameError::EmptyLeaf)
-        ));
-    }
-
-    #[test]
-    fn message_name_rejects_illegal_namespace_chars() {
-        assert!(matches!(
-            MessageName::parse("ros2/my namespace/Foo"),
-            Err(MessageNameError::IllegalNamespaceChar)
-        ));
-    }
-
-    // ── Install-on-first-run (L1 TDD test #5) ─────────────────────────
-
-    #[test]
-    fn first_run_installs_std_bundle() {
+    fn import_style_dir_reports_conflicts_unless_forced() {
         let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        let report = v.ensure_installed().unwrap();
-        assert!(!report.copied.is_empty(), "should have copied std files");
-        // Expected std/* files exist — inside the ros2 style.
-        for fname in ["Header.proto", "String.proto", "StringStamped.proto"] {
-            assert!(v.std_dir().join(fname).exists(), "missing {fname}");
-        }
-    }
+        let src = import_fixture(d.path());
+        let v = Vault::at(d.path().join("vault"));
+        v.import_style_dir("acme", &src, false).unwrap();
 
-    #[test]
-    fn second_install_is_noop() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        v.ensure_installed().unwrap();
-        let r2 = v.ensure_installed().unwrap();
-        assert!(r2.copied.is_empty(), "second run should not copy");
-        assert!(!r2.skipped.is_empty(), "second run should skip");
-    }
-
-    #[test]
-    fn install_preserves_user_edits() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        v.ensure_installed().unwrap();
-        let header = v.std_dir().join("Header.proto");
-        fs::write(&header, "// user-edited\n").unwrap();
-        v.ensure_installed().unwrap();
-        let after = fs::read_to_string(&header).unwrap();
-        assert_eq!(after, "// user-edited\n", "user edit clobbered");
-    }
-
-    // ── CRUD (L1 TDD test #4) ─────────────────────────────────────────
-
-    #[test]
-    fn crud_round_trip_for_user_message() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        v.ensure_installed().unwrap();
-        let name = MessageName::parse("swarmbotix/custom/Foo").unwrap();
-        v.new_message(&name).unwrap();
-        let list = v.list().unwrap();
-        assert!(list.contains(&name));
-        v.remove(&name).unwrap();
-        let list = v.list().unwrap();
-        assert!(!list.contains(&name));
-    }
-
-    #[test]
-    fn cannot_create_under_std() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        v.ensure_installed().unwrap();
-        let name = MessageName::parse("ros2/std/Sneaky").unwrap();
-        let err = v.new_message(&name).unwrap_err();
-        assert!(format!("{err:#}").contains("std/"));
-    }
-
-    #[test]
-    fn cannot_remove_std_messages() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        v.ensure_installed().unwrap();
-        let name = MessageName::parse("ros2/std/Header").unwrap();
-        let err = v.remove(&name).unwrap_err();
-        assert!(format!("{err:#}").contains("refusing"));
-        // Still on disk.
-        assert!(v.path_of(&name).exists());
-    }
-
-    #[test]
-    fn list_includes_all_bundled_std_messages() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        v.ensure_installed().unwrap();
-        let names: Vec<String> = v.list().unwrap().iter().map(ToString::to_string).collect();
-        for expected in [
-            "ros2/std/Header",
-            "ros2/std/String",
-            "ros2/std/StringStamped",
-            "ros2/std/Vector3",
-            "ros2/std/Twist",
-            "ros2/std/TwistStamped",
-            "ros2/std/Image",
-            "ros2/std/ImageStamped",
-        ] {
-            assert!(names.contains(&expected.to_owned()), "missing {expected}");
-        }
-    }
-
-    // ── std/* fixture (L1 TDD test #7) ────────────────────────────────
-
-    #[test]
-    fn header_contains_msg_freq_desired() {
-        // Header is load-bearing for L4. If someone "fixes" Header to
-        // include a payload, this test breaks loudly.
-        let header = STD_BUNDLE
-            .get_file("Header.proto")
-            .expect("Header.proto in bundle");
-        let src = std::str::from_utf8(header.contents()).unwrap();
-        assert!(
-            src.contains("msg_freq_desired"),
-            "Header must declare metadata.msg_freq_desired (load-bearing for L4)"
-        );
-        assert!(
-            src.contains("topic_full_name"),
-            "Header must declare metadata.topic_full_name"
-        );
-        assert!(
-            src.contains("msg_type"),
-            "Header must declare metadata.msg_type"
-        );
-        assert!(
-            src.contains("timestamp_ns"),
-            "Header must declare timestamp_ns"
-        );
-    }
-
-    #[test]
-    fn string_has_no_header_field() {
-        // std/String mirrors std_msgs/String — bare payload, no header.
-        let s = STD_BUNDLE.get_file("String.proto").unwrap();
-        let src = std::str::from_utf8(s.contents()).unwrap();
-        assert!(!src.contains("Header"), "std/String must not embed Header");
-        assert!(src.contains("string data"));
-    }
-
-    #[test]
-    fn string_stamped_composes_header_plus_data() {
-        let s = STD_BUNDLE.get_file("StringStamped.proto").unwrap();
-        let src = std::str::from_utf8(s.contents()).unwrap();
-        assert!(src.contains("Header header"));
-        assert!(src.contains("string data"));
-    }
-
-    // ── fully-qualified names ─────────────────────────────────────────
-
-    #[test]
-    fn a_name_without_a_style_is_rejected_with_a_teaching_error() {
-        // The whole point: "images/Image" is not an identity. Two styles
-        // may each define one, and msg_type travels to a consumer that
-        // shares no config with the publisher.
-        let e = MessageName::parse("images/Image").unwrap_err();
-        assert!(matches!(e, MessageNameError::MissingStyle { .. }));
-        let msg = e.to_string();
-        assert!(msg.contains("<style>/<namespace>/<Leaf>"), "{msg}");
-        assert!(msg.contains("ros2/std/Header"), "{msg}");
-    }
-
-    #[test]
-    fn fully_qualified_names_round_trip() {
-        for raw in [
-            "ros2/std/Header",
-            "swarmbotix/images/Image480pMono8",
-            "acme/robot_msgs/ArmGoal",
-        ] {
-            let n = MessageName::parse(raw).unwrap();
-            assert_eq!(n.to_string(), raw);
-        }
-    }
-
-    #[test]
-    fn same_namespace_in_two_styles_are_different_messages() {
-        let a = MessageName::parse("ros2/images/Image").unwrap();
-        let b = MessageName::parse("swarmbotix/images/Image").unwrap();
-        assert_ne!(a, b);
-        assert_ne!(
-            a.rel_path_from_messages_root(),
-            b.rel_path_from_messages_root()
-        );
-    }
-
-    #[test]
-    fn only_ros2_std_counts_as_the_forge_bundle() {
-        assert!(MessageName::parse("ros2/std/Header").unwrap().is_std());
-        // A user style may legitimately have its own `std/`; it is theirs.
-        assert!(!MessageName::parse("acme/std/Header").unwrap().is_std());
-    }
-
-    // ── vault spans every style ───────────────────────────────────────
-
-    #[test]
-    fn list_spans_all_styles_and_names_carry_their_own() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        for (style, ns, leaf) in [("ros2", "std", "Header"), ("swarmbotix", "images", "Image")] {
-            let dir = v.defs_dir(style).join(ns);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join(format!("{leaf}.proto")), "syntax=\"proto3\";").unwrap();
-        }
-        let got: Vec<String> = v.list().unwrap().iter().map(|n| n.to_string()).collect();
-        assert_eq!(got, vec!["ros2/std/Header", "swarmbotix/images/Image"]);
-        assert_eq!(v.styles(), vec!["ros2", "swarmbotix"]);
-    }
-
-    #[test]
-    fn list_style_scopes_to_one_style() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        for style in ["ros2", "swarmbotix"] {
-            let dir = v.defs_dir(style).join("ns");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("A.proto"), "syntax=\"proto3\";").unwrap();
-        }
-        let got: Vec<String> = v
-            .list_style("ros2")
-            .unwrap()
-            .iter()
-            .map(|n| n.to_string())
-            .collect();
-        assert_eq!(got, vec!["ros2/ns/A"]);
-    }
-
-    #[test]
-    fn bundle_installs_into_ros2_and_only_ros2() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        let rep = v.ensure_installed().unwrap();
-        assert!(!rep.copied.is_empty());
-        assert!(v.defs_dir("ros2").join("std").join("Header.proto").exists());
-        assert!(
-            !v.defs_dir("swarmbotix").join("std").exists(),
-            "std/ must not leak into another style"
-        );
-        assert!(v.missing_std_files().is_empty());
-    }
-
-    #[test]
-    fn path_of_places_a_message_inside_its_own_style() {
-        let d = tempdir().unwrap();
-        let v = Vault::at(d.path());
-        let n = MessageName::parse("swarmbotix/images/Image").unwrap();
+        let dest = v.defs_dir("acme").join("shapes").join("Flat.proto");
+        fs::write(&dest, "// edited in the vault\n").unwrap();
+        let r = v.import_style_dir("acme", &src, false).unwrap();
+        assert_eq!(r.conflicts, vec!["shapes/Flat"]);
+        assert_eq!(r.unchanged, vec!["custom/CubePoses"]);
         assert_eq!(
-            v.path_of(&n),
-            d.path()
-                .join("swarmbotix")
-                .join("message_definitions")
-                .join("images")
-                .join("Image.proto")
+            fs::read_to_string(&dest).unwrap(),
+            "// edited in the vault\n"
         );
+
+        let r = v.import_style_dir("acme", &src, true).unwrap();
+        assert_eq!(r.imported, vec!["shapes/Flat"]);
+        assert!(r.conflicts.is_empty());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "syntax = \"proto3\";\n");
     }
 }

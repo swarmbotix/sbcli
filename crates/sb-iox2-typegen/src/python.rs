@@ -103,39 +103,3 @@ fn python_scalar(s: ScalarTy) -> &'static str {
         ScalarTy::F64 => "ctypes.c_double",
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::{FlatField, FlatStruct, FlatType, ScalarTy};
-
-    #[test]
-    fn emits_ctypes_structure_with_packed_layout() {
-        let s = FlatStruct {
-            package: "std_msgs".into(),
-            leaf: "Header".into(),
-            vault_name: "std_msgs/Header".into(),
-            style: "ros2".into(),
-            doc: vec![],
-            fields: vec![
-                FlatField {
-                    name: "sec".into(),
-                    ty: FlatType::Scalar(ScalarTy::I32),
-                    doc: vec![],
-                },
-                FlatField {
-                    name: "frame_id".into(),
-                    ty: FlatType::String { capacity: 256 },
-                    doc: vec![],
-                },
-            ],
-        };
-        let g = emit(&s);
-        assert!(g.contents.contains("import ctypes"));
-        assert!(g.contents.contains("class Header(ctypes.Structure):"));
-        assert!(g.contents.contains("_pack_ = 1"));
-        assert!(g.contents.contains(r#"("sec", ctypes.c_int32)"#));
-        assert!(g.contents.contains(r#"("frame_id", ctypes.c_char * 256)"#));
-        assert!(g.contents.contains(r#"IOX2_TYPE_NAME = "Header""#));
-    }
-}

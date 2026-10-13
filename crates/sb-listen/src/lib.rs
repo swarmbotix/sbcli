@@ -22,8 +22,8 @@ pub mod view;
 pub mod zenoh_bytes;
 
 pub use decode::{
-    DecodeContext, DecodedFrame, FramePayload, Iox2Lookup, decode_frame, decode_frame_dynamic,
-    render_decoded_json_line,
+    DecodeContext, DecodedFrame, FbLookup, FramePayload, Iox2Lookup, decode_frame,
+    decode_frame_dynamic, render_decoded_json_line,
 };
 pub use iceoryx::{IceoryxFrames, Iox2PayloadDetail, listen_iceoryx, publish_iceoryx_raw};
 pub use image_fields::{ImageFields, extract_compressed, extract_image};
@@ -32,6 +32,7 @@ pub use iox2_decode::{
     decode_iox2_struct,
 };
 pub use pool::{CompiledStyle, build_pool, compile_styles, pool_from_styles};
+pub use sb_discover::{WireTag, parse_wire_tag};
 pub use zenoh_bytes::{ZenohFrames, listen_zenoh, publish_zenoh_raw};
 
 use std::time::Duration;
@@ -43,14 +44,17 @@ use anyhow::Result;
 pub struct Frame {
     /// Payload bytes, copied out of the transport's buffer.
     pub bytes: Vec<u8>,
-    /// Schema the transport carried alongside the payload, if any.
+    /// Protobuf schema the transport carried alongside the payload, if any.
     ///
-    /// - Zenoh: the encoding's schema suffix, which sb-generated publishers
-    ///   set to the vault name (`<style>/<ns>/<Leaf>`).
+    /// - Zenoh: the vault name (`<style>/<ns>/<Leaf>`) of a
+    ///   [`WireTag::Protobuf`] encoding; `None` for every other tag.
     /// - iceoryx2: the live service's payload type name, which is
     ///   language-native (`StringStamped`, `my_crate::StringStamped`, …),
     ///   not a vault name. `None` for plain `[u8]` byte-slab services.
     pub wire_schema: Option<String>,
+    /// The sample's Zenoh encoding, classified ([`parse_wire_tag`]).
+    /// `None` on iceoryx2, which has no per-sample encoding.
+    pub wire_tag: Option<WireTag>,
 }
 
 impl From<Vec<u8>> for Frame {
@@ -59,6 +63,7 @@ impl From<Vec<u8>> for Frame {
         Self {
             bytes,
             wire_schema: None,
+            wire_tag: None,
         }
     }
 }

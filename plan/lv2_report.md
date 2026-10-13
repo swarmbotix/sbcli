@@ -2,11 +2,15 @@
 
 Source of truth for L2 progress. Update on every state change.
 
-Last updated: 2026-05-27
+Last updated: 2026-10-13
 
 ---
 
 ## Status: instances + docker runscript extension landed
+
+> Test suite pruned in 0.5.0 to the critical set; the files named below
+> that no longer exist were removed then. See
+> [plan/lv4_report.md](lv4_report.md) 0.5.0 note.
 
 All sixteen L2 TDD tests from [level2.html](level2.html) are covered. The original eleven (workspace + module-init scope) still pass; the new five (tests 12–16) cover `flow.yaml::instances`, the `--docker` preflight + codegen, regeneration, and the generated runscript's runtime behavior.
 

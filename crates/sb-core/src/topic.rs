@@ -1,5 +1,10 @@
-//! `TopicName` — parser/validator for
-//! `/<device>/<workspace>/<module>/<transport>/<topic>`.
+//! `TopicName`: parser/validator for
+//! `<device>/<workspace>/<module>/<transport>/<topic>`.
+//!
+//! The canonical form has no leading `/` and is byte-identical to the
+//! wire key (a Zenoh key expression or an iceoryx2 service name). A
+//! single leading `/` is still accepted on input and dropped, so older
+//! slashed spellings keep resolving to the same topic.
 //!
 //! `sb` enforces fully-qualified topic names on the wire. Users type bare
 //! names (`image_raw`); CLI resolves them via `sb.dev.yml` + workspace
@@ -32,12 +37,13 @@ pub struct TopicName {
 const ALLOWED_TRANSPORTS: [&str; 2] = ["iox2", "zenoh"];
 
 impl TopicName {
-    /// Parse `/<device>/<workspace>/<module>/<transport>/<topic>`.
+    /// Parse `<device>/<workspace>/<module>/<transport>/<topic>`.
+    ///
+    /// One leading `/` is tolerated and dropped, so
+    /// `/dev01/ws/cam/iox2/image_raw` and `dev01/ws/cam/iox2/image_raw`
+    /// parse to the same value.
     pub fn parse(s: &str) -> Result<Self, TopicNameError> {
-        if !s.starts_with('/') {
-            return Err(TopicNameError::MissingLeadingSlash);
-        }
-        let rest = &s[1..];
+        let rest = s.strip_prefix('/').unwrap_or(s);
         let segments: Vec<&str> = rest.split('/').collect();
         if segments.len() != 5 {
             return Err(TopicNameError::WrongSegmentCount {
@@ -77,7 +83,7 @@ impl TopicName {
         topic: &str,
     ) -> Result<Self, TopicNameError> {
         Self::parse(&format!(
-            "/{device}/{workspace}/{module}/{transport}/{topic}"
+            "{device}/{workspace}/{module}/{transport}/{topic}"
         ))
     }
 
@@ -97,10 +103,11 @@ impl TopicName {
         &self.topic
     }
 
-    /// Wire form: `/device/workspace/module/transport/topic`.
+    /// Canonical wire form: `device/workspace/module/transport/topic`
+    /// (no leading `/`).
     pub fn as_full(&self) -> String {
         format!(
-            "/{}/{}/{}/{}/{}",
+            "{}/{}/{}/{}/{}",
             self.device, self.workspace, self.module, self.transport, self.topic
         )
     }
@@ -171,8 +178,6 @@ impl<'de> Deserialize<'de> for TopicName {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TopicNameError {
-    #[error("topic must start with '/' (got no leading slash)")]
-    MissingLeadingSlash,
     #[error(
         "topic must have exactly 5 segments \
          (device/workspace/module/transport/topic), got {got}"
@@ -192,190 +197,26 @@ mod tests {
 
     #[test]
     fn parses_valid_canonical_form() {
-        let t = TopicName::parse("/dev01/perception/camera/iox2/image_raw").unwrap();
+        let t = TopicName::parse("dev01/perception/camera/iox2/image_raw").unwrap();
         assert_eq!(t.device(), "dev01");
         assert_eq!(t.workspace(), "perception");
         assert_eq!(t.module(), "camera");
         assert_eq!(t.transport(), "iox2");
         assert_eq!(t.topic(), "image_raw");
-        assert_eq!(t.as_full(), "/dev01/perception/camera/iox2/image_raw");
+        assert_eq!(t.as_full(), "dev01/perception/camera/iox2/image_raw");
     }
 
     #[test]
-    fn parses_zenoh_transport() {
-        let t = TopicName::parse("/dev01/ws/mod/zenoh/topic").unwrap();
-        assert_eq!(t.transport(), "zenoh");
-    }
-
-    #[test]
-    fn parses_underscore_and_digits() {
-        assert!(TopicName::parse("/d_1/w_1/m_1/iox2/t_1").is_ok());
-        assert!(TopicName::parse("/abc/def/ghi/zenoh/jkl").is_ok());
-        assert!(TopicName::parse("/A/B/C/iox2/D").is_ok());
-        assert!(TopicName::parse("/host01/ws_alpha/mod_42/zenoh/topic_v2").is_ok());
-    }
-
-    #[test]
-    fn rejects_missing_leading_slash() {
-        assert_eq!(
-            TopicName::parse("dev01/ws/mod/iox2/topic"),
-            Err(TopicNameError::MissingLeadingSlash)
-        );
+    fn accepts_both_slashed_and_slashless() {
+        let slashed = TopicName::parse("/dev01/ws/mod/iox2/topic").unwrap();
+        let bare = TopicName::parse("dev01/ws/mod/iox2/topic").unwrap();
+        assert_eq!(slashed, bare);
+        assert_eq!(slashed.as_full(), "dev01/ws/mod/iox2/topic");
+        assert_eq!(bare.as_full(), "dev01/ws/mod/iox2/topic");
+        // Empty input: split yields [""], one segment.
         assert_eq!(
             TopicName::parse(""),
-            Err(TopicNameError::MissingLeadingSlash)
+            Err(TopicNameError::WrongSegmentCount { got: 1 })
         );
-    }
-
-    #[test]
-    fn rejects_wrong_segment_count() {
-        // Too few — old 4-segment form
-        match TopicName::parse("/a/b/c/d").unwrap_err() {
-            TopicNameError::WrongSegmentCount { got: 4 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/a/b/c").unwrap_err() {
-            TopicNameError::WrongSegmentCount { got: 3 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        // Too many
-        match TopicName::parse("/a/b/c/iox2/d/e").unwrap_err() {
-            TopicNameError::WrongSegmentCount { got: 6 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        // Single slash: rest = "" → split → [""] → 1 segment
-        match TopicName::parse("/").unwrap_err() {
-            TopicNameError::WrongSegmentCount { got: 1 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_empty_segment() {
-        match TopicName::parse("//ws/mod/iox2/topic").unwrap_err() {
-            TopicNameError::EmptySegment { index: 0 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/dev//mod/iox2/topic").unwrap_err() {
-            TopicNameError::EmptySegment { index: 1 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/dev/ws//iox2/topic").unwrap_err() {
-            TopicNameError::EmptySegment { index: 2 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/dev/ws/mod//topic").unwrap_err() {
-            TopicNameError::EmptySegment { index: 3 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/dev/ws/mod/iox2/").unwrap_err() {
-            TopicNameError::EmptySegment { index: 4 } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn accepts_hyphen_in_segments() {
-        // Required for runtime-instance overrides (e.g., a swarm sim
-        // launching N copies of `controller` with `module=controller-2`).
-        assert!(TopicName::parse("/dev01/ws/controller-2/iox2/state").is_ok());
-        assert!(TopicName::parse("/host-1/ws/mod/zenoh/topic").is_ok());
-    }
-
-    #[test]
-    fn rejects_illegal_chars() {
-        match TopicName::parse("/dev/ws/mod/iox2/topic.raw").unwrap_err() {
-            TopicNameError::IllegalChar { index: 4, ch: '.' } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/dev/ws/m d/iox2/topic").unwrap_err() {
-            TopicNameError::IllegalChar { index: 2, ch: ' ' } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-        match TopicName::parse("/dev/ws:1/mod/iox2/topic").unwrap_err() {
-            TopicNameError::IllegalChar { index: 1, ch: ':' } => {}
-            e => panic!("unexpected: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_unknown_transport() {
-        match TopicName::parse("/dev/ws/mod/tcp/topic").unwrap_err() {
-            TopicNameError::InvalidTransport { got } => assert_eq!(got, "tcp"),
-            e => panic!("unexpected: {e:?}"),
-        }
-        // "iceoryx2" is the YAML form, not the path-segment form.
-        match TopicName::parse("/dev/ws/mod/iceoryx2/topic").unwrap_err() {
-            TopicNameError::InvalidTransport { got } => assert_eq!(got, "iceoryx2"),
-            e => panic!("unexpected: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn display_round_trip() {
-        let s = "/dev01/ws/mod/zenoh/topic_v2";
-        assert_eq!(TopicName::parse(s).unwrap().to_string(), s);
-    }
-
-    #[test]
-    fn from_parts_builds_correct_name() {
-        let t = TopicName::from_parts("dev01", "ws", "mod", "iox2", "topic").unwrap();
-        assert_eq!(t.as_full(), "/dev01/ws/mod/iox2/topic");
-    }
-
-    #[test]
-    fn from_parts_rejects_empty() {
-        assert!(matches!(
-            TopicName::from_parts("dev", "", "mod", "iox2", "topic"),
-            Err(TopicNameError::EmptySegment { index: 1 })
-        ));
-    }
-
-    #[test]
-    fn from_parts_rejects_unknown_transport() {
-        assert!(matches!(
-            TopicName::from_parts("dev", "ws", "mod", "tcp", "topic"),
-            Err(TopicNameError::InvalidTransport { .. })
-        ));
-    }
-
-    #[test]
-    fn serde_round_trip_via_yaml() {
-        let t = TopicName::parse("/dev01/ws/cam/iox2/image_raw").unwrap();
-        let y = serde_yaml::to_string(&t).unwrap();
-        let back: TopicName = serde_yaml::from_str(&y).unwrap();
-        assert_eq!(t, back);
-    }
-
-    #[test]
-    fn instance_id_accepts_typical_forms() {
-        for s in [
-            "left",
-            "right",
-            "1",
-            "front_left",
-            "cam-01",
-            "_internal",
-            "A1",
-        ] {
-            assert!(is_valid_instance_id(s), "{s:?} should be valid");
-        }
-    }
-
-    #[test]
-    fn instance_id_rejects_separators_and_whitespace() {
-        assert!(matches!(
-            validate_instance_id(""),
-            Err(InstanceIdError::Empty)
-        ));
-        for s in ["a/b", "a b", "a.b", "a:b", "a,b"] {
-            assert!(
-                matches!(
-                    validate_instance_id(s),
-                    Err(InstanceIdError::IllegalChar { .. })
-                ),
-                "{s:?} should be invalid"
-            );
-        }
     }
 }

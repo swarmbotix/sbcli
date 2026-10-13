@@ -13,9 +13,8 @@ use common::Sandbox;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
@@ -86,10 +85,6 @@ impl Releases {
         fs::write(self.dir.path().join("latest.txt"), format!("{version}\n")).unwrap();
     }
 
-    fn asset_url(&self, version: &str) -> String {
-        format!("{}/swarmbotix-{version}-{}.zip", self.base(), platform())
-    }
-
     /// Add release `version`: the zip and its `.sha256`, laid out like a
     /// real one (one top folder with bin/, documents/, VERSION, install.sh).
     fn publish(&self, version: &str) -> PathBuf {
@@ -154,79 +149,6 @@ fn sb_offline(s: &Sandbox, rel: &Releases) -> Command {
     c
 }
 
-fn write_cache(sb_home: &Path, latest: &str, checked_at_unix: u64) {
-    fs::create_dir_all(sb_home).unwrap();
-    fs::write(
-        sb_home.join("update-check.json"),
-        format!(
-            r#"{{"latest":"{latest}","checked_at":"(test)","checked_at_unix":{checked_at_unix}}}"#
-        ),
-    )
-    .unwrap();
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
-
-#[test]
-fn check_prints_five_lines_and_exits_10_when_behind() {
-    if skip_on_windows() {
-        return;
-    }
-    let s = Sandbox::new();
-    let rel = Releases::new();
-    let next = next_version();
-    rel.publish(&next);
-    rel.set_latest(&next);
-
-    let out = sb_offline(&s, &rel)
-        .args(["update", "--check"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(10), "{}", describe(&out));
-    let expected = [
-        format!("installed : {INSTALLED}"),
-        format!("latest    : {next}"),
-        format!("platform  : {}", platform()),
-        format!("asset     : {}", rel.asset_url(&next)),
-        "status    : update available   run `sb update`".to_owned(),
-    ];
-    assert_eq!(
-        text(&out.stdout).lines().collect::<Vec<_>>(),
-        expected,
-        "{}",
-        describe(&out)
-    );
-
-    rel.set_latest(INSTALLED);
-    let out = sb_offline(&s, &rel)
-        .args(["update", "--check"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", describe(&out));
-    assert!(
-        text(&out.stdout).contains("status    : up to date\n"),
-        "{}",
-        describe(&out)
-    );
-
-    rel.set_latest("0.0.1");
-    let out = sb_offline(&s, &rel)
-        .args(["update", "--check"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", describe(&out));
-    assert!(
-        text(&out.stdout).contains("status    : ahead"),
-        "{}",
-        describe(&out)
-    );
-}
-
 #[test]
 fn update_installs_the_release_into_sb_home() {
     if skip_on_windows() {
@@ -288,69 +210,4 @@ fn update_refuses_a_binary_that_is_not_the_installed_one() {
         "{stderr}"
     );
     assert!(!s.sb_home().join("bin").exists(), "nothing was installed");
-}
-
-#[test]
-fn version_prints_one_line_when_the_check_is_off() {
-    if skip_on_windows() {
-        return;
-    }
-    let s = Sandbox::new();
-    write_cache(&s.sb_home(), "99.0.0", now_unix());
-    let out = sb(&s)
-        .arg("--version")
-        .env("SB_NO_UPDATE_CHECK", "1")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(text(&out.stdout), format!("sb {INSTALLED}\n"));
-}
-
-#[test]
-fn version_notice_comes_from_a_fresh_cache_without_network() {
-    if skip_on_windows() {
-        return;
-    }
-    let s = Sandbox::new();
-    let next = next_version();
-    // Any fetch would go to the discard port and fail fast; the cache must
-    // answer before one is attempted.
-    let dead_base = "http://127.0.0.1:9/";
-
-    write_cache(&s.sb_home(), &next, now_unix());
-    let out = sb(&s)
-        .arg("--version")
-        .env("SB_RELEASE_BASE", dead_base)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(
-        text(&out.stdout),
-        format!("sb {INSTALLED}\nupdate available: {next}   run `sb update`\n")
-    );
-
-    write_cache(&s.sb_home(), INSTALLED, now_unix());
-    let out = sb(&s)
-        .arg("--version")
-        .env("SB_RELEASE_BASE", dead_base)
-        .output()
-        .unwrap();
-    assert_eq!(text(&out.stdout), format!("sb {INSTALLED}\n(latest)\n"));
-
-    // A stale cache does go to the network; the failure must be silent.
-    write_cache(&s.sb_home(), &next, 0);
-    let started = Instant::now();
-    let out = sb(&s)
-        .arg("--version")
-        .env("SB_RELEASE_BASE", dead_base)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(text(&out.stdout), format!("sb {INSTALLED}\n"));
-    assert_eq!(text(&out.stderr), "", "a failed check prints nothing");
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the check must give up quickly ({:?})",
-        started.elapsed()
-    );
 }

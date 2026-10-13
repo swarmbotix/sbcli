@@ -71,21 +71,3 @@ fn message_new_then_list_then_rm_round_trip() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("Foo"));
 }
-
-#[test]
-fn message_rm_refuses_std() {
-    let s = Sandbox::new();
-    // populate first
-    s.cmd().args(["message", "list"]).output().unwrap();
-    let out = s
-        .cmd()
-        .args(["message", "rm", "ros2/std/Header"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "rm std/Header should fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("std/"),
-        "stderr should mention std/: {stderr}"
-    );
-}

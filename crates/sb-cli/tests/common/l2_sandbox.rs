@@ -27,6 +27,11 @@ pub struct WsSandbox {
     _tempdir: TempDir,
     sb_home: PathBuf,
     config_path: PathBuf,
+    /// Default working directory of [`Self::cmd`]: `<tempdir>/cwd`, a
+    /// sibling of every module root rather than an ancestor, so the repo
+    /// `flow.yaml` `sb ws create` writes there never encloses a module and
+    /// `sb init` keeps registering into the active workspace.
+    cwd: PathBuf,
 }
 
 impl WsSandbox {
@@ -42,16 +47,25 @@ impl WsSandbox {
         let body = build_test_config(&sb_home);
         std::fs::write(&config_path, body).expect("write sb.config.yml");
 
+        let cwd = tempdir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).expect("mkdir cwd");
+
         Self {
             _tempdir: tempdir,
             sb_home,
             config_path,
+            cwd,
         }
     }
 
     /// Spawn an `sb` command with `SB_CONFIG` pointed at the test config.
+    ///
+    /// The working directory defaults to [`Self::cwd`]: `sb ws create`
+    /// writes `./flow.yaml`, which must land in the sandbox rather than in
+    /// the crate's source tree. Tests that need another cwd set their own.
     pub fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sb"));
+        c.current_dir(&self.cwd);
         c.env("SB_CONFIG", &self.config_path);
         // Redirects the global config layer; $SB_CONFIG does not suppress it.
         c.env("SB_HOME", &self.sb_home);
@@ -61,16 +75,6 @@ impl WsSandbox {
     /// Effective `~/.swarmbotix/` root for this sandbox (the tempdir).
     pub fn sb_home(&self) -> &Path {
         &self.sb_home
-    }
-
-    /// Source vault for the sandbox's active style — the path
-    /// `messages_root` + `message_style` derive to. See
-    /// [`super::SANDBOX_STYLE`].
-    pub fn vault_dir(&self) -> PathBuf {
-        self.sb_home
-            .join("messages")
-            .join(super::SANDBOX_STYLE)
-            .join("message_definitions")
     }
 
     /// Codegen output root for the sandbox's active style.

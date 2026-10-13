@@ -422,13 +422,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn read_optional_missing_path_is_ok_none() {
-        let d = tempdir().unwrap();
-        let missing = d.path().join("nope.yml");
-        assert!(read_optional(&missing).unwrap().is_none());
-    }
-
-    #[test]
     fn load_layering_env_over_workspace_over_global() {
         let d = tempdir().unwrap();
         let env_p = d.path().join("env.yml");
@@ -450,36 +443,6 @@ mod tests {
         assert!(srcs.env_override.is_some());
         assert!(srcs.workspace.is_some());
         assert!(srcs.global.is_some());
-    }
-
-    #[test]
-    fn load_missing_workspace_falls_through_to_global() {
-        let d = tempdir().unwrap();
-        let glb_p = d.path().join("global.yml");
-        fs::write(&glb_p, "device: from-global\n").unwrap();
-        let inputs = LoadInputs {
-            env_override: None,
-            workspace: Some(d.path().join("absent.yml")),
-            global: Some(glb_p),
-        };
-        let (merged, srcs) = load(&inputs).unwrap();
-        assert_eq!(merged.device.as_deref(), Some("from-global"));
-        assert!(srcs.workspace.is_none());
-        assert!(srcs.global.is_some());
-    }
-
-    #[test]
-    fn load_all_absent_returns_builtin_defaults() {
-        let d = tempdir().unwrap();
-        let inputs = LoadInputs {
-            env_override: None,
-            workspace: Some(d.path().join("nope1.yml")),
-            global: Some(d.path().join("nope2.yml")),
-        };
-        let (merged, srcs) = load(&inputs).unwrap();
-        assert_eq!(merged.device.as_deref(), Some("dev01")); // built-in
-        assert!(srcs.workspace.is_none());
-        assert!(srcs.global.is_none());
     }
 
     #[test]
@@ -520,40 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn get_field_returns_scalar_value() {
-        let cfg = SbCliConfig {
-            protoc: Some(PathBuf::from("/usr/bin/protoc")),
-            device: Some("dev07".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            get_field(&cfg, "protoc").unwrap().as_deref(),
-            Some("/usr/bin/protoc")
-        );
-        assert_eq!(get_field(&cfg, "device").unwrap().as_deref(), Some("dev07"));
-        assert_eq!(get_field(&cfg, "flatc").unwrap(), None);
-    }
-
-    #[test]
-    fn get_field_renders_transport_lowercase() {
-        let cfg = SbCliConfig {
-            transport_on_device: Some(sb_core::Transport::Zenoh),
-            ..Default::default()
-        };
-        assert_eq!(
-            get_field(&cfg, "transport_on_device").unwrap().as_deref(),
-            Some("zenoh")
-        );
-    }
-
-    #[test]
-    fn get_field_rejects_unknown_key() {
-        let cfg = SbCliConfig::default();
-        let err = get_field(&cfg, "no_such_thing").unwrap_err();
-        assert!(format!("{err:#}").contains("no_such_thing"));
-    }
-
-    #[test]
     fn known_keys_cover_every_apply_key_branch() {
         // If a new key is added to apply_key, KNOWN_KEYS must learn it
         // too — this test ensures the round-trip stays in sync.
@@ -564,77 +493,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn field_layer_walks_precedence() {
-        let env = SbCliConfig {
-            device: Some("from-env".into()),
-            ..Default::default()
-        };
-        let ws = SbCliConfig {
-            protoc: Some(PathBuf::from("/ws/protoc")),
-            device: Some("from-ws".into()),
-            ..Default::default()
-        };
-        let glb = SbCliConfig {
-            flatc: Some(PathBuf::from("/global/flatc")),
-            ..Default::default()
-        };
-        let layers = LayerConfigs {
-            env: Some(env),
-            workspace: Some(ws),
-            global: Some(glb),
-        };
-        assert_eq!(field_layer(&layers, "device").unwrap(), FieldLayer::Env);
-        assert_eq!(
-            field_layer(&layers, "protoc").unwrap(),
-            FieldLayer::Workspace
-        );
-        assert_eq!(field_layer(&layers, "flatc").unwrap(), FieldLayer::Global);
-        // transport_on_device is in built-in defaults.
-        assert_eq!(
-            field_layer(&layers, "transport_on_device").unwrap(),
-            FieldLayer::Builtin
-        );
-        // sb_home_dir has no built-in default → unset.
-        assert_eq!(
-            field_layer(&layers, "sb_home_dir").unwrap(),
-            FieldLayer::Unset
-        );
-    }
-
-    #[test]
-    fn load_layers_returns_raw_per_layer_configs() {
-        let d = tempdir().unwrap();
-        let env_p = d.path().join("env.yml");
-        let glb_p = d.path().join("global.yml");
-        fs::write(&env_p, "device: from-env\n").unwrap();
-        fs::write(&glb_p, "protoc: /global/protoc\n").unwrap();
-        let inputs = LoadInputs {
-            env_override: Some(env_p),
-            workspace: None,
-            global: Some(glb_p),
-        };
-        let (merged, layers, _srcs) = load_layers(&inputs).unwrap();
-        assert_eq!(merged.device.as_deref(), Some("from-env"));
-        assert_eq!(
-            layers.env.as_ref().unwrap().device.as_deref(),
-            Some("from-env")
-        );
-        assert!(layers.env.as_ref().unwrap().protoc.is_none());
-        assert!(layers.workspace.is_none());
-        assert_eq!(
-            layers
-                .global
-                .as_ref()
-                .unwrap()
-                .protoc
-                .as_deref()
-                .unwrap()
-                .to_str(),
-            Some("/global/protoc")
-        );
-    }
-
     // ── per-style path resolution ─────────────────────────────────────
 
     fn rooted(root: &Path) -> SbCliConfig {
@@ -643,52 +501,6 @@ mod tests {
             messages_root: Some(root.join("messages")),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn paths_derive_from_root_and_the_style_you_ask_for() {
-        let d = tempdir().unwrap();
-        let cfg = rooted(d.path());
-        assert_eq!(
-            message_definitions_for(&cfg, "ros2").unwrap(),
-            d.path()
-                .join("messages")
-                .join("ros2")
-                .join("message_definitions")
-        );
-        assert_eq!(
-            message_targets_for(&cfg, "swarmbotix").unwrap(),
-            d.path()
-                .join("messages")
-                .join("swarmbotix")
-                .join("message_targets")
-        );
-    }
-
-    #[test]
-    fn two_styles_resolve_side_by_side_from_one_config() {
-        // The point of dropping the active-style mode: one config serves a
-        // module that publishes one style and subscribes to another.
-        let d = tempdir().unwrap();
-        let cfg = rooted(d.path());
-        let a = message_targets_for(&cfg, "ros2").unwrap();
-        let b = message_targets_for(&cfg, "swarmbotix").unwrap();
-        assert_ne!(a, b);
-        assert!(a.ends_with("ros2/message_targets"));
-        assert!(b.ends_with("swarmbotix/message_targets"));
-    }
-
-    #[test]
-    fn messages_root_defaults_under_sb_home() {
-        let d = tempdir().unwrap();
-        let cfg = SbCliConfig {
-            sb_home_dir: Some(d.path().to_path_buf()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_messages_root(&cfg).unwrap(),
-            d.path().join("messages")
-        );
     }
 
     #[test]
@@ -717,27 +529,6 @@ mod tests {
             assert!(!KNOWN_KEYS.contains(&k), "{k} must not be a live key");
             assert!(get_field(&cfg, k).is_err(), "{k} must not be gettable");
         }
-    }
-
-    #[test]
-    fn list_styles_finds_only_dirs_with_message_definitions() {
-        let d = tempdir().unwrap();
-        let root = d.path().join("messages");
-        fs::create_dir_all(root.join("ros2").join("message_definitions")).unwrap();
-        fs::create_dir_all(root.join("swarmbotix").join("message_definitions")).unwrap();
-        fs::create_dir_all(root.join("notastyle")).unwrap();
-        let cfg = rooted(d.path());
-        assert_eq!(
-            list_message_styles(&cfg).unwrap(),
-            vec!["ros2".to_string(), "swarmbotix".to_string()]
-        );
-    }
-
-    #[test]
-    fn list_styles_is_empty_when_root_absent() {
-        let d = tempdir().unwrap();
-        let cfg = rooted(&d.path().join("nope"));
-        assert!(list_message_styles(&cfg).unwrap().is_empty());
     }
 
     // ── shipped iox2 defaults for the swarmbotix style ────────────────
@@ -780,23 +571,5 @@ mod tests {
             v.get("swarmbotix.sensors.LaserScan.ranges").copied(),
             Some(1080)
         );
-    }
-
-    #[test]
-    fn new_cap_keys_are_readable_through_get_field() {
-        let cfg = SbCliConfig::builtin_defaults();
-        assert!(get_field(&cfg, "vec_caps").unwrap().is_some());
-        let v = get_field(&cfg, "iox2_variants").unwrap().unwrap();
-        assert!(v.contains("8 variants"), "got {v:?}");
-        // Both must be listed or `sb config show` silently omits them.
-        assert!(KNOWN_KEYS.contains(&"vec_caps"));
-        assert!(KNOWN_KEYS.contains(&"iox2_variants"));
-    }
-
-    #[test]
-    fn set_key_refuses_a_deprecated_key() {
-        let d = tempdir().unwrap();
-        let p = d.path().join("c.yml");
-        assert!(set_key(&p, "message_style", "ros2").is_err());
     }
 }

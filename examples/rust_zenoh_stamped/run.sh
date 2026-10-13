@@ -27,13 +27,15 @@ export SB_CONFIG="$SB_HOME/sb.config.yml"
 PUBBER="$EXAMPLE_DIR/pubber"
 
 # 1. Workspace + adopt the pubber module.
-"$SB" ws create demo
+# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+mkdir -p "$SB_HOME/ws"
+( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
 "$SB" init --rust "$PUBBER" --force >/dev/null
 
 # 2. Scaffold the L3 publisher. The example's main.rs `#[path]`-mounts
 #    `swarmbotix_io/publishers/chatter.rs` produced by this command.
-( cd "$PUBBER" && "$SB" pub add -m std/StringStamped chatter --zenoh --force )
+( cd "$PUBBER" && "$SB" pub add -m ros2/std/StringStamped chatter --zenoh --force )
 
 # 3. Build the example so the run is fast. prost-build needs `protoc`
 #    on PATH — surface the dev box's path explicitly so the build script
@@ -62,10 +64,9 @@ sleep 1.5
 LIST_JSON="$SB_HOME/list.json"
 "$SB" topic list --transport zenoh --json -t 1.0 > "$LIST_JSON" 2>/dev/null || true
 
-# Zenoh key expressions don't carry a leading `/`, but `sb topic list`
-# reports every topic in the slashed form (sb 0.4.2+), the one
-# `sb topic listen` takes.
-TOPIC="/dev01/demo/pubber/chatter"
+# `sb topic list` reports the raw wire key with no leading `/`, the same
+# string `sb topic listen` takes (sb 0.5.0+).
+TOPIC="dev01/demo/pubber/zenoh/chatter"
 ROW="$(grep -F "\"topic\":\"$TOPIC\"" "$LIST_JSON" || true)"
 
 kill $PUB_PID 2>/dev/null || true

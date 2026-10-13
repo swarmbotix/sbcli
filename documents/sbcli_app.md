@@ -66,7 +66,8 @@ Two roles, two commands:
 ```
 sb app init    [PATH] [--name N] [--entry FILE] [--kind docker|host|none] [--image IMG] [--description TEXT] [--force]
 sb install     <URL|PATH> [--prefetch]
-sb app install <URL|PATH> [--prefetch]          same as sb install
+sb install     <URL|PATH> [--dir <path>] [--force]   a workspace repository instead (sb 0.5.0+, §4.1)
+sb app install <URL|PATH> [--prefetch]          same as sb install, app packages only
 sb app list                                     alias: sb app ls
 sb app info    <NAME>
 sb app update  [NAME]
@@ -131,7 +132,8 @@ Letters, digits and `_`, not starting with a digit (the same rule as
 module and workspace names, see [sbcli_init.md](sbcli_init.md) §3), and
 **not an `sb` built-in command**: `doctor`, `message`, `config`, `ws`,
 `init`, `list`, `pub`, `sub`, `service`, `topic`, `up`, `run`, `stop`,
-`down`, `attach`, `gopro`, `install`, `app`, `help`. `sb app init`
+`down`, `attach`, `gopro`, `install`, `app`, `update`, `help`, and (sb 0.5.0+)
+`io`. `sb app init`
 refuses a built-in name at init time, so the collision is never
 discovered by a user.
 
@@ -157,6 +159,23 @@ sb install ~/dev/sb_kalibr --prefetch                        # also pull the doc
 
 `<url>@<ref>` pins a branch or tag; refs containing `/` cannot be pinned
 this way.
+
+Once the source is resolved, the manifest at its root decides what is
+installed (sb 0.5.0+):
+
+| Root holds | `sb install` installs |
+|---|---|
+| `sb.app.yml` | an app package: the rest of this section |
+| `flow.yaml` | a **workspace**: the repository's flow is installed and made active, its `messages:` are imported and compiled, and every module's io is regenerated. See [sbcli_ws.md](sbcli_ws.md) §5.2 |
+| both | error: `<source> has both sb.app.yml and flow.yaml; a package is one or the other` |
+| neither | error: `<source> has neither sb.app.yml (an app package) nor flow.yaml (a workspace package) at its root` |
+
+`--prefetch` applies to app packages only. `--dir <path>` (where to
+clone a git URL) and `--force` (overwrite vault messages that differ
+from the workspace's copies) apply to workspaces; `--dir` with an app is
+refused, since apps are always cloned into `<sb_home>/apps/`. A
+workspace cloned without `--dir` lands in `<sb_home>/repos/<name>/`.
+`sb app install` accepts app packages only.
 
 ### 4.2 Where the package ends up
 

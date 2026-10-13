@@ -17,6 +17,3 @@ sb-core = { workspace = true }
 sb-workspace = { workspace = true }
 anyhow = { workspace = true }
 serde_yaml = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

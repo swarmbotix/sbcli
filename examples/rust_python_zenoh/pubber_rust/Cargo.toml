@@ -13,3 +13,5 @@ path = "main.rs"
 
 [dependencies]
 zenoh = "1.9"
+# The generated publisher's typed `publish` encodes prost messages.
+prost = "0.13"

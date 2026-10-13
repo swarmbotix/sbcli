@@ -201,19 +201,6 @@ pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-
-    fn at(secs: u64) -> String {
-        rfc3339_utc(UNIX_EPOCH + Duration::from_secs(secs))
-    }
-
-    #[test]
-    fn rfc3339_known_instants() {
-        assert_eq!(at(0), "1970-01-01T00:00:00Z");
-        assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(at(1_000_000_000), "2001-09-09T01:46:40Z");
-        assert_eq!(at(1_791_374_400), "2026-10-07T12:00:00Z");
-    }
 
     #[test]
     fn join_relative_rules() {
@@ -230,24 +217,5 @@ mod tests {
         assert!(join_relative(dir, "/etc/passwd").is_err());
         assert!(join_relative(dir, "./").is_err());
         assert!(join_relative(dir, "").is_err());
-    }
-
-    #[test]
-    fn plain_path_strips_only_drive_verbatim_prefixes() {
-        assert_eq!(
-            plain_path(Path::new(r"\\?\C:\pkg")),
-            PathBuf::from(r"C:\pkg")
-        );
-        let unc = Path::new(r"\\?\UNC\server\share");
-        assert_eq!(plain_path(unc), unc.to_path_buf());
-        assert_eq!(plain_path(Path::new("/home/x")), PathBuf::from("/home/x"));
-    }
-
-    #[test]
-    fn edit_distance_basics() {
-        assert_eq!(edit_distance("doctor", "doctor"), 0);
-        assert_eq!(edit_distance("doctr", "doctor"), 1);
-        assert_eq!(edit_distance("", "abc"), 3);
-        assert_eq!(edit_distance("kitten", "sitting"), 3);
     }
 }

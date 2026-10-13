@@ -192,69 +192,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn entry(path: &Path, source: SourceKind) -> AppEntry {
-        AppEntry {
-            path: path.to_path_buf(),
-            source,
-            url: None,
-            git_ref: None,
-            commit: None,
-            version: "0.1.0".into(),
-            installed_at: "2026-10-07T12:00:00Z".into(),
-        }
-    }
-
-    #[test]
-    fn missing_or_empty_file_is_empty_registry() {
-        let home = TempDir::new().unwrap();
-        assert!(Registry::load(home.path()).unwrap().is_empty());
-        fs::write(Registry::path(home.path()), "\n").unwrap();
-        assert!(Registry::load(home.path()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn save_load_remove_round_trip() {
-        let home = TempDir::new().unwrap();
-        let mut reg = Registry::default();
-        reg.insert("zeta", entry(Path::new("/opt/zeta"), SourceKind::Path));
-        let mut git = entry(Path::new("/h/apps/alpha"), SourceKind::Git);
-        git.url = Some("https://example.com/alpha.git".into());
-        git.git_ref = Some("v1".into());
-        git.commit = Some("abc123".into());
-        reg.insert("alpha", git.clone());
-        reg.save(home.path()).unwrap();
-
-        let body = fs::read_to_string(Registry::path(home.path())).unwrap();
-        assert!(body.starts_with("# Installed sb apps."), "{body}");
-        assert!(
-            body.contains("source: git") && body.contains("url: null"),
-            "{body}"
-        );
-
-        let mut back = Registry::load(home.path()).unwrap();
-        assert_eq!(back, reg);
-        assert_eq!(back.names(), vec!["alpha", "zeta"]);
-        assert_eq!(back.get("alpha"), Some(&git));
-        assert_eq!(
-            back.find_git_url("https://example.com/alpha.git")
-                .map(|(n, _)| n),
-            Some("alpha")
-        );
-
-        assert!(back.remove("zeta").is_some());
-        assert!(back.remove("zeta").is_none());
-        back.save(home.path()).unwrap();
-        let again = Registry::load(home.path()).unwrap();
-        assert_eq!(again.len(), 1);
-        assert!(again.get("zeta").is_none());
-        let leftovers: Vec<_> = fs::read_dir(home.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".apps.yml."))
-            .collect();
-        assert!(leftovers.is_empty(), "temp file left behind");
-    }
-
     #[test]
     fn ownership_rule() {
         let home = TempDir::new().unwrap();

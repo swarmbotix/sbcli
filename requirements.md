@@ -95,10 +95,10 @@ Optional:
 All topics follow:
 
 ```
-/<device>/<workspace>/<module>/<transport>/<topic>
+<device>/<workspace>/<module>/<transport>/<topic>
 ```
 
-Example: `/dev01/perception/camera/iox2/image_raw` (or `.../zenoh/image_raw`)
+Example: `dev01/perception/camera/iox2/image_raw` (or `.../zenoh/image_raw`)
 
 - `device` — identifies the machine
 - `workspace` — the active swarmbotix workspace
@@ -106,7 +106,14 @@ Example: `/dev01/perception/camera/iox2/image_raw` (or `.../zenoh/image_raw`)
 - `transport` — literal `iox2` or `zenoh`, picked from the `--iox2` / `--zenoh` flag at `sb pub/sub add` time
 - `topic` — the pub/sub channel name
 
-The transport segment lets the same bare name (e.g. `image_raw`) coexist on both transports for the same module without collision, and makes the transport visible directly in the key. `sb` enforces this naming automatically. Users never type the full path.
+The transport segment lets the same bare name (e.g. `image_raw`) coexist on both transports for the same module without collision, and makes the transport visible directly in the key. `sb` enforces this naming automatically. Users type the full path only to address a topic they do not own, with `--key`.
+
+`sb 0.5.0+`: the canonical form has no leading `/` and is byte-identical to the wire key on both transports. Zenoh forbids a leading `/` in key expressions, and iceoryx2 service names use the same form. Every publisher / subscriber entry in `sb.dev.yml` / `sb.prd.yml` carries exactly one of:
+
+- `topic: <bare>`: owned; codegen prefixes it with `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. Generated code has `is_owned = true`.
+- `key: <wire key>`: verbatim, used as is. Generated code has `is_owned = false`.
+
+A pre-0.5.0 `topic: /x/y` is read as `key: x/y` (the identical wire key); `sb doctor` warns about it (`topics` check) and the next `sb pub` / `sb sub` write rewrites it. A pre-0.5.0 `topic: a/b` (inner `/`, no leading one) is refused at load; the equivalent entry is `key: <device>/<ws>/<module>/<transport>/a/b`.
 
 ---
 
@@ -133,19 +140,29 @@ The transport segment lets the same bare name (e.g. `image_raw`) coexist on both
     <yourstyle>/         ← styles are an open set
       message_definitions/
   workspaces/            ← all workspaces live here
-    <workspace_name>/    ← one directory per workspace
+    <workspace_name>/    ← one directory per installed workspace
       sb.config.yml      ← optional per-workspace override
-      flow.yaml          ← module registry
+      flow.yaml          ← installed copy of a repo flow.yaml: absolute paths + source: (sb 0.5.0+); never hand-edited
+  repos/<name>/          ← default clone location for `sb install <git-url>` of a workspace (sb 0.5.0+)
   apps.yml               ← installed app packages: name → path, source, commit, version
   update-check.json      ← cache for the `sb --version` update notice: latest, checked_at
   apps/<name>/           ← clones made by `sb install <git-url>`; sb owns and deletes these
 ```
 
-### Per-app state — `<module_root>/`
+### Repository state: `<repo>/` (sb 0.5.0+)
+
+```
+ws_ips/                  ← a workspace repository, cloned anywhere
+  flow.yaml              ← repo copy: the source of truth for the workspace; committed
+  messages/custom/       ← optional .proto sources, imported by `sb install` via `messages:`
+  modules/<module>/      ← one module root per module (see below)
+```
+
+### Per-app state: `<module_root>/`
 
 ```
 camera_app/
-  sb.dev.yml       ← dev-time interface (gitignored — host-specific paths)
+  sb.dev.yml       ← dev-time interface; sb 0.5.0+ writes no host path (no `root:`), so it is committed
   sb.prd.yml       ← production interface (ships with binary)
   swarmbotix_io/         ← generated IO files (default io_dir)
   runscript.bash         ← user-written launch script
@@ -188,25 +205,46 @@ This repository (the forge) bundles the canonical `std/` message set under `mess
 
 ## Workspace
 
-Workspaces isolate projects. Analogous to Python virtual environments. Each workspace is a real directory at `~/.swarmbotix/workspaces/<name>/`.
+Workspaces isolate projects. Analogous to Python virtual environments. Each installed workspace is a real directory at `~/.swarmbotix/workspaces/<name>/`. Shipped doc: `documents/sbcli_ws.md`.
+
+`sb 0.5.0+`: a workspace is defined by a **repo copy** of `flow.yaml` at the root of a repository, committed with the code. `sb install` derives an **installed copy** at `~/.swarmbotix/workspaces/<name>/flow.yaml` (absolute paths plus `source:`); every other verb reads the installed copy, and nobody edits it by hand.
 
 ```bash
-sb ws create workspace1   # mkdir ~/.swarmbotix/workspaces/workspace1, init flow.yaml
-sb ws set    workspace1   # write workspace1 to ~/.swarmbotix/active
-sb ws list                # list directories under ~/.swarmbotix/workspaces/
-sb ws delete workspace1   # rm -rf ~/.swarmbotix/workspaces/workspace1
+sb install https://github.com/acme/ws_ips.git --dir ~/ws_ips   # clone, install (or: cd clone && sb install .)
+sb ws create ws_ips              # write ./flow.yaml, then install it
+sb ws install [<url|path>]       # workspace-only form of sb install (default .)
+sb ws check [ws_ips]             # validate a workspace (default: the active one)
+sb ws update ws_ips [--force]    # git pull --ff-only on the source, then reinstall
+sb ws uninstall ws_ips [--clean] # remove the installed copy; --clean also deletes each module's io dir and the clone sb made
+sb ws set    ws_ips              # write ws_ips to ~/.swarmbotix/active
+sb ws list                       # installed workspaces, with source and a stale marker
+sb ws delete ws_ips              # rm -rf ~/.swarmbotix/workspaces/ws_ips
 ```
 
-**`flow.yaml`** at `~/.swarmbotix/workspaces/<workspace>/flow.yaml` — the module registry. Minimal:
+**Repo copy** `<repo>/flow.yaml` (sb 0.5.0+):
 
 ```yaml
+name: ws_ips                       # optional; default = the repo folder name
 modules:
-  camera:   /path/to/camera/sb.dev.yml
-  detector: /path/to/detector/sb.dev.yml
-  tablet:   /path/to/tablet/sb.prd.yml
+  ips_track: modules/ips_track                      # path relative to this file: a module dir or its sb.dev.yml
+  ips_calib: { path: modules/ips_calib, up: false } # registered, rendered, but skipped by sb up
+messages:
+  - { style: ros2, path: messages/custom, backends: [proto, iox2] }   # imported into the vault and compiled by sb install; backends optional
+instances: ...                     # unchanged
 ```
 
-`flow.yaml` stores two things:
+- **`name:`** *(optional)*: the workspace name; default the name of the directory holding the file. Must pass `validate_identifier`, so a folder such as `ws-ips` needs an explicit `name:`.
+- **`modules:`**: module name → path relative to the file, naming the module directory (`sb.dev.yml` appended) or the yaml itself; a path that does not exist yet is a directory unless it ends in `.yml` / `.yaml`. Map form `{ path, up }`, `up` defaulting to `true` (`ModuleRef`); a bare path serialises back whenever `up` is true. `up: false`: registered, io regenerated, `sb run` / `sb stop` work, `sb up` skips it.
+- **`messages:`** *(optional)*: `{ style, path, backends? }` (`MessageSource`). `style` is `[A-Za-z0-9_]+`; `backends` is any of `proto`, `fb`, `iox2`. On install, `Vault::import_style_dir` copies `<path>/<ns>/<Leaf>.proto` to `<style>/<ns>/<Leaf>` and a flat `<path>/<Leaf>.proto` to `<style>/<dirname of path>/<Leaf>`; hidden entries and non-`.proto` files are ignored; identical content is unchanged, different content is a conflict left alone unless `--force`, `ros2/std/` is never overwritten; any file that cannot be named `<style>/<ns>/<Leaf>` aborts that entry with nothing written. The style is then compiled with `backends`, or the normal backend selection when absent.
+- **`instances:`** *(optional)*: unchanged, below.
+- `deny_unknown_fields` applies to the file, to the map form of a module entry, and to each `messages:` entry, so an `sb` older than 0.5.0 cannot read a `flow.yaml` with the new keys.
+- Load errors (`FlowValidationError`): `workspace name "<n>" is invalid: <reason>`, `module "<m>" has an empty path`, `messages[<i>]: style "<s>" is invalid (allowed: [A-Za-z0-9_])`, `messages[<i>]: path is empty`, `messages[<i>]: unknown backend "<b>" (expected one of: proto, fb, iox2)`, `module "<m>" declares instance id "<id>" more than once`.
+
+**Installed copy** `~/.swarmbotix/workspaces/<name>/flow.yaml`: `name:` always set; every path absolute (canonical when it exists) and every module path naming its `sb.dev.yml`; `source: { repo_flow, url, installed_at }` (`FlowSource`), where `url` is absent for a local-path install and `installed_at` is RFC 3339 UTC to the second. Written in full by every install (`sb_workspace::install_flow`), never by hand; the repo copy is never written by an install. An installed copy is refused as an install source. A workspace of the same name installed from a **different** repo flow that still exists is refused; one whose previous source no longer exists is replaced.
+
+A pre-0.5.0 installed copy (bare `modules:` with absolute paths, optional `instances:`) still loads; with no `source:`, `sb ws update` and the stale check do not apply to it.
+
+`flow.yaml` (either copy) stores:
 - **`modules:`** — module name → path to its config file.
 - **`instances:`** *(optional)* — module name → list of declared instances. Each entry is `{ id, label?, docker?, args? }`. Instances are the unit of node identity in the L6 graph editor; they also drive docker-aware runscript codegen at L2 (`sb init --docker`). A module without an `instances:` entry runs as a single un-suffixed process. Full schema: see [documents/sbcli_docker_runscript.md](documents/sbcli_docker_runscript.md) §2.
 
@@ -237,13 +275,36 @@ Edges between modules are **derived automatically** by matching publisher topic 
 ## Per-App Config Files
 
 ### `sb.dev.yml` — development time
-Generated by `sb init` at the app's project root. **Not shipped with binary.** May contain absolute paths (machine-specific — add to `.gitignore`).
+Generated by `sb init` at the app's project root. **Not shipped with binary.** `sb 0.5.0+`: holds no host-specific path and is committed with the module; `sb install` and `sb io update` regenerate `swarmbotix_io/` from it.
 
 ```yaml
 module: camera
-root: /home/user/projects/camera_app
-io_dir: swarmbotix_io/
+language: python
+io_dir: swarmbotix_io
+publishers:
+  - name: image_raw
+    topic: image_raw
+    type: ros2/std/ImageStamped
+    transport: iceoryx2
+  - name: status
+    topic: status
+    transport: zenoh
+    encoding: raw
+    mime: text/json
+subscribers:
+  - name: cmd_vel
+    key: dev01/nav/teleop/zenoh/cmd_vel
+    type: ros2/std/TwistStamped
+    transport: zenoh
+    encoding: fb
+services:
+  - name: calib
 ```
+
+- `root:` *(optional, sb 0.5.0+)*: absent means the directory holding `sb.dev.yml`; relative is resolved against that directory; absolute is used as is (pre-0.5.0 files). `sb init` no longer writes it. Always resolved through `ModuleDevConfig::module_root`.
+- `services:` *(sb 0.5.0+)*: list of `{ name }`; each renders `<io_dir>/services/<name>.<ext>` (Rust and Python).
+- Per publisher / subscriber `encoding: proto | fb | raw` *(sb 0.5.0+)*, default `proto` (omitted on disk), zenoh only. `raw` has no `type:` and an optional `mime:` (e.g. `text/json`). Load errors, exact, prefixed `publishers[<i>]: ` or `subscribers[<i>]: `: `encoding: raw takes no type:`, `type: is required unless encoding: raw`, `mime: is only valid with encoding: raw`, `encoding: is only valid for transport: zenoh` (an explicit `encoding: proto` on iceoryx2 is accepted). The topic rules are checked first, then transport, then type, then mime.
+- Names are unique across publishers, subscribers, and services within a module (`ModuleDevConfig::find_name`); checked when an entry is added, not at load.
 
 ### `sb.prd.yml` — production / runtime
 Generated by `sb gopro`. **Ships with the binary.** Language-agnostic static interface definition.
@@ -252,10 +313,12 @@ Generated by `sb gopro`. **Ships with the binary.** Language-agnostic static int
 module: camera
 publishers:
   - name: image_raw
+    topic: image_raw
     type: ImageMsg
     transport: iceoryx2
 subscribers:
   - name: cmd_vel
+    key: dev01/nav/teleop/zenoh/cmd_vel
     type: TwistMsg
     transport: zenoh
 ```
@@ -273,6 +336,8 @@ camera_app/
       image_raw.py          ← generated, uses raw zenoh/iceoryx2 API
     subscribers/
       cmd_vel.py            ← generated
+    services/
+      calib.py              ← generated router (sb 0.5.0+); user-edited, regenerated only on request
   sb.dev.yml
   sb.prd.yml          ← after sb gopro
   runscript.bash            ← stubbed by `sb init`, user fills in; sb uses to launch
@@ -293,19 +358,39 @@ Conventions used in every command spec below:
 
 ### Workspaces
 
+#### `sb install <git-url | path> [--dir <path>] [--force]` (workspace, `sb 0.5.0+`)
+`sb install` reads the manifest at the source's root (`package_kind`): `sb.app.yml` installs an app package (§App Packages), `flow.yaml` installs a workspace. Both: `<source> has both sb.app.yml and flow.yaml; a package is one or the other`; neither: `<source> has neither sb.app.yml (an app package) nor flow.yaml (a workspace package) at its root`. For a workspace:
+- `<git-url>` (`@<ref>` pins): shallow clone into `--dir <path>`, else staged under `~/.swarmbotix/repos/` and moved to `~/.swarmbotix/repos/<name>/`, `<name>` being the flow's `name:` or else the URL's repository folder name. The same URL again (`source.url` match) fast-forwards that clone and reinstalls. `--dir` must be new, empty, or already a clone of the same URL (fast-forwarded); it is refused for a local folder and for an app. `<path>`: used in place, recording no URL; `sb install .` inside a clone is the common author form.
+- `--force`: overwrite vault messages that differ from the package's copies; the bundled `ros2/std` set is never overwritten.
+- Steps (`finish_workspace_install`), one stdout line each: `-- workspace <n>: created|updated, active`; `-- modules: <k> registered[, <j> with up: false (<names>)]` (a module without `sb.dev.yml` warns on stderr); per `messages:` entry `-- messages: <style> <- <path>: <i> imported, <u> unchanged, <c> conflicts; compiled [<backends>]` (`; not compiled` on a conflict), imported with `Vault::import_style_dir` into the configured vault (never a cwd-discovered one) and compiled with the entry's backends (or the style default); per module `-- io: <m> <w> written, <u> unchanged[, <s> skipped]` (`sb_pubsub::update_all`, services excluded; skipped entries warn); then `done. next: sb up` (`sb init <module dir>` when no modules).
+- Conflicts fail the command after every step has run: `<n> message(s) differ from the vault copies and were not imported (their styles were not compiled); re-run with --force to overwrite the vault copies`.
+- Idempotent; re-run after `git pull`.
+
 #### `sb ws create <name>`
-Create a workspace at `~/.swarmbotix/workspaces/<name>/` with an empty `flow.yaml`.
+`sb 0.5.0+`: write `./flow.yaml` (`name: <name>` and `modules: {}`) and install it, which creates `~/.swarmbotix/workspaces/<name>/` and makes it active; a failed install removes `./flow.yaml` again. Refuses an existing `./flow.yaml` and an already installed `<name>`. Before 0.5.0 it created an empty installed copy only and did not change the active workspace.
 - `<name>` (required) — workspace identifier, no spaces or slashes.
+
+#### `sb ws install [<git-url | path>] [--dir <path>] [--force]` (`sb 0.5.0+`)
+The workspace-only form of `sb install` (default `.`); an app package is refused with ``<source> is an app package (sb.app.yml), not a workspace; install it with `sb install <source>` ``.
+
+#### `sb ws check [<name>]` (`sb 0.5.0+`)
+Validate an installed workspace (default: the active one) with `sb_doctor::check_workspace`, rows in order: `workspace` (summary: module count and source; `[FAIL]` if the installed copy cannot be read), `ws modules` (`[FAIL]` per missing or unparseable `sb.dev.yml`), `ws types` (`[FAIL]` per proto/fb `type:` not in the configured vault nor an `iox2_variants` name), `ws instances` (`[FAIL]` per duplicate id), `ws encoding` (`[FAIL]` per wire key whose entries disagree on `encoding:`), `ws io files` (`[WARN]` per module with generated files missing), `ws source` (`[WARN]` when the repo `flow.yaml` is newer than the installed copy, `[SKIP]` without `source:`). Exit 1 on any `[FAIL]`. The same rows, for the active workspace, are part of `sb doctor`.
+
+#### `sb ws update <name> [--force]` (`sb 0.5.0+`)
+`git -C <repo dir> pull --ff-only` on the directory holding the installed copy's `source.repo_flow`, then reinstall (`sb_workspace::update_from_source`, then the remaining install steps). Requires `source.url`: a local-path install errors with `workspace "<n>" was installed from a local path (<flow>) with no URL; update that checkout yourself and install it again`; no `source:` errors with `workspace "<n>" was not installed from a repository flow.yaml`.
+
+#### `sb ws uninstall <name> [--clean]` (`sb 0.5.0+`)
+Remove `~/.swarmbotix/workspaces/<name>/` and clear the active marker if it named it (`uninstall_workspace`). `--clean` first deletes each module's io dir (`io_dir:` of its `sb.dev.yml`); an absolute or escaping `io_dir`, or a missing `sb.dev.yml`, is skipped and reported (`left <module>: <why>`). A clone `sb` made under `~/.swarmbotix/repos/` (URL recorded, folder under `repos/`) is deleted with `--clean` and otherwise reported as `left clone <path> (pass --clean to delete it)`; `--dir` clones and local folders are never deleted. Imported vault messages are left alone.
 
 #### `sb ws set <name>`
 Mark a workspace active by writing its name to `~/.swarmbotix/active`.
 - `<name>` (required) — must already exist.
 
 #### `sb ws list`
-List all workspaces. The active one is prefixed with `*`. No arguments.
+List all workspaces. The active one is prefixed with `*`. No arguments. `sb 0.5.0+`: each row is `<*| > <name>  <source>[  [stale]]`, the source being the URL or else the repository folder; `[stale]` when the repo `flow.yaml` is newer than the installed copy (`is_stale`, by modification time), with a footer ``[stale]: the repo flow.yaml changed after install; run `sb install <source>` ``. Empty: ``(no workspaces; run `sb ws create <name>` or `sb install <repo>`)``.
 
 #### `sb ws delete <name>`
-Remove `~/.swarmbotix/workspaces/<name>/`. If active, clears the `active` marker with a warning.
+Remove `~/.swarmbotix/workspaces/<name>/`. If active, clears the `active` marker with a warning. Equivalent to `sb ws uninstall <name>` without `--clean`.
 - `<name>` (required)
 
 ---
@@ -320,28 +405,35 @@ What sb writes into `<rootpath>` (only the missing pieces; existing files are pr
 - `runscript.bash` — executable stub. Contents are a comment block explaining what the file is for plus per-language example commands; the body itself prints a TODO and exits non-zero until the user fills it in. An LLM agent pointed at the file + the project tree can typically complete it.
 - `swarmbotix_io/` (or `Assets/Scripts/swarmbotix_io/` for Unity) — empty IO directory; L3 codegen fills it.
 
-Then it appends `module → /abs/path/<rootpath>/sb.dev.yml` to the active workspace's `flow.yaml`. Idempotent: re-running with the same rootpath does not duplicate the registration.
+Then it registers the module. `sb 0.5.0+`: when a repo `flow.yaml` sits at or above `<rootpath>` (`find_flow_upwards`; never an installed copy, never `$HOME` itself unless the search starts there), the module is added there as `<module>: <relative/path>`, appended as one line under `modules:` so comments survive (falling back to a full rewrite when `modules:` is a flow mapping), and the repo flow is reinstalled, keeping a previously recorded URL. A same-named entry pointing at another existing module is an error (`module "<m>" is already registered in <flow> for <path>; module names must be unique within a workspace`); one pointing at a missing module is repointed, keeping `up:`. Otherwise it inserts `module → /abs/path/<rootpath>/sb.dev.yml` into the active workspace's installed `flow.yaml`, as before. Idempotent: re-running with the same rootpath does not duplicate the registration. `sb.dev.yml` is written without `root:` (sb 0.5.0+).
 
 Arguments:
 - `<rootpath>` (default: `.`) — project root to adopt. For Unity, this is the project root that contains `Assets/`. Module name is `basename(rootpath)`.
 - `--rust | --python | --cpp | --flutter | --unity` — language tag written to `sb.dev.yml` and used to pick `runscript.bash` example commments. **Required** when no `sb.dev.yml` exists yet at `<rootpath>`. **Optional** when one already exists; if given, must match the existing `language:` tag (else error).
-- Active workspace (required) — set via `sb ws set` first; `sb init` without one errors with an actionable message.
+- A repo `flow.yaml` above `<rootpath>` or an active workspace (required): with neither, `sb init` errors with ``no active workspace and no flow.yaml above <root>; run `sb ws create <name> && sb ws set <name>` first, or add a flow.yaml at the repository root`` (sb 0.5.0+ text).
 - `--force` (default: refuse to overwrite) — overwrite an existing `sb.dev.yml` / `runscript.bash` at `<rootpath>`.
-- `--docker` — emit a docker-flavored `runscript.bash` whose `--id <name>` branches dispatch to one pre-resolved `docker run` invocation per instance declared in `flow.yaml::instances.<module>`. Preflight requires the block to exist and each instance to have a `docker.image`. See [documents/sbcli_docker_runscript.md](documents/sbcli_docker_runscript.md) for the per-language in-container entry-point.
+- `--docker`: emit a docker-flavored `runscript.bash` whose `--id <name>` branches dispatch to one pre-resolved `docker run` invocation per instance declared in `flow.yaml::instances.<module>` (`sb 0.5.0+`: read from the repo `flow.yaml` when the module sits under one, else from the active workspace's). Preflight requires the block to exist and each instance to have a `docker.image`. See [documents/sbcli_docker_runscript.md](documents/sbcli_docker_runscript.md) for the per-language in-container entry-point.
 
 ---
 
 ### Pub/Sub
 
+`sb 0.5.0+`: `sb pub`, `sb sub`, and `sb list` are deprecated in favour of `sb io` (§Module IO); they keep working unchanged and receive no new features.
+
 `-m` is reserved for `MsgType`. Module selection uses the long-only flag `--module`.
 
 #### Module resolution (highest priority first)
-1. `--module <name>` and active workspace's `flow.yaml` has it → that path
-2. `--module <name>` and `./<name>/sb.dev.yml` exists → that path
+Shared by `sb io`, `sb pub`, `sb sub`, `sb list`, and `sb service` (`sb_pubsub::resolve_module`):
+1. `--module <name>` and `./<name>/sb.dev.yml` exists → that path
+2. `--module <name>` and the active workspace's installed `flow.yaml` has it → that path
 3. No `--module` → `./sb.dev.yml` in cwd
 4. Otherwise → error with the paths searched
 
-After every mutation: updates `sb.dev.yml` **and** regenerates the language file under `<io_dir>/publishers/<name>.<ext>` (or `subscribers/`).
+The module root is then `ModuleDevConfig::module_root` of that file (`root:` absent → the file's directory).
+
+After every mutation: updates `sb.dev.yml` **and** regenerates the language file under `<io_dir>/publishers/<name>.<ext>` (or `subscribers/`). `sb 0.5.0+`: a write also rewrites every legacy `topic: /...` entry in the file as `key:` and prints `  rewrote N legacy topic entry|entries as key: in <path>`.
+
+`sb 0.5.0+` load errors for an entry (prefixed `publishers[<i>]: ` or `subscribers[<i>]: `): `exactly one of topic: or key: is required (both given)`, `exactly one of topic: or key: is required (neither given)`, `topic "a/b" may not contain '/'; use key: for a verbatim wire key` (for a legacy `topic: a/b`, followed by a parenthetical naming `key: <device>/<ws>/<module>/<transport>/a/b`), `key: is empty`, and the encoding rules: `encoding: raw takes no type:`, `type: is required unless encoding: raw`, `mime: is only valid with encoding: raw`, `encoding: is only valid for transport: zenoh`.
 
 #### `sb list [--module <name>]`
 Render a table of all publishers and subscribers for the resolved module.
@@ -350,19 +442,21 @@ Render a table of all publishers and subscribers for the resolved module.
 #### `sb pub list [--module <name>]`
 Same as `sb list` but filters to publishers only.
 
-#### `sb pub add -m <MsgType> <topic> [OPTIONS]`
+#### `sb pub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
 Add a publisher.
-- `<topic>` (required) — bare (`image_raw`) or fully-qualified (`/dev01/ws/cam/iox2/image_raw`). When fully-qualified, the `<transport>` segment must match the `--iox2` / `--zenoh` flag.
+- `<topic>` (required unless `--key`): a bare name (`image_raw`), stored as `topic:`. `sb 0.5.0+`: may not contain `/`; a slashed value errors with `topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello`.
+- `--key <WIRE_KEY>` (`sb 0.5.0+`; conflicts with `<topic>`): a verbatim wire key (`dev01/ws/cam/iox2/image_raw`), stored as `key:` and used as is; a leading `/` is dropped. `sb` injects no `<transport>` segment, so the key must carry the one the flag implies.
 - `-m, --msg <MsgType>` (required) — message type from vault, e.g. `std/ImageStamped`.
-- `-n, --name <name>` (default: derived from last segment of `<topic>`) — identifier used in `sb.dev.yml` and as the generated filename.
+- `-n, --name <name>` (default: the bare `<topic>`, or the last segment of `--key`): identifier used in `sb.dev.yml` and as the generated filename.
 - `--iox2 | --zenoh` (default: from `sb.config.yml` — `transport_on_device` for same-device, `transport_cross_device` otherwise) — transport.
 - `--module <name>` (default: cwd) — target module.
 
 #### `sb pub edit <name> [OPTIONS]`
-Modify an existing publisher in-place. At least one of `-m` / `-t` is required.
+Modify an existing publisher in-place. At least one of `-m` / `-t` / `--key` is required; with none, it errors `at least one of -m/--msg, -t/--topic, or --key is required`.
 - `<name>` (required) — existing publisher identifier.
 - `-m, --msg <MsgType>` (optional) — change message type.
-- `-t, --topic <topic>` (optional) — change topic.
+- `-t, --topic <topic>` (optional): change to an owned bare topic (`topic:`). `sb 0.5.0+`: bare only, may not contain `/`.
+- `--key <WIRE_KEY>` (optional, `sb 0.5.0+`; conflicts with `-t`): change to a verbatim wire key (`key:`); a leading `/` is dropped.
 - `--module <name>` (default: cwd) — target module.
 
 #### `sb pub rm <name> [--module <name>]`
@@ -373,18 +467,50 @@ Remove a publisher and its generated file.
 #### `sb sub list [--module <name>]`
 List subscribers only.
 
-#### `sb sub add -m <MsgType> <topic> [OPTIONS]`
+#### `sb sub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
 Add a subscriber.
-- `<topic>` (required) — bare or fully-qualified.
+- `<topic>` (required unless `--key`): a bare name, as for `sb pub add` (`sb 0.5.0+`: may not contain `/`).
+- `--key <WIRE_KEY>` (`sb 0.5.0+`; conflicts with `<topic>`): a verbatim wire key, as for `sb pub add`. The way to subscribe to another module's publisher.
 - `-m, --msg <MsgType>` (required) — message type from vault, e.g. `std/StringStamped`. Mirrors `pub add` for consistency.
 - `--iox2 | --zenoh` (default: from `sb.config.yml`) — transport.
 - `--module <name>` (default: cwd) — target module.
 
-#### `sb sub edit <topic> [--module <name>]`
-Re-render the subscriber for `<topic>` from current `sb.dev.yml` (useful after `sb.config.yml` defaults change).
+#### `sb sub edit <topic-or-key> [--module <name>]`
+Re-render the subscriber whose `topic:` or `key:` equals `<topic-or-key>` from current `sb.dev.yml` (useful after `sb.config.yml` defaults change). `sb 0.5.0+`: a leading `/` in the argument is ignored; a miss errors with `subscriber for topic/key "<x>" not found on module "<m>"`.
 
-#### `sb sub rm <topic> [--module <name>]`
-Remove a subscriber and its generated file.
+#### `sb sub rm <topic-or-key> [--module <name>]`
+Remove a subscriber and its generated file. Matches `<topic-or-key>` as `sb sub edit` does.
+
+---
+
+### Module IO (`sb io`, `sb 0.5.0+`)
+
+Replaces `sb pub`, `sb sub`, `sb list`, and `sb service init`. Same `sb.dev.yml`, same templates, same module resolution (above); publishers, subscribers, and services share one name space per module. Shipped doc: `documents/sbcli_pubsub.md` §14.
+
+#### `sb io add pub (<topic> | --key <WIRE_KEY>) -m <Type> [--zenoh | --iox2] [--proto | --fb] [-n <name>] [--force | --skip-existing] [--module <name>]`
+#### `sb io add pub (<topic> | --key <WIRE_KEY>) --raw [<mime>] [--zenoh] ...`
+#### `sb io add sub ...` (same forms)
+Add a publisher / subscriber and render `<io_dir>/{publishers,subscribers}/<name>.<ext>`.
+- `<topic>` bare (no `/`), stored as `topic:`; `--key` verbatim, stored as `key:`.
+- `-m <Type>` required unless `--raw`, refused with `--raw`.
+- Transport: `--zenoh` / `--iox2`; without either, `--fb` / `--raw` imply zenoh and a proto entry takes `transport_on_device` (iceoryx2 by default).
+- `--proto` (default, not written to disk) / `--fb` / `--raw [<mime>]` set `encoding:` (and `mime:`); `--raw [<mime>]` goes after the topic. `--raw --iox2`: `iceoryx2 payloads are typed; use a message with a bytes field and --iox2`; `--fb --iox2`: refused by `sb_pubsub`. `--fb` requires `<message_targets>/fb/<ns>/<Leaf>/` to exist: `flatbuffers backend not compiled for style <s>; run sb message compile <type> --fb`. `<mime>` must be `type/subtype` (`;` parameters allowed, no whitespace); `application/protobuf` and `application/flatbuffers` are refused for raw.
+- `-n, --name` default: the bare topic or the key's last segment; refused when already used by any publisher, subscriber, or service on the module: `name "<n>" is already used by <kind> "<n>" on module "<m>"; publishers, subscribers, and services share one name space`.
+- `--force` / `--skip-existing` / TTY prompt: the §Pub/Sub conflict policy (same name, or same topic among publishers and subscribers).
+
+#### `sb io add service <name>`
+Append `{ name }` to `services:` and render `<io_dir>/services/<name>.<ext>` (Rust, Python). Base key `<device>/<workspace>/<module>/zenoh/service/<name>`; a service named `service` uses the bare `.../zenoh/service` base (the default service).
+
+#### `sb io edit <name> [-m <Type>] [-t <topic> | --key <WIRE_KEY>] [--proto | --fb | --raw [<mime>]] [--module <name>]`
+Edit a publisher or subscriber by name; with no flag, only regenerate its file. Switching to raw drops `type:`; switching away from raw drops `mime:` and needs `-m`. No transport change (rm + add). Re-renders the file, writes `sb.dev.yml`. A service: `services have no editable fields; edit the file in <io_dir>/services`. Unknown name: `no publisher, subscriber, or service named "<n>" on module "<m>"`.
+
+#### `sb io rm <name> [--module <name>]` / `sb io list [--module <name>]` (alias `ls`)
+`rm`: remove the entry of any kind and delete its generated file. `list`: the `sb list` table over publishers, subscribers, and services; read-only.
+
+#### `sb io update [<module> | --all] [--services]`
+Regenerate `swarmbotix_io/` from `sb.dev.yml` without changing it (`sb_pubsub::update_all`). Targets `<module>` (resolved as `--module`), else the cwd module when `./sb.dev.yml` exists, else (or with `--all`) every module of the active workspace's installed `flow.yaml`, `up: false` included; an active workspace is required in every form. One line per module, `<module>: <w> written, <u> unchanged, <s> skipped[ (<entry>: <why>; ...)]`. A file whose rendered bytes match is `unchanged` and untouched; an entry that cannot render is `skipped` with its reason and the rest continue; any skip or module failure exits 1 (`<n> entr(y/ies) or module(s) could not be updated`). Services only with `--services` (their files are user-edited). The only `sb.dev.yml` write is rewriting legacy `topic: /...` entries as `key:`.
+
+**Generated Zenoh wrappers** (`sb-codegen`): wire tag (`wire_tag`) `application/protobuf;<type>` for proto, `application/flatbuffers;<type>` for fb, the `mime:` (else `application/octet-stream`) for raw, exported as `WIRE_TAG`. Proto wrappers get a typed `publish(msg)` plus `publish_bytes(...)` and a typed receive (`try_recv_latest_msg`) in Rust, Python, and C++, in addition to the bytes API; fb and raw are bytes-only; Dart and C# are bytes-only and set no tag.
 
 ---
 
@@ -393,7 +519,9 @@ Remove a subscriber and its generated file.
 REST/FastAPI-style request-response over Zenoh queryables, JSON payloads only.
 Independent of pub/sub. Full reference: [documents/sbcli_reqres.md](documents/sbcli_reqres.md).
 
-#### `sb service init [--module <name>]`
+`sb 0.5.0+`: a service is a `services:` entry in `sb.dev.yml` (`sb io add service <name>`), rendered to `<io_dir>/services/<name>.<ext>` and served under `<device>/<workspace>/<module>/zenoh/service/<name>/<route>`. `sb service init` below is deprecated in its favour.
+
+#### `sb service init [--module <name>]` (deprecated, `sb 0.5.0+`)
 Copy the static service router into the resolved module's io dir as
 `service.<ext>` (Rust/Python only), with the module's `device`/`workspace`/`module`
 namespace filled in. Re-run to refresh; overwrites the file. The user then
@@ -438,7 +566,7 @@ Delete a message. Refuses if `<Name>` is under `std/`.
 Always writes the `FileDescriptorSet` IR to `<defs>/.cache/descriptor.bin`, then emits the backends selected by the order in §Backend selection order. `iox2` is an in-tree emitter (no external tool); `proto` and `fb` shell out to `protoc` / `flatc` from `sb.config.yml`.
 - `<Name>` (default: every message) — compile a single message, fully qualified (`ros2/std/Header`). The style comes from the name.
 - `--style <name>` — compile only that style. A **filter**, not a mode: it persists nothing. **Mutually exclusive with `<Name>`**, which already carries its style. An unknown style errors and lists the real ones.
-- `--iox2` / `--proto` / `--fb` — emit these backends explicitly. An explicit flag naming a missing tool errors rather than being silently dropped.
+- `--iox2` / `--proto` / `--fb`: emit these backends explicitly. An explicit flag naming a missing tool errors rather than being silently dropped. `sb 0.5.0+`: the `fb` backend also writes `<Leaf>.bfbs` (`flatc -b --schema`) next to the bindings, for `sb topic listen`.
 - `-o, --out <dir>` — relocate the generated `iox2/` / `proto/` / `fb/` trees. Defaults to `<messages_root>/<style>/message_targets/`, the sibling of `message_definitions/`. `.cache/descriptor.bin` and the `.proto` sources never move.
 - `--string-cap` / `--bytes-cap` / `--vec-cap` / `--string-array-cap <N>` — iox2-only capacity overrides for this invocation; they beat every config-derived default.
 
@@ -451,12 +579,14 @@ Snapshot-based. No rolling sampler. Output layout mirrors the `swarmbotix_old/sb
 #### `sb topic list [OPTIONS]`
 Enumerate currently-active topics on either transport.
 - `-t, --timeout <sec>` (default: `0.5`) — Zenoh discovery window. iceoryx2 uses `Service::list` and ignores the window.
-- `-k, --keyword <str>` (default: none) — substring filter on the topic as printed, so it matches with or without a leading `/` (`sb 0.4.2+`).
+- `-k, --keyword <str>` (default: none): substring filter on the topic as printed. A leading `/` in the keyword is ignored (`sb 0.5.0+`), so a keyword copied from a slashed path still matches.
 - `--case-sensitive` (default: insensitive) — toggle keyword case.
 - `--transport zenoh | iceoryx2` (default: both): restrict discovery. Aliases `z` (zenoh), `i` and `iox2` (iceoryx2) are `sb 0.4.1+`. Long form only: `-t` is `--timeout` on this verb. There is no `all` value; omit the flag for both.
-- `--json` (default: pretty table) — one JSON line per topic instead. JSON keys: `topic`, `transport`, `schema`, `hash`, `rate_hz`, `publisher_pid`, `is_dead`. `topic` is the slashed form, as in the table (`sb 0.4.2+`).
+- `--json` (default: pretty table): one JSON line per topic instead. JSON keys: `topic`, `transport`, `schema`, `hash`, `rate_hz`, `publisher_pid`, `is_dead`. `topic` is the wire key as is, as in the table (`sb 0.5.0+`).
 
-Table columns: `[transport-tag] rate Hz  PID <n>[ (dead)]  schema  topic`. `sb 0.4.2+`: `topic` is the Zenoh key expression or iceoryx2 service name with a leading `/` prepended (`sb_discover::with_leading_slash`), so a row pastes into `sb topic listen` / `sb topic pub` unchanged; before 0.4.2 both printed without it. The PID column is populated for iceoryx2 via `Service::list` → `dynamic_details.nodes` → `UniqueNodeId::pid()` — alive owner shown as `PID <n>`, stale on-disk service whose owning process is gone shown as `PID <n> (dead)`. Zenoh entries render `-` in the PID column (the wire format does not yet carry publisher PID).
+`sb 0.5.0+`: the `schema` column also reads non-protobuf Zenoh wire tags (`sb_discover::WireTag::type_label`): `application/flatbuffers;<type>` fills it with `<type>`; `text/*` and `application/json` fill it with the mime; `application/octet-stream` and anything else leave it to the other sources.
+
+Table columns: `[transport-tag] rate Hz  PID <n>[ (dead)]  schema  topic`. `sb 0.5.0+`: `topic` is the Zenoh key expression or iceoryx2 service name as is, which is also the canonical form, so a row pastes into `sb topic listen` / `sb topic pub` unchanged. History: `sb 0.4.2` began prepending a leading `/` to both the table and the JSON `topic`; 0.5.0 reverted that when the canonical form dropped its `/`. The PID column is populated for iceoryx2 via `Service::list` → `dynamic_details.nodes` → `UniqueNodeId::pid()`; alive owner shown as `PID <n>`, stale on-disk service whose owning process is gone shown as `PID <n> (dead)`. Zenoh entries render `-` in the PID column (the wire format does not yet carry publisher PID).
 
 `sb 0.4.1+`: a Zenoh row with neither a Header `msg_type` nor an encoding schema takes its `schema` from the owning module's `sb.dev.yml`, by the same lookup as `sb topic listen`'s `"config"` source below (`fill_config_schemas` → `sb_discover::config_schema` on the row's topic). Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no matching entry) leaves the row blank. Table and JSON shapes are unchanged.
 
@@ -464,7 +594,7 @@ Table columns: `[transport-tag] rate Hz  PID <n>[ (dead)]  schema  topic`. `sb 0
 
 #### `sb topic listen <topic> [OPTIONS]`
 Subscribe and print frames as JSON lines.
-- `<topic>` (required) — bare names resolved via cwd's `sb.dev.yml`. `sb 0.4.2+`: any argument containing a `/` is fully qualified, its leading `/` optional (prepended when missing, then passed through); before 0.4.2 only a leading `/` marked one. An argument without a `/` is a bare name.
+- `<topic>` (required): bare names resolved via cwd's `sb.dev.yml`. `sb 0.4.2+`: any argument containing a `/` is fully qualified; before 0.4.2 only a leading `/` marked one. `sb 0.5.0+`: a leading `/` is accepted and dropped (0.4.2 prepended one when missing). An argument without a `/` is a bare name.
 - `-t, --transport zenoh | iceoryx2` (default: inferred, below): which transport to subscribe on. Aliases `z` (zenoh), `i` and `iox2` (iceoryx2).
 - `--raw` (default: decode via vault) — emit hex bytes; payload becomes `{kind: "hex", bytes: "…"}`.
 - `-n, --count <N>` (default: `0` — run until SIGINT) — stop after N frames.
@@ -474,17 +604,19 @@ Subscribe and print frames as JSON lines.
 
 `--type`, `--no-data`, `--show`, the `schema_source` key, the `bytes` summary, the wire-schema source, and typed iceoryx2 opens are `sb 0.4.0+`. The `-t` short, the transport aliases, transport inference, and the `"config"` source are `sb 0.4.1+`; before 0.4.1, `--transport` defaulted to `zenoh`.
 
-Transport, when `-t` is absent (`pick_transport`): the `<transport>` segment of a fully-qualified `/<device>/<ws>/<module>/<zenoh|iox2>/<topic>`, or, for a bare topic, the transport of the cwd `sb.dev.yml` entry it resolved to. There is no default. A fully-qualified path not in that five-segment form, without `-t`, exits 1 with
-`error: cannot infer transport from <topic>: expected /<device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2`.
+Transport, when `-t` is absent (`pick_transport`): the `<transport>` segment of a fully-qualified `<device>/<ws>/<module>/<zenoh|iox2>/<topic>`, or, for a bare topic, the transport of the cwd `sb.dev.yml` entry it resolved to. There is no default. A fully-qualified path not in that five-segment form, without `-t`, exits 1 with
+`error: cannot infer transport from <topic>: expected <device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2` (`sb 0.5.0+` text; e.g. `cannot infer transport from not/canonical: ...`).
 A `-t` that disagrees with the path wins, with a stderr note such as `note: path says zenoh, --transport says iceoryx2; using iceoryx2`.
 
-Output: one JSON line per frame, keys in this order: `transport`, `topic`, `schema`, `schema_source`, `hash`, `encoding`, `payload`. `schema_source` is `"flag"`, `"wire"`, `"header"`, `"config"` (`sb 0.4.1+`), or `null` (exactly when `schema` is `null`). `encoding` is `"protobuf"`, `"iox2"` (an iceoryx2 `#[repr(C)]` struct), or `null`. `payload` is `{kind: "json", json: {…}}` or `{kind: "hex", bytes: "…"}`. `hash` is reserved and always `null`. A `bytes` field longer than 64 bytes prints as `{len, head_hex}` (first 16 bytes).
+Output: one JSON line per frame, keys in this order: `transport`, `topic`, `schema`, `schema_source`, `hash`, `encoding`, `payload`. `topic` is the wire key without a leading `/` (`sb 0.5.0+`), as are the `--show` window title and the stderr warnings that name the topic. `schema_source` is `"flag"`, `"wire"`, `"header"`, `"config"` (`sb 0.4.1+`), or `null` (exactly when `schema` is `null`). `encoding` is `"protobuf"`, `"iox2"` (an iceoryx2 `#[repr(C)]` struct), or `null`; `sb 0.5.0+` adds `"flatbuffers"` and `"text"` on Zenoh. `payload` is `{kind: "json", json: {…}}` or `{kind: "hex", bytes: "…"}`, and `sb 0.5.0+` adds `{kind: "text", text: "…"}`.
+
+Zenoh wire tags (`sb 0.5.0+`, beyond protobuf; only `--type` overrides them): `application/flatbuffers;<type>` names the type (`schema_source: "wire"`) and decodes through `flatc --json --raw-binary --strict-json` against `<message_targets>/fb/<ns>/<Leaf>/<Leaf>.bfbs` when that file and `flatc` exist, else hex with `schema` set and a one-time stderr note (`encoding: "flatbuffers"` either way); `text/*` and `application/json` print `payload: {kind: "text", text: …}` with the mime as `schema` (`schema_source: "wire"`, `encoding: "text"`; a body that is not UTF-8 prints hex); `application/octet-stream` adds nothing, so the Header probe and `"config"` sources apply as for an untagged sample. `hash` is reserved and always `null`. A `bytes` field longer than 64 bytes prints as `{len, head_hex}` (first 16 bytes).
 
 Type resolution, per frame, first hit wins:
 1. `--type` → `"flag"`.
 2. The transport's wire schema → `"wire"`. Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`, set by generated Rust, Python, and C++ Zenoh publishers (Flutter and Unity set none). iceoryx2: the payload type name the service was registered with, mapped to the vault iox2 struct with the same leaf and the live payload's size.
 3. The Header probe (`metadata.msg_type`, either Header layout `sb 0.4.2+`, see `sb topic list`) → `"header"`.
-4. The topic's entry in the module's `sb.dev.yml` → `"config"` (`sb 0.4.1+`; `ResolveOutcome::schema`). The entry's `type` is used verbatim. Bare topic: the cwd module's matched entry. Fully-qualified: `<module>` is looked up in the active workspace's `flow.yaml` (`active_module_registry`), as written, then without its `-<instance>` suffix (everything from the first `-`; `ips_track-sb00` → `ips_track`); publishers then subscribers, the first entry whose transport equals the path's and whose `topic` equals the path's last segment or the whole path (`sb_discover::config_schema`). The cwd `sb.dev.yml` is never consulted for a fully-qualified path. Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no entry, path not in the five-segment form) skips the source silently. On iceoryx2 a typed service always supplies a wire type first, so the source matters only for an untyped `[u8]` service; there, as with `--type`, the name matches no iox2 layout (the element is one byte), so the bytes are tried as protobuf, else hex with `schema` kept.
+4. The topic's entry in the module's `sb.dev.yml` → `"config"` (`sb 0.4.1+`; `ResolveOutcome::schema`). The entry's `type` is used verbatim. Bare topic: the cwd module's matched entry. Fully-qualified: `<module>` is looked up in the active workspace's `flow.yaml` (`active_module_registry`), as written, then without its `-<instance>` suffix (everything from the first `-`; `ips_track-sb00` → `ips_track`); publishers then subscribers, the first entry whose transport equals the path's and whose `topic:` equals the path's last segment or whose `key:` equals the whole path (`sb_discover::config_schema`). Only the five-segment form is looked up, so a four-segment legacy key such as `dev01/demo/pubber/hello` never matches. The cwd `sb.dev.yml` is never consulted for a fully-qualified path. Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no entry, path not in the five-segment form) skips the source silently. On iceoryx2 a typed service always supplies a wire type first, so the source matters only for an untyped `[u8]` service; there, as with `--type`, the name matches no iox2 layout (the element is one byte), so the bytes are tried as protobuf, else hex with `schema` kept.
 
 No hit: hex, `schema: null`, and a one-time stderr hint to re-render the publisher (`sb pub edit <name> -m <type>`) or pass `--type`. A resolved type that does not decode prints hex with `schema` kept. `--raw` skips resolution entirely.
 
@@ -496,7 +628,7 @@ Decoding uses a `DescriptorPool` built from the vault at startup, one `protoc` r
 
 #### `sb topic pub <topic> <bytes-hex> [-t, --transport zenoh | iceoryx2]`
 Publish raw bytes once.
-- `<topic>` (required): bare or fully-qualified, by the same rule as `sb topic listen` (`sb 0.4.2+`: leading `/` optional).
+- `<topic>` (required): bare or fully-qualified, by the same rule as `sb topic listen` (`sb 0.5.0+`: a leading `/` is accepted and dropped). On success prints the wire key without a leading `/`, e.g. `published 4 byte(s) on test/x/y/zenoh/p via Zenoh`.
 - `<bytes-hex>` (required) — hex string (no `0x` prefix).
 - `-t, --transport zenoh | iceoryx2` (default: inferred): aliases `z` (zenoh), `i` and `iox2` (iceoryx2). Inference, the `cannot infer transport` error, and the disagreement note are exactly as for `sb topic listen` (`sb 0.4.1+`; before it the default was `zenoh`). No schema lookup: raw bytes need none.
 
@@ -513,7 +645,7 @@ Human output: one `Pruned <N> dead iceoryx2 node(s):` block listing the cleaned 
 Each module is launched by executing its `runscript.bash` (or `stopscript.bash`) in a dedicated tmux/psmux pane. Session name: `sb-<active_workspace>`. One window per module — `sb run` and `sb stop` both target the same window, idempotently swapping in whichever script the verb implies.
 
 #### `sb up`
-Launch every module in the active workspace's `flow.yaml`. One tmux pane per module. Requires an active workspace. No per-module passthrough args — use `sb run <module> [args...]` for that.
+Launch every module in the active workspace's `flow.yaml`. One tmux pane per module. Requires an active workspace. No per-module passthrough args; use `sb run <module> [args...]` for that. `sb 0.5.0+`: skips modules with `up: false`, erroring with ``workspace "<ws>" has no modules to launch: every module in flow.yaml has `up: false` (use `sb run <module>` to start one)`` when that leaves none; warns on stderr (and continues) when the workspace's repo `flow.yaml` is newer than the installed copy (`sb_workspace::is_stale`). `sb run` gives the same warning and ignores `up:`.
 
 #### `sb run <module> [args...]`
 Launch a single module in the existing `sb-<workspace>` session (creating it if absent). Re-running the same module kills and restarts its pane (no duplicates). All args after `<module>` are forwarded verbatim to `runscript.bash` — use `--` to disambiguate args that start with `-` from `sb`'s own flags.
@@ -558,6 +690,7 @@ An **app package** is a folder with an `sb.app.yml` at its root. It is not a mod
 Write a fully commented `sb.app.yml` into `path` (default cwd) plus executable stubs for a missing entry and, for `--kind host`, a missing `install.bash`. Prompts for name / entry / kind / image on a TTY when `--kind` is absent; otherwise kind defaults to `none` (or `docker` when `--image` is given). Name defaults to the sanitised folder name and must pass `validate_identifier` and not be an `sb` built-in. The manifest is validated before being written. Existing scripts are never overwritten; `sb.app.yml` only with `--force`.
 
 #### `sb install <url|path> [--prefetch]` (alias `sb app install`)
+- `sb 0.5.0+`: the source's root manifest decides: `sb.app.yml` → app (below); `flow.yaml` → workspace (§Workspaces, `sb install`); both or neither → error.
 - Source: git URL (`https://`, `http://`, `ssh://`, `git://`, `file://`, `git@…`, or anything ending in `.git`), optionally `@<branch-or-tag>`; else a local folder, tilde-expanded and canonicalised.
 - Git sources are shallow-cloned into `<sb_home>/apps/<manifest.name>/`; the same URL again fast-forwards, a different `@ref` replaces the clone. Local folders are registered in place: never copied, never deleted.
 - Steps: resolve source → load + validate `sb.app.yml` → claim name (built-in or taken by another folder = error) → kind step (`none`: nothing; `docker`: `docker pull <image>` only if `prefetch: true` or `--prefetch`; `host`: `bash <host.install>` from the package root, non-zero aborts) → check `requires` on PATH (warnings) → write `<sb_home>/apps.yml`.
@@ -610,7 +743,7 @@ Start the `swarmctl` server in a tmux pane and open the browser. Idempotent — 
 ### Doctor
 
 #### `sb doctor`
-Print `sb <version>`, then read merged `sb.config.yml` and run ten checks, in this order:
+Print `sb <version>`, then read merged `sb.config.yml` and run twelve checks, in this order:
 1-2. Executables (`--version` succeeds): `protoc`, `flatc`.
 3. `transports` — the zenoh and iceoryx2 **crate** versions linked into this binary, baked in from the workspace lockfile by `sb-doctor`'s build script (`SB_ZENOH_VERSION` / `SB_ICEORYX2_VERSION`; `unknown` when the build tree had no lockfile). Reads nothing from the config and never fails.
 4-5. Shared libraries (file exists + `dlopen` succeeds): `libzenohc.so`, `libiceoryx2_ffi_c.so`. Each also reports the install's own version, probed in order from `<libdir>/pkgconfig/*.pc`, `<libdir>/cmake/*/…ConfigVersion.cmake`, a version component of the canonicalized path, then a `.so.X.Y.Z` suffix; `version unknown` when every probe misses. A version that disagrees with check 3 **warns**, never fails: zenoh on differing `major.minor`, iceoryx2 on any differing digit (segments are opened on exact version equality).
@@ -619,6 +752,8 @@ Print `sb <version>`, then read merged `sb.config.yml` and run ten checks, in th
 8. `unity targets` — stale generated C# inside a Unity project (see §Generated-code language levels). **Warns**, never fails.
 9. `config keys` — the dead `message_style` / `message_definitions` / `message_targets` keys, if still present.
 10. `std vault` — `~/.swarmbotix/messages/ros2/message_definitions/std/` populated; names `sb message list` as the re-install path.
+11. `topics` (`sb 0.5.0+`): legacy `topic: /...` entries in the modules of the active workspace. `` [OK]   topics       no legacy `topic: /...` entries in the active workspace ``; `[SKIP] topics       no active workspace`; otherwise one `[WARN] topics` row per offending module, naming the module, then a continuation line per entry with both forms, then the rewrite command. **Warns**, never fails.
+12. `workspace` and `ws *` (`sb 0.5.0+`): the `sb ws check` rows for the active workspace (`workspace`, `ws modules`, `ws types`, `ws instances`, `ws encoding`, `ws io files`, `ws source`, see §Workspaces). `[SKIP] workspace no active workspace` without one. A `[FAIL]` here **counts toward the exit code** (it breaks `sb up` or codegen); `ws io files` and `ws source` only warn.
 
 No Python-package check exists, so a `pip`-installed transport is never compared against check 3. An unset path field is `[SKIP]`, not `[FAIL]`.
 
