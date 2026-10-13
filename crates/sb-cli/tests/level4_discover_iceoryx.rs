@@ -65,7 +65,7 @@ fn discover_iceoryx_finds_live_u8_service() {
 
     let row = entries
         .iter()
-        .find(|e| e.topic == name)
+        .find(|e| e.topic == format!("/{name}"))
         .unwrap_or_else(|| panic!("service not found, saw: {entries:#?}"));
     assert_eq!(row.transport, Transport::Iceoryx2);
     // `[u8]` payload — iox2 stores the rust type name; we don't pin the
@@ -98,14 +98,19 @@ fn discover_iceoryx_keyword_filter_drops_non_matches() {
     let (s1, h1) = spawn_u8_slab_service(keep);
     let (s2, h2) = spawn_u8_slab_service(drop);
 
-    let entries = discover_iceoryx(Some("keepme"), false).expect("discover_iceoryx");
+    // The keyword matches the slashed topic whether or not it carries the `/`.
+    let entries =
+        discover_iceoryx(Some("/test_lvl4_iox_filter_keep"), false).expect("discover_iceoryx");
     s1.store(true, Ordering::Relaxed);
     s2.store(true, Ordering::Relaxed);
     let _ = h1.join();
     let _ = h2.join();
 
     let topics: Vec<&str> = entries.iter().map(|e| e.topic.as_str()).collect();
-    assert!(topics.contains(&keep), "filter kept too little: {topics:?}");
+    assert!(
+        topics.contains(&format!("/{keep}").as_str()),
+        "filter kept too little: {topics:?}"
+    );
     assert!(
         !topics.iter().any(|t| t.contains("dropme")),
         "filter should drop non-matches: {topics:?}"

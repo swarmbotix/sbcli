@@ -24,11 +24,12 @@ fn stamped_bytes(msg_type: &str, rate: f64, topic_full: &str) -> Vec<u8> {
         header: Some(HeaderProbe {
             timestamp_ns: 1_700_000_000_000_000_000,
             frame_id: "world".into(),
-            metadata: Some(MetadataProbe {
+            ros2_metadata: Some(MetadataProbe {
                 topic_full_name: topic_full.into(),
                 msg_type: msg_type.into(),
                 msg_freq_desired: rate,
             }),
+            ..Default::default()
         }),
     };
     let mut buf = Vec::new();
@@ -74,7 +75,8 @@ fn sb_topic_list_finds_running_stamped_publisher() {
     let found = stdout
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .find(|v| v["topic"].as_str() == Some(key))
+        // `sb topic list` prints the key expression with its leading `/`.
+        .find(|v| v["topic"].as_str() == Some(&format!("/{key}")))
         .unwrap_or_else(|| panic!("publisher not found in: {stdout}"));
     assert_eq!(found["transport"], "zenoh");
     assert_eq!(found["schema"], "ros2/std/StringStamped");
@@ -110,7 +112,10 @@ fn sb_topic_list_table_renders_running_publisher() {
     let _ = handle.join();
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(key), "topic missing from table: {stdout}");
+    assert!(
+        stdout.contains(&format!("  /{key}\n")),
+        "slashed topic missing from table: {stdout}"
+    );
     assert!(
         stdout.contains("ros2/std/StringStamped"),
         "schema missing from table: {stdout}"

@@ -570,11 +570,12 @@ mod tests {
             header: Some(HeaderProbe {
                 timestamp_ns: 0,
                 frame_id: String::new(),
-                metadata: Some(MetadataProbe {
+                ros2_metadata: Some(MetadataProbe {
                     topic_full_name: String::new(),
                     msg_type: msg_type.into(),
                     msg_freq_desired: rate,
                 }),
+                ..Default::default()
             }),
         };
         let mut buf = Vec::new();

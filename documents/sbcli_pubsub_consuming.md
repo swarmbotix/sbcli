@@ -854,10 +854,12 @@ The hardcoded segments here are a known wart — track the upstream issue if you
 `sb topic list --transport iceoryx2` enumerates all live iox2 services on the host. Each instance shows as its own entry, with the **owning publisher's PID** and an explicit **`(dead)`** suffix if the process that registered the service is no longer alive (this is how `sb topic list` distinguishes a live publisher from a stale on-disk service registration left behind by a crashed process):
 
 ```
-  - [i]      - Hz  PID 12345           StringStamped  /dev01/ws/app1-1/iox2/state
-  - [i]      - Hz  PID 12347           StringStamped  /dev01/ws/app1-2/iox2/state
-  - [i]      - Hz  PID 12340 (dead)    StringStamped  /dev01/ws/app1-3/iox2/state   ← orphan registration
+  - [i]      - Hz  PID 12345           StringStamped           /dev01/ws/app1-1/iox2/state
+  - [i]      - Hz  PID 12347           StringStamped           /dev01/ws/app1-2/iox2/state
+  - [i]      - Hz  PID 12340 (dead)    StringStamped           /dev01/ws/app1-3/iox2/state   ← orphan registration
 ```
+
+The topic prints in its slashed form, in the table and in the `--json` `topic` field alike (sb 0.4.2+), and `sb topic listen` / `sb topic pub` accept it with or without the leading `/`, so a row pastes into either unchanged.
 
 PID + liveness come straight from iceoryx2's service registry (`Service::list` → `dynamic_details.nodes` → `UniqueNodeId::pid()`); you don't need to put anything on the wire for it to work. The `(dead)` flag is the answer to *"why does `sb topic list` keep showing a topic that nobody is publishing to anymore?"* — iox2 leaves the on-disk service file under `/tmp/iceoryx2/services/` when a publisher exits abruptly (Ctrl+C in tmux, kill -9, etc.) and the file persists until pruned. **`sb topic prune` is the fix** — it walks the iceoryx2 node registry and calls `try_remove_stale_resources()` on every node whose owning process is gone, printing the PIDs it cleaned (`--json` for `{cleaned_pids, failed}`). It is iceoryx2-only: Zenoh is session-based and has no on-disk state to prune. `rm -rf /tmp/iceoryx2 /dev/shm/iox2_*` remains the brute-force fallback if a registration is too damaged to remove cleanly.
 

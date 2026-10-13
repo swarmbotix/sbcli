@@ -120,6 +120,11 @@ A leading `/` in a topic argument bypasses the prefix and addresses
 the wire path verbatim — useful for cross-workspace traffic or
 legacy ROS2 topics. See [sbcli_pubsub.md](sbcli_pubsub.md) §13.7.
 
+`sb topic list` prints every topic in this slashed form, in the table
+and in the `--json` `topic` field alike (sb 0.4.2+), and `sb topic listen`
+/ `sb topic pub` accept a path with or without its leading `/`, so a
+listed row pastes in unchanged.
+
 ---
 
 ## 4. Command groups

@@ -451,18 +451,20 @@ Snapshot-based. No rolling sampler. Output layout mirrors the `swarmbotix_old/sb
 #### `sb topic list [OPTIONS]`
 Enumerate currently-active topics on either transport.
 - `-t, --timeout <sec>` (default: `0.5`) — Zenoh discovery window. iceoryx2 uses `Service::list` and ignores the window.
-- `-k, --keyword <str>` (default: none) — substring filter on topic name.
+- `-k, --keyword <str>` (default: none) — substring filter on the topic as printed, so it matches with or without a leading `/` (`sb 0.4.2+`).
 - `--case-sensitive` (default: insensitive) — toggle keyword case.
 - `--transport zenoh | iceoryx2` (default: both): restrict discovery. Aliases `z` (zenoh), `i` and `iox2` (iceoryx2) are `sb 0.4.1+`. Long form only: `-t` is `--timeout` on this verb. There is no `all` value; omit the flag for both.
-- `--json` (default: pretty table) — one JSON line per topic instead. JSON keys: `topic`, `transport`, `schema`, `hash`, `rate_hz`, `publisher_pid`, `is_dead`.
+- `--json` (default: pretty table) — one JSON line per topic instead. JSON keys: `topic`, `transport`, `schema`, `hash`, `rate_hz`, `publisher_pid`, `is_dead`. `topic` is the slashed form, as in the table (`sb 0.4.2+`).
 
-Table columns: `[transport-tag] rate Hz  PID <n>[ (dead)]  schema  topic`. The PID column is populated for iceoryx2 via `Service::list` → `dynamic_details.nodes` → `UniqueNodeId::pid()` — alive owner shown as `PID <n>`, stale on-disk service whose owning process is gone shown as `PID <n> (dead)`. Zenoh entries render `-` in the PID column (the wire format does not yet carry publisher PID).
+Table columns: `[transport-tag] rate Hz  PID <n>[ (dead)]  schema  topic`. `sb 0.4.2+`: `topic` is the Zenoh key expression or iceoryx2 service name with a leading `/` prepended (`sb_discover::with_leading_slash`), so a row pastes into `sb topic listen` / `sb topic pub` unchanged; before 0.4.2 both printed without it. The PID column is populated for iceoryx2 via `Service::list` → `dynamic_details.nodes` → `UniqueNodeId::pid()` — alive owner shown as `PID <n>`, stale on-disk service whose owning process is gone shown as `PID <n> (dead)`. Zenoh entries render `-` in the PID column (the wire format does not yet carry publisher PID).
 
-`sb 0.4.1+`: a Zenoh row with neither a Header `msg_type` nor an encoding schema takes its `schema` from the owning module's `sb.dev.yml`, by the same lookup as `sb topic listen`'s `"config"` source below (`fill_config_schemas` → `sb_discover::config_schema` on the row's key expression). Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no matching entry) leaves the row blank. Table and JSON shapes are unchanged.
+`sb 0.4.1+`: a Zenoh row with neither a Header `msg_type` nor an encoding schema takes its `schema` from the owning module's `sb.dev.yml`, by the same lookup as `sb topic listen`'s `"config"` source below (`fill_config_schemas` → `sb_discover::config_schema` on the row's topic). Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no matching entry) leaves the row blank. Table and JSON shapes are unchanged.
+
+`sb 0.4.2+`: the Header probe behind the `schema` and `rate_hz` columns (`sb_discover::probe_header`, shared with `sb topic listen`'s `"header"` source) reads both Header layouts. `swarmbotix/header/Header` carries `metadata` at tag 4 (tag 3 is `uint64 seq`); `ros2/std/Header` carries it at tag 3. `HeaderProbe` implements `prost::Message` by hand to tell tag 3 apart by wire type (length-delimited is `metadata`, varint is `seq`) and prefers tag 4. Before 0.4.2 only tag 3 was read, so a swarmbotix-layout Header left both columns to the fallbacks: its tag-4 metadata was skipped, and a non-zero `seq` failed the decode outright.
 
 #### `sb topic listen <topic> [OPTIONS]`
 Subscribe and print frames as JSON lines.
-- `<topic>` (required) — bare names resolved via cwd's `sb.dev.yml`.
+- `<topic>` (required) — bare names resolved via cwd's `sb.dev.yml`. `sb 0.4.2+`: any argument containing a `/` is fully qualified, its leading `/` optional (prepended when missing, then passed through); before 0.4.2 only a leading `/` marked one. An argument without a `/` is a bare name.
 - `-t, --transport zenoh | iceoryx2` (default: inferred, below): which transport to subscribe on. Aliases `z` (zenoh), `i` and `iox2` (iceoryx2).
 - `--raw` (default: decode via vault) — emit hex bytes; payload becomes `{kind: "hex", bytes: "…"}`.
 - `-n, --count <N>` (default: `0` — run until SIGINT) — stop after N frames.
@@ -481,7 +483,7 @@ Output: one JSON line per frame, keys in this order: `transport`, `topic`, `sche
 Type resolution, per frame, first hit wins:
 1. `--type` → `"flag"`.
 2. The transport's wire schema → `"wire"`. Zenoh: the sample encoding `application/protobuf;<style>/<ns>/<Leaf>`, set by generated Rust, Python, and C++ Zenoh publishers (Flutter and Unity set none). iceoryx2: the payload type name the service was registered with, mapped to the vault iox2 struct with the same leaf and the live payload's size.
-3. The swarmbotix Header probe (`metadata.msg_type`) → `"header"`.
+3. The Header probe (`metadata.msg_type`, either Header layout `sb 0.4.2+`, see `sb topic list`) → `"header"`.
 4. The topic's entry in the module's `sb.dev.yml` → `"config"` (`sb 0.4.1+`; `ResolveOutcome::schema`). The entry's `type` is used verbatim. Bare topic: the cwd module's matched entry. Fully-qualified: `<module>` is looked up in the active workspace's `flow.yaml` (`active_module_registry`), as written, then without its `-<instance>` suffix (everything from the first `-`; `ips_track-sb00` → `ips_track`); publishers then subscribers, the first entry whose transport equals the path's and whose `topic` equals the path's last segment or the whole path (`sb_discover::config_schema`). The cwd `sb.dev.yml` is never consulted for a fully-qualified path. Any miss (no active workspace, unregistered module, unreadable `sb.dev.yml`, no entry, path not in the five-segment form) skips the source silently. On iceoryx2 a typed service always supplies a wire type first, so the source matters only for an untyped `[u8]` service; there, as with `--type`, the name matches no iox2 layout (the element is one byte), so the bytes are tried as protobuf, else hex with `schema` kept.
 
 No hit: hex, `schema: null`, and a one-time stderr hint to re-render the publisher (`sb pub edit <name> -m <type>`) or pass `--type`. A resolved type that does not decode prints hex with `schema` kept. `--raw` skips resolution entirely.
@@ -494,7 +496,7 @@ Decoding uses a `DescriptorPool` built from the vault at startup, one `protoc` r
 
 #### `sb topic pub <topic> <bytes-hex> [-t, --transport zenoh | iceoryx2]`
 Publish raw bytes once.
-- `<topic>` (required): bare or fully-qualified.
+- `<topic>` (required): bare or fully-qualified, by the same rule as `sb topic listen` (`sb 0.4.2+`: leading `/` optional).
 - `<bytes-hex>` (required) — hex string (no `0x` prefix).
 - `-t, --transport zenoh | iceoryx2` (default: inferred): aliases `z` (zenoh), `i` and `iox2` (iceoryx2). Inference, the `cannot infer transport` error, and the disagreement note are exactly as for `sb topic listen` (`sb 0.4.1+`; before it the default was `zenoh`). No schema lookup: raw bytes need none.
 

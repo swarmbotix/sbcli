@@ -512,7 +512,7 @@ struct TopicListCli {
     /// this. Defaults to 0.5 s — just long enough for any 2 Hz+ publisher.
     #[arg(short = 't', long = "timeout", default_value_t = 0.5)]
     timeout: f64,
-    /// Substring filter on topic name.
+    /// Substring filter on the topic as printed (with its leading `/`).
     #[arg(short = 'k', long)]
     keyword: Option<String>,
     /// Match keyword case-sensitively (default: insensitive).
@@ -531,6 +531,7 @@ struct TopicListCli {
 #[derive(clap::Args)]
 struct TopicListenCli {
     /// Bare (`chatter`) or fully-qualified (`/dev01/ws/mod/zenoh/chatter`).
+    /// Any `/` makes it fully-qualified; the leading `/` is optional.
     topic: String,
     /// Transport to subscribe on: `zenoh` (alias `z`) or `iceoryx2`
     /// (aliases `i`, `iox2`). Default: the topic's `<transport>` path
@@ -567,7 +568,8 @@ struct TopicPruneCli {
 
 #[derive(clap::Args)]
 struct TopicPubCli {
-    /// Bare or fully-qualified topic.
+    /// Bare or fully-qualified topic. Any `/` makes it fully-qualified;
+    /// the leading `/` is optional.
     topic: String,
     /// Hex bytes (no `0x` prefix, whitespace OK).
     bytes_hex: String,
@@ -3594,14 +3596,15 @@ fn pick_transport(
 
 /// Resolve a bare-or-full topic for `sb topic listen/pub`. Builds the
 /// full path against the cwd module's `sb.dev.yml` + the active
-/// workspace + sb.config.yml's `device`. Fully-qualified inputs are
-/// passed through unchanged (no cwd module needed); with a `registry`,
-/// their schema is looked up in the owning module's `sb.dev.yml`.
+/// workspace + sb.config.yml's `device`. An input containing a `/` is
+/// fully-qualified and passes through, with a missing leading `/`
+/// prepended (no cwd module needed); with a `registry`, its schema is
+/// looked up in the owning module's `sb.dev.yml`.
 fn resolve_topic_for_runtime(
     input: &str,
     registry: Option<&ModuleRegistry>,
 ) -> Result<sb_discover::ResolveOutcome> {
-    if input.starts_with('/') {
+    if input.contains('/') {
         // Fast path — `device` / `workspace` aren't needed for passthrough.
         let lookup = registry.map(|r| move |module: &str| r.get(module).cloned());
         let lookup = lookup.as_ref().map(|f| f as &sb_discover::ModuleLookup<'_>);

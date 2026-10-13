@@ -88,7 +88,8 @@ sleep 3
 echo "--- L4: sb topic list (sanity check) ---"
 LIST_JSON="$SB_HOME/list.json"
 "$SB" topic list --transport zenoh --json -t 1.0 > "$LIST_JSON" 2>/dev/null || true
-if ! grep -F '"topic":"dev01/demo/pubber/hello"' "$LIST_JSON" >/dev/null; then
+# `sb topic list` reports the slashed form (sb 0.4.2+).
+if ! grep -F '"topic":"/dev01/demo/pubber/hello"' "$LIST_JSON" >/dev/null; then
   echo "FAIL: pubber not visible in sb topic list after sb up"
   echo "--- sb topic list ---"
   cat "$LIST_JSON"

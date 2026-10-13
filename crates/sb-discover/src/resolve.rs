@@ -2,12 +2,13 @@
 //!
 //! Rules (level4.html §"sb topic listen"):
 //!
-//! - Leading `/` → already fully-qualified, pass through unchanged. The
-//!   transport is read from the `<transport>` segment of the canonical
-//!   `/<device>/<workspace>/<module>/<transport>/<topic>` form; given a
-//!   module registry, the schema comes from the owning module's
+//! - Contains a `/` → fully-qualified. A missing leading `/` is prepended
+//!   (so a slash-free Zenoh key expression works), then the path passes
+//!   through. The transport is read from the `<transport>` segment of the
+//!   canonical `/<device>/<workspace>/<module>/<transport>/<topic>` form;
+//!   given a module registry, the schema comes from the owning module's
 //!   `sb.dev.yml` ([`config_schema`]).
-//! - No leading `/`, cwd has `sb.dev.yml` AND exactly one pub or sub uses
+//! - No `/` at all, cwd has `sb.dev.yml` AND exactly one pub or sub uses
 //!   that bare name as its topic last-segment → resolve to its full path
 //!   via the device + workspace + module prefix the caller provides. The
 //!   transport and schema come from the matched entry.
@@ -81,16 +82,18 @@ pub fn resolve_bare_topic(
     workspace: &str,
     modules: Option<&ModuleLookup<'_>>,
 ) -> Result<ResolveOutcome, ResolveError> {
-    // Fully-qualified passthrough. The cwd module may not own the topic,
-    // so the schema comes from the module the path names, through the
-    // caller's registry.
-    if topic.starts_with('/') {
+    // Fully-qualified passthrough: any `/` makes the argument a path, and
+    // a missing leading `/` is restored first. The cwd module may not own
+    // the topic, so the schema comes from the module the path names,
+    // through the caller's registry.
+    if topic.contains('/') {
+        let full_topic = crate::with_leading_slash(topic);
         return Ok(ResolveOutcome {
-            full_topic: topic.to_string(),
-            transport: TopicName::parse(topic)
+            transport: TopicName::parse(&full_topic)
                 .ok()
                 .and_then(|t| Transport::from_path_segment(t.transport())),
-            schema: modules.and_then(|lookup| config_schema(topic, lookup)),
+            schema: modules.and_then(|lookup| config_schema(&full_topic, lookup)),
+            full_topic,
         });
     }
 
@@ -322,6 +325,9 @@ mod tests {
         let zenoh = full("/elcom/ws_ips/ips_track/zenoh/cube_poses");
         assert_eq!(zenoh.transport, Some(Transport::Zenoh));
         assert_eq!(zenoh.schema.as_deref(), Some("ros2/custom/CubePoses"));
+        // A path without its leading `/` (a Zenoh key expression) resolves
+        // exactly like the slashed form.
+        assert_eq!(full("elcom/ws_ips/ips_track/zenoh/cube_poses"), zenoh);
 
         let iox2 = full("/elcom/ws_ips/ips_track-sb00/iox2/image");
         assert_eq!(iox2.full_topic, "/elcom/ws_ips/ips_track-sb00/iox2/image");
@@ -334,7 +340,7 @@ mod tests {
         assert_eq!(full("/elcom/ws_ips/other/zenoh/cube_poses").schema, None);
         let loose = full("/elcom/cube_poses");
         assert_eq!((loose.transport, loose.schema), (None, None));
-        // `sb topic list` passes Zenoh key expressions, which have no `/`.
+        // The lookup itself takes either form.
         assert_eq!(
             config_schema("elcom/ws_ips/ips_track-sb00/zenoh/cube_poses", &registry).as_deref(),
             Some("ros2/custom/CubePoses")

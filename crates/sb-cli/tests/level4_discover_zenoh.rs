@@ -75,7 +75,7 @@ fn discover_zenoh_finds_live_publisher() {
 
     let found = entries
         .iter()
-        .find(|e| e.topic == "test/lvl4/discover/raw")
+        .find(|e| e.topic == "/test/lvl4/discover/raw")
         .unwrap_or_else(|| panic!("publisher not found, saw: {entries:#?}"));
     assert_eq!(found.transport, Transport::Zenoh);
     // Raw bytes → Header probe fails → schema and rate stay null.
@@ -106,7 +106,7 @@ fn discover_zenoh_schema_from_encoding_without_header() {
 
     let found = entries
         .iter()
-        .find(|e| e.topic == "test/lvl4/discover/encoded")
+        .find(|e| e.topic == "/test/lvl4/discover/encoded")
         .unwrap_or_else(|| panic!("publisher not found, saw: {entries:#?}"));
     assert_eq!(found.transport, Transport::Zenoh);
     assert_eq!(found.schema.as_deref(), Some("ros2/std/StringStamped"));
@@ -121,7 +121,8 @@ fn discover_zenoh_keyword_filter_drops_non_matches() {
     let (s2, h2) = spawn_publisher("test/lvl4/filter/dropme", b"x".to_vec());
     thread::sleep(Duration::from_millis(150));
 
-    let entries = discover_zenoh(DEFAULT_DISCOVERY_WINDOW, Some("keepme"), false).unwrap();
+    // The keyword matches the slashed topic whether or not it carries the `/`.
+    let entries = discover_zenoh(DEFAULT_DISCOVERY_WINDOW, Some("/keepme"), false).unwrap();
     s1.store(true, Ordering::Relaxed);
     s2.store(true, Ordering::Relaxed);
     let _ = h1.join();
@@ -129,7 +130,7 @@ fn discover_zenoh_keyword_filter_drops_non_matches() {
 
     let topics: Vec<&str> = entries.iter().map(|e| e.topic.as_str()).collect();
     assert!(
-        topics.contains(&"test/lvl4/filter/keepme"),
+        topics.contains(&"/test/lvl4/filter/keepme"),
         "matching topic missing: {topics:?}"
     );
     assert!(

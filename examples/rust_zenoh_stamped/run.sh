@@ -62,10 +62,10 @@ sleep 1.5
 LIST_JSON="$SB_HOME/list.json"
 "$SB" topic list --transport zenoh --json -t 1.0 > "$LIST_JSON" 2>/dev/null || true
 
-# Zenoh key expressions don't carry a leading `/` — discovery reports
-# `dev01/demo/pubber/chatter`, not `/dev01/...`. Both forms address the
-# same wire topic.
-TOPIC="dev01/demo/pubber/chatter"
+# Zenoh key expressions don't carry a leading `/`, but `sb topic list`
+# reports every topic in the slashed form (sb 0.4.2+), the one
+# `sb topic listen` takes.
+TOPIC="/dev01/demo/pubber/chatter"
 ROW="$(grep -F "\"topic\":\"$TOPIC\"" "$LIST_JSON" || true)"
 
 kill $PUB_PID 2>/dev/null || true

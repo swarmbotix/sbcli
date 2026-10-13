@@ -83,11 +83,12 @@ fn listen_dynamic_decodes_stringstamped_data_field_to_json() {
         let header = HeaderProbe {
             timestamp_ns: 1_700_000_000_000_000_000,
             frame_id: "world".into(),
-            metadata: Some(MetadataProbe {
+            ros2_metadata: Some(MetadataProbe {
                 topic_full_name: format!("/{}", key),
                 msg_type: "ros2/std/StringStamped".into(),
                 msg_freq_desired: 10.0,
             }),
+            ..Default::default()
         };
         // Outer StringStamped: field 1 Header (len-delimited), field 2 string `data`.
         let mut wire = Vec::new();

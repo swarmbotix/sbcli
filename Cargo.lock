@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "sb-apps"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3004,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "sb-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "sb-codegen"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "include_dir",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "sb-config"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "sb-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "sb-discover"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "iceoryx2",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "sb-doctor"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "sb-gopro"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "sb-core",
@@ -3114,7 +3114,7 @@ dependencies = [
 
 [[package]]
 name = "sb-iox2-typegen"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "prost 0.13.5",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "sb-launch"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "sb-core",
@@ -3137,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "sb-listen"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "iceoryx2",
@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "sb-pubsub"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "sb-update"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "semver",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "sb-vault"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "include_dir",
@@ -3200,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "sb-workspace"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "dirs",

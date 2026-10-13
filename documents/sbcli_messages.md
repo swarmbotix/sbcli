@@ -141,7 +141,10 @@ source that names one wins, and the JSON line reports which in
      live payload. Two such structs of equal size: the first vault name in
      sort order wins.
 3. **The Header probe** (`"header"`): `metadata.msg_type` of a payload that
-   leads with the swarmbotix `Header`.
+   leads with a `Header`, in either style's layout: field 4 of
+   `swarmbotix/header/Header` (whose field 3 is `seq`) or field 3 of
+   `ros2/std/Header`. sb 0.4.2+; earlier releases read field 3 only, so a
+   swarmbotix-style Header never typed a frame.
 4. **The module's `sb.dev.yml`** (`"config"`, sb 0.4.1+): the `type` of the
    publisher or subscriber entry for this topic, used exactly as written.
    It types frames from publishers that stamp neither an encoding nor a

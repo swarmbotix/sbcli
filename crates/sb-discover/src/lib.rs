@@ -19,7 +19,9 @@
 //!
 //! Both functions return rows sorted alphabetically by topic, with
 //! [`matches_keyword`] applied so the CLI and any future server share one
-//! filter definition.
+//! filter definition. Neither backend's names carry a leading `/` on the
+//! wire; both report it ([`with_leading_slash`]), so a row pastes into
+//! `sb topic listen` unchanged.
 
 mod probe;
 mod render;
@@ -63,6 +65,9 @@ impl Transport {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TopicEntry {
+    /// Slashed topic (`/dev01/ws/talker/zenoh/chatter`): the Zenoh key
+    /// expression or iceoryx2 service name with a leading `/`. The same
+    /// string in the table and the JSON `topic` field.
     pub topic: String,
     pub transport: Transport,
     /// Schema name: `"std/StringStamped"` for Zenoh-probed `*Stamped`
@@ -88,6 +93,18 @@ pub struct TopicEntry {
     /// registration outlived the process — `sb topic prune` cleans
     /// these via [`prune_iceoryx`]. Always `false` for Zenoh.
     pub is_dead: bool,
+}
+
+/// `name` with a leading `/`, prepended only when missing. Zenoh key
+/// expressions never carry one, and sb-generated iceoryx2 service names
+/// share that form; the slashed one is what `sb topic listen` and
+/// `sb topic pub` take.
+pub fn with_leading_slash(name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_owned()
+    } else {
+        format!("/{name}")
+    }
 }
 
 /// Case-insensitive (by default) substring match — public so the CLI and
@@ -163,11 +180,14 @@ pub fn discover_zenoh(
     let g = acc
         .lock()
         .map_err(|_| anyhow::anyhow!("zenoh accumulator poisoned"))?;
+    // Filter on the slashed form, so a keyword matches with or without
+    // the leading `/` the user typed.
     let mut entries: Vec<TopicEntry> = g
         .iter()
+        .map(|(key, s)| (with_leading_slash(key), s))
         .filter(|(topic, _)| matches_keyword(topic, keyword, case_sensitive))
         .map(|(topic, s)| TopicEntry {
-            topic: topic.clone(),
+            topic,
             transport: Transport::Zenoh,
             schema: s.schema.clone(),
             hash: None,
@@ -201,7 +221,7 @@ pub fn discover_iceoryx(keyword: Option<&str>, case_sensitive: bool) -> Result<V
 
     let mut entries: Vec<TopicEntry> = Vec::new();
     ipc::Service::list(Config::global_config(), |svc| {
-        let name = svc.static_details.name().as_str().to_string();
+        let name = with_leading_slash(svc.static_details.name().as_str());
         if !matches_keyword(&name, keyword, case_sensitive) {
             return CallbackProgression::Continue;
         }
@@ -395,6 +415,21 @@ mod tests {
             Some("Chatter"),
             true
         ));
+    }
+
+    /// Rows report the slashed form, and filtering on it keeps a keyword
+    /// matching whether or not the user typed the leading `/`.
+    #[test]
+    fn topic_gets_one_leading_slash_and_keyword_matches_either_form() {
+        assert_eq!(
+            with_leading_slash("dev01/ws/talker/zenoh/chatter"),
+            "/dev01/ws/talker/zenoh/chatter"
+        );
+        assert_eq!(with_leading_slash("/already/slashed"), "/already/slashed");
+        let topic = with_leading_slash("dev01/ws/talker/zenoh/chatter");
+        for keyword in ["dev01/ws", "/dev01/ws", "chatter", "/chatter"] {
+            assert!(matches_keyword(&topic, Some(keyword), false), "{keyword}");
+        }
     }
 
     #[test]

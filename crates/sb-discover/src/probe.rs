@@ -1,14 +1,17 @@
-//! Header probe — try to lift `metadata.{msg_type, msg_freq_desired}` out
-//! of any Zenoh sample without knowing the wrapping `*Stamped` type.
+//! Header probe: try to lift `metadata.{msg_type, msg_freq_desired}` out
+//! of any Zenoh sample without knowing the wrapping message type.
 //!
-//! The trick: every `<Type>Stamped` message in this repo (see
-//! `message_definitions/std/StringStamped.proto` etc.) carries
-//! `std.Header header = 1;` as its first field, so the outer message's
-//! wire layout always starts with tag `0x0a` (field 1, length-delimited)
-//! followed by the embedded Header bytes. We decode the outer payload as
-//! [`StampedProbe`] — prost silently skips unknown fields, so the rest of
-//! the `*Stamped` payload (`data`, `image`, etc.) gets ignored — and read
-//! the metadata out of the embedded Header.
+//! The trick: every Header-carrying message in the vault (the ros2
+//! `std/*Stamped` types, the swarmbotix `images/*` and `sensors/*` types)
+//! has its Header as field 1, so the outer message's wire layout always
+//! starts with tag `0x0a` (field 1, length-delimited) followed by the
+//! embedded Header bytes. We decode the outer payload as [`StampedProbe`]
+//! (prost silently skips unknown fields, so the rest of the payload, such
+//! as `data` or `image`, gets ignored) and read the metadata out of the
+//! embedded Header.
+//!
+//! The two styles' Headers disagree on where `metadata` lives; see
+//! [`HeaderProbe`] for how both are read.
 //!
 //! Defined locally rather than imported from `sb-vault`'s generated
 //! bindings so this crate stays trivial (no build script, no proto deps).
@@ -17,19 +20,121 @@
 //! reads the schema half of the Zenoh sample encoding that generated
 //! publishers stamp (`application/protobuf;<style>/<ns>/<Leaf>`).
 
-use prost::Message;
+use prost::bytes::{Buf, BufMut};
+use prost::encoding::{self, DecodeContext, WireType};
+use prost::{DecodeError, Message};
 
-/// Minimal Header wire layout — must match `message_definitions/std/Header.proto`.
-#[derive(Clone, PartialEq, Message)]
+/// Header wire layout of both vault styles. They agree on fields 1 and 2
+/// and disagree from field 3 on:
+///
+/// | tag | ros2 `std/Header` | swarmbotix `header/Header` |
+/// |-----|-------------------|----------------------------|
+/// | 1   | `timestamp_ns`    | `timestamp_ns`             |
+/// | 2   | `frame_id`        | `frame_id`                 |
+/// | 3   | `metadata`        | `seq` (`uint64`)           |
+/// | 4   | (none)            | `metadata`                 |
+///
+/// Tag 3 is told apart by its wire type: length-delimited is the ros2
+/// `metadata`, varint is the swarmbotix `seq`. A `#[derive(Message)]`
+/// struct cannot do that, because prost fails the whole decode on a wire
+/// type that disagrees with the declared field, so a swarmbotix Header
+/// with a non-zero `seq` would never probe. [`Message`] is therefore
+/// implemented by hand. [`HeaderProbe::into_metadata`] prefers tag 4.
+#[derive(Clone, PartialEq, Default, Debug)]
 pub struct HeaderProbe {
-    #[prost(uint64, tag = "1")]
     pub timestamp_ns: u64,
-    #[prost(string, tag = "2")]
     pub frame_id: String,
-    #[prost(message, optional, tag = "3")]
-    pub metadata: Option<MetadataProbe>,
+    /// swarmbotix `header/Header.seq` (tag 3, varint). `0` for the ros2
+    /// layout, and for a swarmbotix publisher that leaves it unset.
+    pub seq: u64,
+    /// ros2 `std/Header.metadata` (tag 3, length-delimited).
+    pub ros2_metadata: Option<MetadataProbe>,
+    /// swarmbotix `header/Header.metadata` (tag 4).
+    pub swarmbotix_metadata: Option<MetadataProbe>,
 }
 
+impl HeaderProbe {
+    /// The Header's metadata, whichever layout carried it: tag 4 when
+    /// present, else tag 3.
+    pub fn into_metadata(self) -> Option<MetadataProbe> {
+        self.swarmbotix_metadata.or(self.ros2_metadata)
+    }
+}
+
+impl Message for HeaderProbe {
+    fn encode_raw(&self, buf: &mut impl BufMut) {
+        if self.timestamp_ns != 0 {
+            encoding::uint64::encode(1, &self.timestamp_ns, buf);
+        }
+        if !self.frame_id.is_empty() {
+            encoding::string::encode(2, &self.frame_id, buf);
+        }
+        if self.seq != 0 {
+            encoding::uint64::encode(3, &self.seq, buf);
+        }
+        if let Some(meta) = &self.ros2_metadata {
+            encoding::message::encode(3, meta, buf);
+        }
+        if let Some(meta) = &self.swarmbotix_metadata {
+            encoding::message::encode(4, meta, buf);
+        }
+    }
+
+    fn merge_field(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut impl Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError> {
+        match (tag, wire_type) {
+            (1, _) => encoding::uint64::merge(wire_type, &mut self.timestamp_ns, buf, ctx),
+            (2, _) => encoding::string::merge(wire_type, &mut self.frame_id, buf, ctx),
+            (3, WireType::LengthDelimited) => encoding::message::merge(
+                wire_type,
+                self.ros2_metadata
+                    .get_or_insert_with(MetadataProbe::default),
+                buf,
+                ctx,
+            ),
+            (3, _) => encoding::uint64::merge(wire_type, &mut self.seq, buf, ctx),
+            (4, _) => encoding::message::merge(
+                wire_type,
+                self.swarmbotix_metadata
+                    .get_or_insert_with(MetadataProbe::default),
+                buf,
+                ctx,
+            ),
+            _ => encoding::skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        let mut len = 0;
+        if self.timestamp_ns != 0 {
+            len += encoding::uint64::encoded_len(1, &self.timestamp_ns);
+        }
+        if !self.frame_id.is_empty() {
+            len += encoding::string::encoded_len(2, &self.frame_id);
+        }
+        if self.seq != 0 {
+            len += encoding::uint64::encoded_len(3, &self.seq);
+        }
+        if let Some(meta) = &self.ros2_metadata {
+            len += encoding::message::encoded_len(3, meta);
+        }
+        if let Some(meta) = &self.swarmbotix_metadata {
+            len += encoding::message::encoded_len(4, meta);
+        }
+        len
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// `Header.Metadata`, identical in both styles.
 #[derive(Clone, PartialEq, Message)]
 pub struct MetadataProbe {
     #[prost(string, tag = "1")]
@@ -40,23 +145,21 @@ pub struct MetadataProbe {
     pub msg_freq_desired: f64,
 }
 
-/// Generic `*Stamped` probe — any message that carries `Header` as field 1.
-/// Other fields of the outer message are silently skipped by prost.
+/// Generic Header-leading probe: any message that carries `Header` as
+/// field 1. Other fields of the outer message are silently skipped by prost.
 #[derive(Clone, PartialEq, Message)]
 pub struct StampedProbe {
     #[prost(message, optional, tag = "1")]
     pub header: Option<HeaderProbe>,
 }
 
-/// Try to lift the Header metadata out of an arbitrary `*Stamped` payload.
-/// Returns `None` for foreign / un-Stamped bytes (failed decode, no
-/// `header` field, no nested `metadata`). The success path is the common
-/// one for sb-generated publishers.
+/// Try to lift the Header metadata out of an arbitrary Header-leading
+/// payload, in either style's layout. Returns `None` for foreign /
+/// un-Stamped bytes (failed decode, no `header` field, no nested
+/// `metadata`). The success path is the common one for sb-generated
+/// publishers.
 pub fn probe_header(payload: &[u8]) -> Option<MetadataProbe> {
-    StampedProbe::decode(payload)
-        .ok()
-        .and_then(|sp| sp.header)
-        .and_then(|h| h.metadata)
+    StampedProbe::decode(payload).ok()?.header?.into_metadata()
 }
 
 /// Schema half of a rendered Zenoh encoding: everything after the first
@@ -79,42 +182,80 @@ mod tests {
     use super::*;
     use prost::Message;
 
-    /// Encode a synthetic `*Stamped`-shaped payload (Header as field 1,
-    /// plus a trailing "fake payload" field at tag 2 that we expect prost
-    /// to ignore) and verify the probe round-trips.
-    #[test]
-    fn lifts_msg_type_and_rate_from_synthetic_stamped() {
-        let header = HeaderProbe {
-            timestamp_ns: 1_700_000_000_000_000_000,
-            frame_id: "world".into(),
-            metadata: Some(MetadataProbe {
-                topic_full_name: "/dev01/ws/mod/zenoh/chatter".into(),
-                msg_type: "std/StringStamped".into(),
-                msg_freq_desired: 10.0,
-            }),
-        };
-
-        // Build the outer `*Stamped` payload by hand:
-        //   field 1 (length-delimited) = Header bytes
-        //   field 2 (length-delimited) = arbitrary unknown payload (e.g. the
-        //                                String payload of StringStamped)
-        let mut wire = Vec::new();
-        // Field 1 — Header
-        let mut header_buf = Vec::new();
-        header.encode(&mut header_buf).unwrap();
-        wire.push(0x0a); // tag 1 << 3 | wire type 2 (length-delimited)
-        prost::encoding::encode_varint(header_buf.len() as u64, &mut wire);
-        wire.extend_from_slice(&header_buf);
-        // Field 2 — "unknown" payload prost should skip
+    /// Wrap `header` as field 1 of an outer message, followed by an
+    /// "unknown" field 2 (e.g. the `data` of `StringStamped`) that prost
+    /// must skip.
+    fn stamped_wire(header: &[u8]) -> Vec<u8> {
+        let mut wire = vec![0x0a]; // tag 1 << 3 | wire type 2 (length-delimited)
+        prost::encoding::encode_varint(header.len() as u64, &mut wire);
+        wire.extend_from_slice(header);
         wire.push(0x12); // tag 2 << 3 | wire type 2
         let body = b"hello";
         prost::encoding::encode_varint(body.len() as u64, &mut wire);
         wire.extend_from_slice(body);
+        wire
+    }
 
-        let meta = probe_header(&wire).expect("probe should succeed on Stamped wire");
+    /// Encode synthetic Header-leading payloads in both styles' layouts and
+    /// verify the probe lifts the metadata out of each.
+    #[test]
+    fn lifts_msg_type_and_rate_from_synthetic_stamped() {
+        // ros2 `std/Header`: metadata at tag 3.
+        let header = HeaderProbe {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            frame_id: "world".into(),
+            ros2_metadata: Some(MetadataProbe {
+                topic_full_name: "/dev01/ws/mod/zenoh/chatter".into(),
+                msg_type: "std/StringStamped".into(),
+                msg_freq_desired: 10.0,
+            }),
+            ..Default::default()
+        };
+        let mut header_buf = Vec::new();
+        header.encode(&mut header_buf).unwrap();
+
+        let meta =
+            probe_header(&stamped_wire(&header_buf)).expect("probe should succeed on Stamped wire");
         assert_eq!(meta.msg_type, "std/StringStamped");
         assert_eq!(meta.msg_freq_desired, 10.0);
         assert_eq!(meta.topic_full_name, "/dev01/ws/mod/zenoh/chatter");
+
+        // swarmbotix `header/Header`: `seq` (varint) at tag 3, metadata at
+        // tag 4. Built byte by byte from the .proto, with a non-zero `seq`
+        // so tag 3 is on the wire with the type the ros2 layout does not use.
+        let metadata = MetadataProbe {
+            topic_full_name: "/dev01/ws/cam/iox2/image_raw".into(),
+            msg_type: "swarmbotix/images/Image480pMono8".into(),
+            msg_freq_desired: 30.0,
+        };
+        let mut swarmbotix = vec![0x08]; // tag 1, varint: timestamp_ns
+        prost::encoding::encode_varint(1_700_000_000_000_000_000, &mut swarmbotix);
+        swarmbotix.extend_from_slice(&[0x12, 5]); // tag 2, length-delimited: frame_id
+        swarmbotix.extend_from_slice(b"world");
+        swarmbotix.extend_from_slice(&[0x18, 42]); // tag 3, varint: seq = 42
+        swarmbotix.push(0x22); // tag 4, length-delimited: metadata
+        prost::encoding::encode_varint(metadata.encoded_len() as u64, &mut swarmbotix);
+        metadata.encode(&mut swarmbotix).unwrap();
+
+        let meta = probe_header(&stamped_wire(&swarmbotix))
+            .expect("probe should succeed on the swarmbotix Header layout");
+        assert_eq!(meta, metadata);
+        // The encoder writes the same bytes for that shape.
+        let probe = HeaderProbe {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            frame_id: "world".into(),
+            seq: 42,
+            swarmbotix_metadata: Some(metadata.clone()),
+            ..Default::default()
+        };
+        assert_eq!(probe.encode_to_vec(), swarmbotix);
+
+        // Both present: tag 4 wins.
+        let both = HeaderProbe {
+            ros2_metadata: Some(MetadataProbe::default()),
+            ..probe
+        };
+        assert_eq!(both.into_metadata(), Some(metadata));
     }
 
     #[test]
@@ -129,11 +270,7 @@ mod tests {
         // Header field present but without nested Metadata — the probe
         // correctly bails (no msg_type / rate to report).
         let payload = StampedProbe {
-            header: Some(HeaderProbe {
-                timestamp_ns: 0,
-                frame_id: String::new(),
-                metadata: None,
-            }),
+            header: Some(HeaderProbe::default()),
         };
         let mut buf = Vec::new();
         payload.encode(&mut buf).unwrap();

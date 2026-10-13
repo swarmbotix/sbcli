@@ -22,11 +22,12 @@ fn build_stamped(msg_type: &str, rate: f64, topic_full: &str) -> Vec<u8> {
         header: Some(HeaderProbe {
             timestamp_ns: 1_700_000_000_000_000_000,
             frame_id: "world".into(),
-            metadata: Some(MetadataProbe {
+            ros2_metadata: Some(MetadataProbe {
                 topic_full_name: topic_full.into(),
                 msg_type: msg_type.into(),
                 msg_freq_desired: rate,
             }),
+            ..Default::default()
         }),
     };
     let mut buf = Vec::new();
@@ -64,7 +65,7 @@ fn rate_and_schema_lift_from_single_stamped_sample() {
 
     let row = entries
         .iter()
-        .find(|e| e.topic == key)
+        .find(|e| e.topic == format!("/{key}"))
         .unwrap_or_else(|| panic!("publisher not seen: {entries:#?}"));
     assert_eq!(row.transport, Transport::Zenoh);
     assert_eq!(row.schema.as_deref(), Some("ros2/std/StringStamped"));
