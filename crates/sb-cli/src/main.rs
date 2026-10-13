@@ -3137,33 +3137,23 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
     }
 }
 
-/// Build a [`DescriptorPool`] from the vault's compiled FileDescriptorSet.
+/// Build a [`DescriptorPool`] from the vault for `sb topic listen`.
 /// Compiles lazily on each call — fast enough for the one-shot `sb topic
 /// listen` invocation, and keeps the cache invariant of "always reflects
-/// what's in the vault NOW". Returns an error string when:
+/// what's in the vault NOW". Returns an error when:
 ///   - `protoc` is missing from sb.config.yml,
 ///   - the vault is empty (no `.proto` files),
-///   - `protoc` itself failed.
+///   - no style in the vault compiled (per-style failures are warned
+///     on stderr by [`sb_listen::build_pool`] and skipped).
 fn build_descriptor_pool() -> Result<prost_reflect::DescriptorPool> {
     let cfg = load_config()?;
     let vctx = vault_for(&cfg)?;
     vctx.ensure_installed()?;
-    let vault = vctx.vault();
     let protoc = cfg
         .protoc
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no protoc in sb.config.yml"))?;
-    let names = vault.list()?;
-    if names.is_empty() {
-        anyhow::bail!("vault is empty");
-    }
-    let sources: Vec<PathBuf> = names.iter().map(|n| vault.path_of(n)).collect();
-    let tmp = tempfile::NamedTempFile::new()?;
-    sb_vault::compile_to_descriptor_set(protoc, vault.root(), &sources, tmp.path())?;
-    let bytes = std::fs::read(tmp.path())?;
-    let pool = prost_reflect::DescriptorPool::decode(bytes.as_slice())
-        .map_err(|e| anyhow::anyhow!("DescriptorPool::decode: {e}"))?;
-    Ok(pool)
+    sb_listen::build_pool(vctx.vault(), protoc)
 }
 
 fn cmd_topic_prune(a: TopicPruneCli) -> Result<()> {

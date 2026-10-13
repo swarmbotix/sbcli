@@ -80,6 +80,17 @@ style cannot `import` from another. The shipped split is verified clean:
 nothing in the ROS2 namespaces imports `std/`, and `std/` imports only
 `std/`.
 
+Imports **within** a style work everywhere the vault is compiled: `sb message
+compile` and the dynamic decoder behind `sb topic listen` both run `protoc`
+once per style with that style's `message_definitions/` as the include root,
+so `import "custom/A.proto"` resolves for every `.proto` in the style.
+`sb 0.3.0+`: before that release `sb topic listen` compiled the whole vault
+from the vault root, which made any such import unresolvable and printed
+`warning: dynamic decode disabled` for every type, not only the importer. A
+style that still fails to compile is now skipped with
+`warning: dynamic decode skipped for style <style>` and the other styles keep
+decoding.
+
 `std/` — including the load-bearing `std/Header` — ships in the **ros2**
 style. The embedded first-run bundle installs into that style only; a
 vault opened for any other style neither installs nor reports on it.

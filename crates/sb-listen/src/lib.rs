@@ -14,12 +14,14 @@
 
 pub mod decode;
 pub mod iceoryx;
+pub mod pool;
 pub mod zenoh_bytes;
 
 pub use decode::{
     DecodedFrame, FramePayload, decode_frame, decode_frame_dynamic, render_decoded_json_line,
 };
 pub use iceoryx::{IceoryxFrames, listen_iceoryx, publish_iceoryx_raw};
+pub use pool::build_pool;
 pub use zenoh_bytes::{ZenohFrames, listen_zenoh, publish_zenoh_raw};
 
 use anyhow::Result;

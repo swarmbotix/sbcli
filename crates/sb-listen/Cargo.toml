@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 sb-core = { workspace = true }
 sb-discover = { workspace = true }
+sb-vault = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -20,3 +21,4 @@ prost = { workspace = true }
 prost-reflect = { workspace = true }
 zenoh = { workspace = true }
 iceoryx2 = { workspace = true }
+tempfile = { workspace = true }

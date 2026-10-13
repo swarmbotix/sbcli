@@ -465,6 +465,8 @@ Subscribe and print frames as JSON lines.
 - `--raw` (default: decode via vault) — emit hex bytes; payload becomes `{kind: "hex", bytes: "…"}`.
 - `-n, --count <N>` (default: `0` — run until SIGINT) — stop after N frames.
 
+Decoding uses a `DescriptorPool` built from the vault at startup, one `protoc` run per style with that style's `message_definitions/` as the include root (`sb_listen::build_pool`), so intra-style imports resolve exactly as they do for `sb message compile`. A style that fails to compile prints `warning: dynamic decode skipped for style <style> (<protoc error>)` on stderr and is left out; the pool is only abandoned (`warning: dynamic decode disabled`, hex payloads) when `protoc` is unconfigured, the vault is empty, or no style compiled.
+
 #### `sb topic pub <topic> <bytes-hex> [--transport zenoh | iceoryx2]`
 Publish raw bytes once.
 - `<topic>` (required)
