@@ -7,8 +7,9 @@
 //! slashed spellings keep resolving to the same topic.
 //!
 //! `sb` enforces fully-qualified topic names on the wire. Users type bare
-//! names (`image_raw`); CLI resolves them via `sb.dev.yml` + workspace
-//! `flow.yaml`. The `<transport>` segment is the literal `iox2` or `zenoh`,
+//! names (`image_raw`); CLI resolves them via the module manifest
+//! (`sb.module.yaml`) and the workspace name. The `<transport>` segment is
+//! the literal `iox2` or `zenoh`,
 //! picked from the entry's `--iox2`/`--zenoh` flag. Embedding it in the
 //! key lets the same bare name coexist on both transports for the same
 //! module without collision.

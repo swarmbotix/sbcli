@@ -9,7 +9,7 @@
 //!    is touched: no session is left behind.
 
 mod common;
-use common::l5_sandbox::{wait_for_file, yaml_path};
+use common::l5_sandbox::wait_for_file;
 use common::{L5Sandbox, has_session, list_windows, tmux_launch_supported};
 
 #[test]
@@ -32,10 +32,7 @@ fn level5_native_up_opens_one_window_per_instance() {
         out_dir.display()
     );
     let m = sb.native("m", &manifest);
-    sb.write_installed_flow(&format!(
-        "modules:\n  m:\n    path: {}\n    instances: [a, b]\n",
-        yaml_path(&m.manifest())
-    ));
+    sb.write_installed(&[&m], "nodes: [m]\ninstances:\n  m: [a, b]\n");
 
     let session = format!("sb-{}", sb.workspace);
     assert!(!has_session(&session), "stale session before sb up");
@@ -49,7 +46,7 @@ fn level5_native_up_opens_one_window_per_instance() {
     );
     assert!(
         stdout.contains(&format!(
-            "launched 2 window(s) in tmux session \"{session}\""
+            "flow default: launched 2 window(s) in tmux session \"{session}\""
         )),
         "stdout: {stdout}"
     );
@@ -89,11 +86,7 @@ fn level5_native_up_failed_build_leaves_no_session() {
         "bad",
         "module: bad\nlanguage: python\nscripts:\n  build: \"false\"\n  start: sleep 30\n",
     );
-    sb.write_installed_flow(&format!(
-        "modules:\n  m: {}\n  bad: {}\n",
-        yaml_path(&good.manifest()),
-        yaml_path(&bad.manifest())
-    ));
+    sb.write_installed(&[&good, &bad], "nodes: [m, bad]\n");
 
     let session = format!("sb-{}", sb.workspace);
     let out = sb.cmd().arg("up").output().unwrap();

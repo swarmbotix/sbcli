@@ -31,10 +31,14 @@ fn pub_add_appends_to_dev_yml_and_emits_file() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // 1. The module manifest has the publisher.
+    // 1. The module manifest has the publisher, written in the map form
+    //    (keyed by name, no `name:` line).
     let dev_body = std::fs::read_to_string(s.dev_yml()).unwrap();
-    assert!(dev_body.contains("name: hello"), "dev_yml: {dev_body}");
-    assert!(dev_body.contains("topic: hello"), "dev_yml: {dev_body}");
+    assert!(
+        dev_body.contains("publishers:\n  hello:\n"),
+        "dev_yml: {dev_body}"
+    );
+    assert!(!dev_body.contains("name: hello"), "dev_yml: {dev_body}");
     assert!(
         dev_body.contains("type: ros2/std/StringStamped"),
         "dev_yml: {dev_body}"
@@ -292,7 +296,12 @@ fn io_add_service_then_rm() {
     let file = s.io_dir().join("services").join("nav.rs");
     assert!(file.is_file(), "missing {}", file.display());
     let dev = std::fs::read_to_string(s.dev_yml()).unwrap();
-    assert!(dev.contains("services:\n- name: nav"), "{dev}");
+    let parsed: sb_core::ModuleDevConfig = serde_yaml::from_str(&dev).unwrap();
+    assert!(parsed.services.iter().any(|svc| svc.name == "nav"), "{dev}");
+    assert!(
+        !dev.contains("name: nav"),
+        "services are written as a list of names: {dev}"
+    );
 
     let (ok, _, stderr) = sb_io(&s, &["io", "edit", "nav", "--raw"]);
     assert!(!ok);

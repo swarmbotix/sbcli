@@ -10,6 +10,12 @@
 # `sb up` runs the default `cargo build --release` for both modules, then
 # starts each binary in its own tmux window.
 #
+# Flows (sb 0.8.0+): `sb up` launches the nodes of a flow, and `sb init`
+# only registers a module in sb.workspace.yaml. The two modules live
+# outside the scratch workspace folder, so they are registered in the
+# installed copy only; this script therefore writes the installed default
+# flow (flows/sb.flow.yaml) with both modules as nodes.
+#
 # Hermetic SB home + workspace. Exits 0 only when the subber's window
 # (read back with tmux capture-pane) shows the publisher's payload.
 set -euo pipefail
@@ -61,7 +67,8 @@ window_text() {
 }
 
 echo "--- L2: workspace + adopt both modules ---"
-# `sb ws create` writes ./sb.flow.yaml; keep it in the scratch home, not here.
+# `sb ws create` writes ./sb.workspace.yaml and ./sb.flow.yaml; keep them
+# in the scratch home, not here.
 mkdir -p "$SB_HOME/ws"
 ( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
@@ -70,11 +77,23 @@ mkdir -p "$SB_HOME/ws"
 "$SB" init --rust "$PUBBER" >/dev/null
 "$SB" init --rust "$SUBBER" >/dev/null
 
+# Both modules are registered in the installed sb.workspace.yaml only (no
+# repository sb.workspace.yaml sits above them), so the nodes go into the
+# installed default flow. Do not `sb install .` from $SB_HOME/ws: that
+# reinstalls the empty repository workspace and drops both modules.
+# The wire is declared publisher first; codegen does not read wires yet,
+# so the subscriber still pairs through its key: entry.
+cat > "$SB_HOME/workspaces/demo/flows/sb.flow.yaml" <<'EOF'
+nodes: [pubber, subber]
+wires:
+  pubber.hello: subber.hello
+EOF
+
 echo "--- L3: scaffold pub + sub on Zenoh ---"
 ( cd "$PUBBER" && "$SB" io add pub -m ros2/std/StringStamped hello --zenoh --force )
 ( cd "$SUBBER" && "$SB" io add sub -m ros2/std/StringStamped --key dev01/demo/pubber/zenoh/hello --zenoh --force )
 
-echo "--- L5: sb up (builds both modules, then launches them) ---"
+echo "--- L5: sb up (builds both nodes of the default flow, then launches them) ---"
 "$SB" up
 sleep 3
 

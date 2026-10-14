@@ -44,14 +44,17 @@ call (see §6).
 ### 2.1 `services:` entries (sb 0.5.0+)
 
 ```bash
-sb io add service calib            # adds { name: calib } and renders the router
+sb io add service calib            # adds calib to services: and renders the router
 ```
 
 ```yaml
 # sb.module.yaml
-services:
-  - name: calib
+services: [calib]
 ```
+
+`sb 0.8.0+` writes `services:` as a list of names; a map keyed by name
+and the 0.7 list of single-key maps are also read
+([sbcli_module.md](sbcli_module.md) §2.1).
 
 Each entry renders `<io_dir>/services/<name>.<ext>` (`services/calib.py` for a
 Python module, `services/calib.rs` for a Rust module) with this module's
@@ -72,7 +75,7 @@ Flutter and Unity have no service router.
 Module resolution is the chain every `sb io` verb uses (see
 [sbcli_pubsub.md](sbcli_pubsub.md) §3): `--module` + sibling dir
 (`./<name>/sb.module.yaml`), then `--module` + the active workspace's
-`sb.flow.yaml`, then `./sb.module.yaml` in cwd.
+installed `sb.workspace.yaml`, then `./sb.module.yaml` in cwd.
 
 The router file is a **static, self-contained source file**: sb fills only the
 namespace constants (`device`, `workspace`, `module`, and the service name);

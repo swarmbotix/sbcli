@@ -166,9 +166,9 @@ installed (sb 0.5.0+):
 | Root holds | `sb install` installs |
 |---|---|
 | `sb.app.yml` | an app package: the rest of this section |
-| `sb.flow.yaml` | a **workspace**: the repository's flow is installed and made active, its `messages:` are imported and compiled, and every module's io is regenerated. See [sbcli_ws.md](sbcli_ws.md) §5.2 |
-| both | error: `<source> has both sb.app.yml and sb.flow.yaml; a package is one or the other` |
-| neither | error: `<source> has neither sb.app.yml (an app package) nor sb.flow.yaml (a workspace package) at its root` |
+| `sb.workspace.yaml` (sb 0.8.0+; `sb.flow.yaml` before) | a **workspace**: the repository's `sb.workspace.yaml` and every flow file are installed and made active, its `messages:` are imported and compiled, and every module's io is regenerated. See [sbcli_ws.md](sbcli_ws.md) §5.2 |
+| both | error: `<source> has both sb.app.yml and sb.workspace.yaml; a package is one or the other` |
+| neither | error: `<source> has neither sb.app.yml (an app package) nor sb.workspace.yaml (a workspace package) at its root` |
 
 `--prefetch` applies to app packages only. `--dir <path>` (where to
 clone a git URL) and `--force` (overwrite vault messages that differ

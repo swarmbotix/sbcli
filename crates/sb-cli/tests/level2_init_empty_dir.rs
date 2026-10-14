@@ -1,6 +1,6 @@
 //! L2 TDD test #3 — `sb init --rust ./pubber` writes `sb.module.yaml` and
 //! an empty IO directory (no runscript), and registers the module in the
-//! active workspace's installed flow.
+//! active workspace's installed `sb.workspace.yaml` (never in a flow).
 
 mod common;
 use common::WsSandbox;
@@ -46,20 +46,21 @@ fn init_empty_dir_writes_manifest_and_io_dir_and_registers() {
         "swarmbotix_io/ should be empty"
     );
 
-    // 4. The installed flow has pubber → <abs>/sb.module.yaml.
-    let flow = s
-        .sb_home()
-        .join("workspaces")
-        .join("demo")
-        .join(sb_core::FLOW_FILE);
-    let flow_body = std::fs::read_to_string(&flow).unwrap();
-    assert!(
-        flow_body.contains("pubber"),
-        "installed flow missing pubber: {flow_body}"
-    );
+    // 4. The installed workspace has pubber → <abs>/sb.module.yaml; the
+    //    default flow is untouched.
+    let installed = s.sb_home().join("workspaces").join("demo");
+    let ws_body = std::fs::read_to_string(installed.join(sb_core::WORKSPACE_FILE)).unwrap();
     let canon_manifest = std::fs::canonicalize(&manifest).unwrap();
+    let workspace: sb_core::Workspace = serde_yaml::from_str(&ws_body).unwrap();
+    assert_eq!(
+        workspace.modules.get("pubber"),
+        Some(&canon_manifest),
+        "installed workspace should register pubber at its manifest: {ws_body}"
+    );
+    let flow_body =
+        std::fs::read_to_string(installed.join("flows").join(sb_core::DEFAULT_FLOW_FILE)).unwrap();
     assert!(
-        flow_body.contains(canon_manifest.to_str().unwrap()),
-        "installed flow missing absolute path to the manifest: {flow_body}"
+        !flow_body.contains("pubber"),
+        "sb init must not add a node to a flow: {flow_body}"
     );
 }

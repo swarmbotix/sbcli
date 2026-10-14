@@ -37,7 +37,8 @@ operate on a single module's `sb.module.yaml`. Each does two things in
 lockstep:
 
 1. **Mutates the YAML.** Reads `sb.module.yaml`, modifies the
-   `publishers:`, `subscribers:`, or `services:` list, writes back.
+   `publishers:` or `subscribers:` map or the `services:` list, writes
+   back (always in the map form, sb 0.8.0+).
 2. **Mirrors the change on disk.** Calls `sb-codegen` to render (or
    delete) the matching language file under
    `<module_root>/<io_dir>/{publishers,subscribers,services}/<name>.<ext>`.
@@ -100,9 +101,10 @@ chain (highest priority first):
 
 1. **`--module <name>` given AND `./<name>/sb.module.yaml` exists** in
    the current working directory.
-2. **`--module <name>` given AND active workspace's `sb.flow.yaml`
-   has `<name>`**: the value in the installed copy is the absolute
-   path to its manifest ([sbcli_ws.md](sbcli_ws.md) §4.3).
+2. **`--module <name>` given AND the active workspace's installed
+   `sb.workspace.yaml` has `<name>`**: the value in the installed copy
+   is the absolute path to its manifest ([sbcli_ws.md](sbcli_ws.md)
+   §4.3).
 3. **No `--module` flag → `./sb.module.yaml` in cwd.** Errors if it
    does not exist.
 
@@ -115,13 +117,13 @@ such an entry as the `sb.module.yaml` in the same directory
 
 If `--module <name>` is given and neither rule 1 nor rule 2 hits, the
 CLI errors with **every path it tried**, including the dangling
-`sb.flow.yaml` entry if rule 2 missed because the registered path no
-longer exists.
+`sb.workspace.yaml` entry if rule 2 missed because the registered path
+no longer exists.
 
 ```
 error: module "ghost" not found. Searched:
   - /current/dir/ghost/sb.module.yaml
-  - /home/el/.swarmbotix/workspaces/demo/sb.flow.yaml
+  - /home/el/.swarmbotix/workspaces/demo/sb.workspace.yaml
 ```
 
 If no `--module` is given and cwd has no module manifest:
@@ -132,7 +134,7 @@ error: no module manifest (sb.module.yaml) in cwd (/wrong/place). Pass --module 
 
 The resolver is `sb_pubsub::resolve_module`. Both lookups (rule 1
 sibling, rule 2 workspace) require the resolved file to exist; a
-registered-but-missing entry in `sb.flow.yaml` is treated as a miss for
+registered-but-missing entry in `sb.workspace.yaml` is treated as a miss for
 that rule, **and** the path is included in the error tail.
 
 The module root is then the directory holding `sb.module.yaml` unless
@@ -142,17 +144,18 @@ the file sets `root:` (§4.1).
 
 ## 4. Schema — `PubSpec` and `SubSpec`
 
-The `publishers:` and `subscribers:` lists in `sb.module.yaml` hold these
-two record types (defined in `sb_core::config`):
+The `publishers:` and `subscribers:` maps in `sb.module.yaml` hold these
+two record types (defined in `sb_core::config`), keyed by the entry's
+name (sb 0.8.0+):
 
 ```yaml
 publishers:
-  - name: image_raw
+  image_raw:
     topic: image_raw
     type: ros2/std/ImageStamped
     transport: iceoryx2
 subscribers:
-  - name: cmd_vel
+  cmd_vel:
     key: dev01/nav/teleop/zenoh/cmd_vel
     type: ros2/std/TwistStamped
     transport: zenoh
@@ -160,7 +163,7 @@ subscribers:
 
 | Field | Type | Set by | Notes |
 |---|---|---|---|
-| `name` | identifier | `-n` flag or topic's last segment | Drives the generated filename + the struct name (PascalCase). Must satisfy `validate_identifier`. |
+| name (the map key) | identifier | `-n` flag or topic's last segment | Drives the generated filename + the struct name (PascalCase). Must satisfy `validate_identifier`. An inner `name:` is accepted only when it equals the key. The 0.7 list form carried it as `name:` in each item, and is still read ([sbcli_module.md](sbcli_module.md) §2.1). |
 | `topic` | string | `<topic>` positional on `sb io add`, or `-t` on `sb io edit` | An owned, bare topic (`image_raw`). Codegen prepends `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. An entry carries at most one of `topic` and `key` (sb 0.5.0+). `sb 0.6.0+`: optional; an entry with neither uses its `name` as the topic, and `sb` writes `topic:` back on the next write. |
 | `key` | string | `--key` flag | A verbatim wire key (`dev01/nav/teleop/zenoh/cmd_vel`), used as is: no prefix is prepended and no `<transport>` segment is injected. A leading `/` given to `--key` is dropped. An entry carries exactly one of `topic` and `key` (sb 0.5.0+). |
 | `type` | string | `-m` / `--msg` flag | Must parse as `<style>/<namespace>/<Leaf>` and exist in the vault (see §5.1). Stored verbatim, e.g. `ros2/std/ImageStamped`. Two-segment names are rejected; see [sbcli_messages.md](sbcli_messages.md) §2. `sb 0.5.0+`: required unless `encoding: raw`, which takes none. |
@@ -175,9 +178,9 @@ texts in §12). The one exception is a `topic: /...` entry written
 before 0.5.0: it is read as `key:` (§13.9).
 
 **`topic:` is optional** (sb 0.6.0+). A hand-written entry such as
-`{ name: markers, type: ros2/custom/MarkerDetections, transport: zenoh }`
-reads as `topic: markers`, so the name must also be a valid topic
-segment. `sb` still writes `topic:` out whenever it writes the file, so
+`markers:` with only `type: ros2/custom/MarkerDetections` and
+`transport: zenoh` under it reads as `topic: markers`, so the name
+must also be a valid topic segment. `sb` still writes `topic:` out whenever it writes the file, so
 a file written by 0.6.0 parses on 0.5.0 as long as it uses no other new
 key. Before 0.6.0 an entry with neither `topic` nor `key` was an error.
 
@@ -206,38 +209,40 @@ documented in [sbcli_module.md](sbcli_module.md) §2:
 | `language` | enum | Same. Selects the templates. |
 | `root` | path, optional | The module root. Absent (what `sb init` writes since 0.5.0): the directory holding `sb.module.yaml`. Relative: resolved against that directory. Absolute: used as is, which is how files written before 0.5.0 keep working. |
 | `io_dir` | relative path | Default `swarmbotix_io` (`Assets/Scripts/swarmbotix_io` for Unity), resolved against the module root. |
-| `services` | list of `{ name }` | One request/response router per entry, rendered to `<io_dir>/services/<name>.<ext>` (Rust and Python). See [sbcli_reqres.md](sbcli_reqres.md) §2. |
+| `services` | list of names (sb 0.8.0+) | One request/response router per entry, rendered to `<io_dir>/services/<name>.<ext>` (Rust and Python). See [sbcli_reqres.md](sbcli_reqres.md) §2. A map keyed by name and the 0.7 list of single-key maps are also read. |
 
 ```yaml
 module: ips_track
 language: python
 io_dir: swarmbotix_io
 publishers:
-  - name: pose
+  pose:
     topic: pose
     type: ros2/std/StringStamped
     transport: zenoh
-  - name: status
+  status:
     topic: status
     transport: zenoh
     encoding: raw
     mime: text/json
 subscribers:
-  - name: cmd
+  cmd:
     key: dev01/ws_ips/planner/zenoh/cmd
     type: ros2/std/TwistStamped
     transport: zenoh
-services:
-  - name: calib
+services: [calib]
 ```
 
 **Names are unique within a module.** Publishers, subscribers, and
 services share one name space: a name is the generated file's stem and
 the handle `sb io edit` / `sb io rm` take, so it must identify exactly
 one entry. Adding an entry whose name is already used by any of the
-three is refused (§5.2). The check runs when an entry is added, not
-when the file is read, so a hand-edited duplicate loads but the next
-add on that name is refused.
+three is refused (§5.2). Within one map a repeated name is a YAML
+duplicate-key error when the file is read (sb 0.8.0+). Across the
+publisher map, the subscriber map, and the service list, and in a
+0.7 list-form file, the check runs when an entry is added, not when
+the file is read, so a hand-edited duplicate loads but the next add on
+that name is refused.
 
 ---
 
@@ -534,8 +539,9 @@ This is the supported way to run N instances of the same module
 constructs a `TopicOverrides { module: format!("{}-{}", DEFAULT_MODULE, id) }`,
 and the publisher opens on `dev/ws/<module>-<id>/<transport>/<topic>`.
 That pattern is still the one to use in 0.6.0. What changed
-(sb 0.6.0+) is the launch side: for a module with instances in
-`sb.flow.yaml`, `sb up` and `sb run` append `--id <id>` to the start
+(sb 0.6.0+) is the launch side: for a node with instances in the
+flow ([sbcli_flow.md](sbcli_flow.md) §4), `sb up` and `sb run` append
+`--id <id>` to the start
 command themselves and also export `SB_INSTANCE_ID=<id>`, so `main()`
 can take the id from either ([sbcli_module.md](sbcli_module.md) §9).
 
@@ -833,16 +839,17 @@ sb io add sub --key dev01/demo/camera/iox2/image_raw -m ros2/std/ImageStamped --
 # detector listens on the same key
 ```
 
-`--key` is the working mechanism in 0.6.0 and 0.7.0. `sb 0.6.0+` also accepts the
-same edge declared once in the workspace's `sb.flow.yaml`,
+`--key` is the working mechanism through 0.8.0. The same edge can also
+be declared once in a flow file (sb 0.8.0+: publisher first,
+[sbcli_flow.md](sbcli_flow.md) §6),
 
 ```yaml
 wires:
-  detector.image_raw: camera.image_raw
+  camera.image_raw: detector.image_raw
 ```
 
-which `sb ws check` validates (both entries exist, transports and types
-agree; [sbcli_ws.md](sbcli_ws.md) §4.7). Code generation does not read
+which `sb ws check` validates in its `ws flows` row (both entries
+exist, transports and types agree). Code generation does not read
 `wires:` yet; a later release will derive the subscriber's key from it,
 including the per-instance (`[{id}]`) and fan-in (`[*]`) forms that
 `--key` cannot express. Until then, keep the `--key` entry.
@@ -867,10 +874,10 @@ entry is verbatim, so its key keeps naming `dev01` until you change it
 ### 10.6 List everything across a workspace
 
 There's no built-in `sb io list --all-modules` yet (planned for L6). For
-now, iterate the installed `sb.flow.yaml`:
+now, iterate the installed `sb.workspace.yaml`:
 
 ```bash
-yq '.modules | to_entries[] | .key' ~/.swarmbotix/workspaces/demo/sb.flow.yaml | \
+yq '.modules | keys | .[]' ~/.swarmbotix/workspaces/demo/sb.workspace.yaml | \
   while read -r mod; do
     echo "=== $mod ==="
     sb io list --module "$mod"
@@ -952,14 +959,14 @@ Stable wordings (substring-asserted by integration tests in
 | Identifier | `invalid publisher name "<n>": <reason>` / `invalid subscriber name "<n>" (derived from topic): <reason>` |
 | Already exists (default policy) | `<add> blocked by N existing entr<y|ies>:\n  - <role> "<n>" on topic "<t>" (<reason>)\n  ...\nRe-run with --force to overwrite, --skip-existing to no-op, or \`cd\` to a TTY and re-run for an interactive prompt.` (§8) |
 | `<topic>` positional containing `/` | `topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello` (sb 0.5.0+) |
-| `sb.module.yaml` load: entry has both `topic` and `key` | `publishers[0]: exactly one of topic: or key: is required (both given)` (sb 0.5.0+) |
-| manifest load: entry has neither | before 0.6.0 only: `publishers[0]: exactly one of topic: or key: is required (neither given)`. `sb 0.6.0+` reads such an entry as `topic: <name>` (§4) |
-| `sb.module.yaml` load: `topic` contains `/` (not a leading one, §13.9) | `publishers[0]: topic "a/b" may not contain '/'; use key: for a verbatim wire key`, followed by a parenthetical naming the equivalent `key: <device>/<ws>/<module>/<transport>/a/b` (sb 0.5.0+) |
-| `sb.module.yaml` load: empty `key` | `publishers[0]: key: is empty` (sb 0.5.0+) |
-| `sb.module.yaml` load: raw entry with a `type` | `publishers[0]: encoding: raw takes no type:` (sb 0.5.0+) |
-| `sb.module.yaml` load: no `type`, encoding not raw | `publishers[0]: type: is required unless encoding: raw` (sb 0.5.0+) |
-| `sb.module.yaml` load: `mime` without raw | `publishers[0]: mime: is only valid with encoding: raw` (sb 0.5.0+) |
-| `sb.module.yaml` load: `fb` / `raw` on iceoryx2 | `publishers[0]: encoding: is only valid for transport: zenoh` (sb 0.5.0+) |
+| `sb.module.yaml` load: entry has both `topic` and `key` | `publishers.<name>: exactly one of topic: or key: is required (both given)` (sb 0.5.0+) |
+| manifest load: entry has neither | before 0.6.0 only: `publishers.<name>: exactly one of topic: or key: is required (neither given)`. `sb 0.6.0+` reads such an entry as `topic: <name>` (§4) |
+| `sb.module.yaml` load: `topic` contains `/` (not a leading one, §13.9) | `publishers.<name>: topic "a/b" may not contain '/'; use key: for a verbatim wire key`, followed by a parenthetical naming the equivalent `key: <device>/<ws>/<module>/<transport>/a/b` (sb 0.5.0+) |
+| `sb.module.yaml` load: empty `key` | `publishers.<name>: key: is empty` (sb 0.5.0+) |
+| `sb.module.yaml` load: raw entry with a `type` | `publishers.<name>: encoding: raw takes no type:` (sb 0.5.0+) |
+| `sb.module.yaml` load: no `type`, encoding not raw | `publishers.<name>: type: is required unless encoding: raw` (sb 0.5.0+) |
+| `sb.module.yaml` load: `mime` without raw | `publishers.<name>: mime: is only valid with encoding: raw` (sb 0.5.0+) |
+| `sb.module.yaml` load: `fb` / `raw` on iceoryx2 | `publishers.<name>: encoding: is only valid for transport: zenoh` (sb 0.5.0+) |
 | Name already used on the module | `name "<n>" is already used by <publisher\|subscriber\|service> "<n>" on module "<m>"; publishers, subscribers, and services share one name space` (sb 0.5.0+) |
 | `sb io add --raw --iox2` | `iceoryx2 payloads are typed; use a message with a bytes field and --iox2` (sb 0.5.0+) |
 | `sb io add` / `edit --fb` without compiled FlatBuffers | `flatbuffers backend not compiled for style <style>; run sb message compile <type> --fb` (sb 0.5.0+) |
@@ -968,8 +975,10 @@ Stable wordings (substring-asserted by integration tests in
 | Structural-impossible (Flutter/Unity iceoryx) | `<lang> has no iceoryx2 path — Flutter and Unity run on mobile / sandboxed game runtimes where shared memory is unavailable. Use --zenoh.` |
 | Not-yet-implemented (future languages) | `<lang> <transport> codegen is not yet implemented at this point in L3 ...` |
 
-The load errors name the offending list and index: `publishers[<i>]`
-or `subscribers[<i>]`.
+The load errors name the offending entry. In the map form (sb 0.8.0+)
+that is its key, `publishers.<name>` or `subscribers.<name>`, as the
+rows above show; in the 0.7 list form it is the index,
+`publishers[<i>]` or `subscribers[<i>]`.
 
 ---
 
@@ -1090,11 +1099,14 @@ whose `topic` starts with `/`:
 
 ```yaml
 subscribers:
-  - name: image_raw
+  image_raw:
     topic: /dev01/demo/cam/iox2/image_raw
     type: ros2/std/ImageStamped
     transport: iceoryx2
 ```
+
+(shown in the map form; a file from that era is in the list form,
+which `sb 0.8.0+` still reads)
 
 sb 0.5.0+ reads such an entry as `key: dev01/demo/cam/iox2/image_raw`:
 the leading `/` is dropped and the rest is used verbatim, which is the
@@ -1121,9 +1133,10 @@ rewrites it.
 A legacy entry with an inner `/` but no leading one (`topic: a/b`) is
 **not** carried over. Before 0.5.0 it was prefixed like a bare name;
 now the file fails to load with
-`subscribers[0]: topic "a/b" may not contain '/'; use key: for a verbatim wire key`,
-followed by a parenthetical naming the key it used to produce. Replace
-the entry by hand with that key,
+`subscribers.<name>: topic "a/b" may not contain '/'; use key: for a verbatim wire key`
+(`subscribers[<i>]: ...` in a list-form file), followed by a
+parenthetical naming the key it used to produce. Replace the entry by
+hand with that key,
 `key: <device>/<ws>/<module>/<transport>/a/b` (your own device,
 workspace, module, and transport), to keep the same wire key.
 
@@ -1202,7 +1215,7 @@ sb io add sub --key dev01/ws_ips/ips_track/zenoh/pose -m ros2/std/StringStamped 
 
 ### 14.2 `sb io add service <name>`
 
-Appends `{ name: <name> }` to `services:` and renders
+Appends `<name>` to the `services:` list and renders
 `<io_dir>/services/<name>.<ext>`, a request/response router over Zenoh
 queryables. Rust and Python modules only. The name must satisfy the
 identifier rule (§5.4) and be unused by any entry on the module. The
@@ -1324,8 +1337,8 @@ YAML.
 
 - Targets `<module>` (resolved as `--module` is, §3); else the module in
   the current directory when it holds `sb.module.yaml`; else, or with
-  `--all`, every module registered in the active workspace, including
-  `up: false` ones. That last form is the step `sb install` runs
+  `--all`, every module registered in the active workspace, whether
+  or not a flow runs it. That last form is the step `sb install` runs
   ([sbcli_ws.md](sbcli_ws.md) §5.2). An active workspace is required in
   every form, since its name is the `<workspace>` segment of each owned
   key.

@@ -7,8 +7,10 @@
 //!   `Cargo.toml`, so it suits tests that read or rewrite its manifest
 //!   (gopro), not tests that launch it.
 //! - [`L5Sandbox::native`]: a root holding only a caller-written
-//!   `sb.module.yaml`. Register it with [`L5Sandbox::write_installed_flow`],
-//!   which is also how a test lists instances. Launch tests use this.
+//!   `sb.module.yaml`. Register it, and write the flow that launches it,
+//!   with [`L5Sandbox::write_installed`] (the installed `sb.workspace.yaml`
+//!   plus the `default` flow); [`L5Sandbox::write_installed_flow`] adds
+//!   another flow. Launch tests use this.
 //!
 //! Tmux is required for any test that actually launches a session.
 //! Use [`tmux_launch_supported`] to skip in environments without it (CI
@@ -102,7 +104,7 @@ impl L5Sandbox {
 
     /// Create `<tempdir>/<name>/` holding only `sb.module.yaml` with
     /// `manifest` as its body. No `sb init`: it is not registered
-    /// anywhere; list it in [`Self::write_installed_flow`].
+    /// anywhere; register it with [`Self::write_installed`].
     pub fn native(&mut self, name: &str, manifest: &str) -> L5Module {
         let root = self.ws.tempdir().join(name);
         std::fs::create_dir_all(&root).unwrap();
@@ -115,18 +117,45 @@ impl L5Sandbox {
         m
     }
 
-    /// The active workspace's installed flow, `sb.flow.yaml`.
-    pub fn installed_flow_path(&self) -> PathBuf {
-        self.sb_home()
-            .join("workspaces")
-            .join(&self.workspace)
-            .join("sb.flow.yaml")
+    /// `<sb_home>/workspaces/<workspace>/`.
+    fn installed_dir(&self) -> PathBuf {
+        self.sb_home().join("workspaces").join(&self.workspace)
     }
 
-    /// Replace the active workspace's installed flow with `body`, the way
-    /// a test registers native modules and their instances.
-    pub fn write_installed_flow(&self, body: &str) {
-        std::fs::write(self.installed_flow_path(), body).unwrap();
+    /// The active workspace's installed inventory, `sb.workspace.yaml`.
+    pub fn installed_workspace_path(&self) -> PathBuf {
+        self.installed_dir().join("sb.workspace.yaml")
+    }
+
+    /// The active workspace's installed flow `flow`, under its repository
+    /// file name: `flows/sb.flow.yaml` for `default`, else
+    /// `flows/<flow>.flow.yaml`.
+    pub fn installed_flow_path(&self, flow: &str) -> PathBuf {
+        self.installed_dir()
+            .join("flows")
+            .join(sb_core::flow_file_name(flow))
+    }
+
+    /// Replace the active workspace's installed copy: `sb.workspace.yaml`
+    /// registering `modules` (name → absolute manifest path) and the
+    /// `default` flow with `flow` as its body (`nodes: [a, b]`, plus any
+    /// `instances:` / `wires:`). This is how a test registers native
+    /// modules and lists their instances.
+    pub fn write_installed(&self, modules: &[&L5Module], flow: &str) {
+        let mut body = format!("name: {}\nmodules:\n", self.workspace);
+        for m in modules {
+            body.push_str(&format!("  {}: {}\n", m.name, yaml_path(&m.manifest())));
+        }
+        std::fs::write(self.installed_workspace_path(), body).unwrap();
+        self.write_installed_flow("default", flow);
+    }
+
+    /// Write (or replace) the installed flow `flow` of the active workspace
+    /// with `body`.
+    pub fn write_installed_flow(&self, flow: &str, body: &str) {
+        let path = self.installed_flow_path(flow);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
     }
 
     pub fn cmd(&self) -> Command {
@@ -161,7 +190,7 @@ impl Drop for L5Sandbox {
 }
 
 /// `path` as a YAML single-quoted scalar (no escape sequences inside),
-/// for a module entry's `path:` in [`L5Sandbox::write_installed_flow`].
+/// for a module's path in [`L5Sandbox::write_installed`].
 pub fn yaml_path(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "''"))
 }

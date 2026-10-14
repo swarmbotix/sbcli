@@ -106,7 +106,7 @@ The generated publisher/subscriber class has **two** constructors:
 
 This is the supported way to run **N instances of the same module** (swarm), point a publisher at a different device for a remote replay, or rebind a topic without re-running `sb io edit`.
 
-> **Instance id form.** The `id` is just a string: anything matching `[A-Za-z0-9_-]+` works. Numeric (`--id 2`) and named (`--id left`) forms are equivalent; the latter is conventional when each instance has a distinct role (`left`/`right`, `front`/`rear`) rather than just an index. `sb 0.6.0+`: the canonical ids are the `instances` under the module's entry in `sb.flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.6); `sb up` and `sb run` pass each one to its process as `--id <id>` and as the environment variable `SB_INSTANCE_ID` (§10).
+> **Instance id form.** The `id` is just a string: anything matching `[A-Za-z0-9_-]+` works. Numeric (`--id 2`) and named (`--id left`) forms are equivalent; the latter is conventional when each instance has a distinct role (`left`/`right`, `front`/`rear`) rather than just an index. `sb 0.8.0+`: the canonical ids are the node's `instances` in the flow file ([sbcli_flow.md](sbcli_flow.md) §4); `sb up` and `sb run` pass each one to its process as `--id <id>` and as the environment variable `SB_INSTANCE_ID` (§10).
 
 ### 3.1 What gets emitted alongside the class
 
@@ -337,11 +337,12 @@ module: app1                     # the CMake target above is named after the mod
 language: cpp
 platforms:
   linux:
-    env: { LD_LIBRARY_PATH: "/opt/iceoryx2/current/lib:${LD_LIBRARY_PATH}" }
+    env:
+      LD_LIBRARY_PATH: /opt/iceoryx2/current/lib:${LD_LIBRARY_PATH}
 ```
 
 Listing only `linux` under `platforms` also marks the module Linux-only;
-add `windows: {}` (with its own `env`) when it builds there too. A CMake
+add a `windows` overlay (with its own `env`) when it builds there too. A CMake
 target with another name needs a `start` override,
 `"build/<target> {args}"`, and on Windows, where the multi-config
 generator writes `build/Release/<target>.exe`, a
@@ -625,8 +626,11 @@ its `bin` directory, which a module can do portably in its manifest
 
 ```yaml
 platforms:
-  linux: {}
-  windows: { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}" } }
+  linux:
+    requires: [cargo]
+  windows:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}
 ```
 
 ### 7.3 `sb.module.yaml`
@@ -911,14 +915,15 @@ Same module code, N processes, each publishing on a distinct wire path. This is 
 
 ### 10.1 The pattern in one paragraph
 
-`sb.flow.yaml` lists the module's instances → `sb up` starts one tmux window per instance, named `<module>-<N>`, and appends `--id N` to each start command, also exporting `SB_INSTANCE_ID=N` → the binary reads its id → it constructs `TopicOverrides { module: <DEFAULT_MODULE>-<N> }` → the publisher opens on `<device>/<ws>/<module>-<N>/<transport>/<topic>`. The window name and the wire segment are the same string (sb 0.6.0+).
+The flow lists the node's instances → `sb up` starts one tmux window per instance, named `<module>-<N>`, and appends `--id N` to each start command, also exporting `SB_INSTANCE_ID=N` → the binary reads its id → it constructs `TopicOverrides { module: <DEFAULT_MODULE>-<N> }` → the publisher opens on `<device>/<ws>/<module>-<N>/<transport>/<topic>`. The window name and the wire segment are the same string (sb 0.6.0+).
 
 ### 10.2 Declare and launch N instances
 
 ```yaml
-# sb.flow.yaml
-modules:
-  app1: { path: modules/app1, instances: [1, 2, 3] }
+# sb.flow.yaml (sb 0.8.0+; app1 is registered in sb.workspace.yaml)
+nodes: [app1]
+instances:
+  app1: [1, 2, 3]
 ```
 
 ```bash
@@ -934,7 +939,7 @@ Each instance:
 - Runs the start command with `--id <i>` appended and `SB_INSTANCE_ID=<i>` in its environment.
 - The binary's `main()` reads the id, sets `ov.module = "app1-" + id`, and opens a publisher on `dev01/ws/app1-<i>/iox2/state`.
 
-The instance list is data in `sb.flow.yaml`: a hundred instances are a hundred ids, not a shell loop. An instance can also carry its own `args` and `env` ([sbcli_ws.md](sbcli_ws.md) §4.6).
+The instance list is data in the flow: a hundred instances are a hundred ids, not a shell loop. An instance can also carry its own `args` and `env` under `instance_settings` ([sbcli_flow.md](sbcli_flow.md) §5).
 
 ### 10.3 Per-instance windows (built into `sb`)
 
@@ -968,7 +973,7 @@ sub = svc.subscriber_builder().create()
 # ... poll loop ...
 ```
 
-The hardcoded segments here are a known wart. `sb 0.6.0+` lets you declare this edge in `sb.flow.yaml` instead, as `app2.state: "app1[{id}].state"` (the publisher instance with the subscriber's own id) or `"app1[*].state"` (every instance, Zenoh only); `sb ws check` validates it today ([sbcli_ws.md](sbcli_ws.md) §4.7). Code generation does not read `wires:` yet, so in 0.6.0 the workaround above is still required; a later release generates the subscriber's key from the wire and retires it.
+The hardcoded segments here are a known wart. `sb 0.8.0+` lets you declare this edge in the flow instead, publisher first, as `app1[{id}].state: app2.state` (the publisher instance with the subscriber's own id) or `app1[*].state: app2.state` (every instance, Zenoh only); `sb ws check` validates it today ([sbcli_flow.md](sbcli_flow.md) §6). Code generation does not read `wires:` yet, so the workaround above is still required; a later release generates the subscriber's key from the wire and retires it.
 
 ### 10.5 Discovery — finding running instances
 
@@ -1009,4 +1014,4 @@ Before running a new pub/sub pair end-to-end:
 - [ ] Build glue (`CMakeLists.txt` / `PYTHONPATH`) points at `<message_targets>/iox2/<pkg>/<Leaf>/`.
 - [ ] On clean re-runs after schema changes: `rm -rf /tmp/iceoryx2 /dev/shm/iox2_*`.
 - [ ] The subscriber's `key:` (as `sb io list` shows it) is identical to the publisher's key as `sb topic list` prints it, or, if running swarm instances, both ends use the same `<module>-<id>` suffix.
-- [ ] If you're running multiple instances: they are listed under the module's entry in `sb.flow.yaml`, your `main()` reads `--id` (or `SB_INSTANCE_ID`), and `sb topic list` shows the per-instance wire paths.
+- [ ] If you're running multiple instances: they are listed under the node's `instances` in the flow you launch, your `main()` reads `--id` (or `SB_INSTANCE_ID`), and `sb topic list` shows the per-instance wire paths.

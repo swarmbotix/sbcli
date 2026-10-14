@@ -61,19 +61,28 @@ enum Cmd {
     /// Inspect live topics — list, listen, or one-shot publish.
     #[command(subcommand)]
     Topic(TopicCmd),
-    /// Build, then launch every module in the active workspace in tmux.
+    /// Build, then launch every node of a flow of the active workspace in tmux.
     ///
-    /// Each module's `scripts.build` runs first, in order; a failed build
-    /// leaves no session. Then one window per instance, named `<module>-<id>`
-    /// (or `<module>` for a module without instances). Modules this host does
-    /// not support, and modules with `up: false`, are left out.
-    Up,
+    /// FLOW names the flow (`sb.flow.yaml` is `default`, `<name>.flow.yaml` is
+    /// `<name>`); without it, `default`. Each node's `scripts.build` runs
+    /// first, in order; a failed build leaves no session. Then one window per
+    /// instance the flow lists, named `<module>-<id>` (or `<module>` for a
+    /// node without instances). Nodes this host does not support are left
+    /// out. The flow becomes the workspace's active flow, which `sb run` and
+    /// `sb stop` use. Refused while the workspace's session exists.
+    Up {
+        /// Flow to launch. Default: `default`.
+        #[arg(value_name = "FLOW")]
+        flow: Option<String>,
+    },
     /// Launch one module, or one instance with `<module>:<id>` (idempotent).
     ///
-    /// Builds first, then starts the module's windows; a window that is
-    /// already up is restarted in place. Any args after the target are
-    /// appended to the start command. Use `--` if your args clash with `sb`
-    /// flags. `--fg` runs one instance in this terminal, without tmux.
+    /// The module must be a node of the active flow (the one `sb up` launched
+    /// last, else `default`), which also lists its instances. Builds first,
+    /// then starts the module's windows; a window that is already up is
+    /// restarted in place. Any args after the target are appended to the
+    /// start command. Use `--` if your args clash with `sb` flags. `--fg` runs
+    /// one instance in this terminal, without tmux.
     Run(RunArgs),
     /// Stop a module: close all its windows, then run `scripts.stop`.
     ///
@@ -90,8 +99,8 @@ enum Cmd {
     /// Install an app or workspace package from a git URL or a local folder.
     ///
     /// The package root decides the kind: `sb.app.yml` is an app package,
-    /// `sb.flow.yaml` (or a legacy `flow.yaml`) is a workspace package; a root holding both, or neither,
-    /// is refused. Git URLs are anything starting with https://,
+    /// `sb.workspace.yaml` (or a 0.7 `sb.flow.yaml`, read in 0.8.0 only) is a
+    /// workspace package; a root holding both, or neither, is refused. Git URLs are anything starting with https://,
     /// http://, ssh://, git://, file:// or git@ (as in git@github.com:org/repo.git),
     /// plus any path ending in .git. Append @<branch-or-tag> to a git URL to pin
     /// it (refs containing `/` cannot be pinned this way).
@@ -114,10 +123,11 @@ enum Cmd {
     /// needed. An app name may not be an sb built-in command, and a name already
     /// taken by another package must be freed first with `sb app remove <name>`.
     ///
-    /// A workspace package is installed from its sb.flow.yaml: a git URL is cloned
-    /// into <sb_home>/repos/<name>/ (or --dir), a local folder is used in place.
-    /// The installed copy goes to <sb_home>/workspaces/<name>/ and becomes the
-    /// active workspace; each `messages:` source is imported into the vault and
+    /// A workspace package is installed from its sb.workspace.yaml and every
+    /// *.flow.yaml beside it: a git URL is cloned into <sb_home>/repos/<name>/
+    /// (or --dir), a local folder is used in place. The installed copy goes to
+    /// <sb_home>/workspaces/<name>/ (flows under flows/) and becomes the active
+    /// workspace; each `messages:` source is imported into the vault and
     /// compiled; then every module's generated io code is regenerated.
     /// Installing the same URL or folder again updates it in place.
     #[command(after_long_help = INSTALL_EXAMPLES)]
@@ -230,7 +240,7 @@ struct UpdateArgs {
 #[derive(clap::Args)]
 struct InstallArgs {
     /// Git URL, optionally pinned as `<url>@<branch-or-tag>`, or the path of a
-    /// local package folder (one that holds sb.app.yml or sb.flow.yaml).
+    /// local package folder (one that holds sb.app.yml or sb.workspace.yaml).
     #[arg(value_name = "URL|PATH")]
     source: String,
     /// For `kind: docker` packages, run `docker pull <image>` now even when the
@@ -369,8 +379,8 @@ struct RunArgs {
     /// with no tmux; `sb` exits with the module's exit code.
     #[arg(long)]
     fg: bool,
-    /// `<module>` (every instance) or `<module>:<id>` (one instance), as
-    /// registered in the active workspace's flow.
+    /// `<module>` (every instance) or `<module>:<id>` (one instance): a node
+    /// of the active flow.
     module: String,
     /// Extra args appended to the module's start command. Anything after
     /// the target is collected here; use `--` to disambiguate args that
@@ -381,7 +391,7 @@ struct RunArgs {
 
 #[derive(clap::Args)]
 struct StopArgs {
-    /// Module name registered in the active workspace's flow.
+    /// Module name: a node of the active flow.
     module: String,
     /// Extra args appended to the module's `scripts.stop`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -531,15 +541,19 @@ impl From<TransportArg> for Transport {
 
 #[derive(Subcommand)]
 enum WsCmd {
-    /// Write ./sb.flow.yaml for a new workspace, then install it.
+    /// Write ./sb.workspace.yaml and ./sb.flow.yaml for a new workspace, then install it.
     ///
-    /// Refuses when ./sb.flow.yaml (or a legacy ./flow.yaml) already exists or a workspace of that name is
-    /// already installed. Add modules with `sb init <dir>` under this folder.
+    /// sb.workspace.yaml names the workspace and has no modules; sb.flow.yaml is
+    /// the `default` flow, with no nodes. Refuses when either file (or a legacy
+    /// ./flow.yaml) already exists or a workspace of that name is already
+    /// installed. Add modules with `sb init <dir>` under this folder, then list
+    /// them as nodes in sb.flow.yaml.
     Create { name: String },
     /// Install a workspace package (`sb install` restricted to workspaces).
     Install(WsInstallArgs),
-    /// Validate a workspace: module files, message types, instance ids,
-    /// encodings per wire key, generated io files, and staleness.
+    /// Validate a workspace: module files, message types, encodings per wire
+    /// key, generated io files, every flow (nodes, instances, wires), and
+    /// staleness.
     ///
     /// Exits 1 when any row is [FAIL].
     Check {
@@ -572,7 +586,7 @@ enum WsCmd {
 #[derive(clap::Args)]
 struct WsInstallArgs {
     /// Git URL (optionally `<url>@<branch-or-tag>`) or local folder holding
-    /// sb.flow.yaml. Default: the current folder.
+    /// sb.workspace.yaml. Default: the current folder.
     #[arg(value_name = "URL|PATH")]
     source: Option<String>,
     /// Git URL only: clone into this folder instead of <sb_home>/repos/<name>/.
@@ -751,11 +765,6 @@ struct InitArgs {
     /// are dropped).
     #[arg(long)]
     force: bool,
-    /// Check, before writing anything, that every instance of this module in
-    /// the workspace flow declares `docker: { image }`; see
-    /// documents/sbcli_module.md.
-    #[arg(long)]
-    docker: bool,
 }
 
 #[derive(Subcommand)]
@@ -1018,7 +1027,7 @@ fn real_main() -> Result<ExitCode> {
             TopicCmd::Pub(a) => cmd_topic_pub(a),
             TopicCmd::Prune(a) => cmd_topic_prune(a),
         },
-        Cmd::Up => cmd_up(),
+        Cmd::Up { flow } => cmd_up(flow.as_deref()),
         Cmd::Run(a) => cmd_run(&a),
         Cmd::Stop(a) => cmd_stop(&a.module, &a.args),
         Cmd::Down => cmd_down(),
@@ -1561,7 +1570,7 @@ fn cmd_io_update(module: Option<&str>, services: bool, all: bool) -> Result<()> 
 
     let whole = all || (module.is_none() && sb_workspace::find_module_file(&cwd).is_none());
     let targets: Vec<(String, Result<ModuleHandle>)> = if whole {
-        let paths = sb_workspace::read_flow(&home, &ws)?.module_paths();
+        let paths = sb_workspace::read_workspace(&home, &ws)?.modules;
         if paths.is_empty() {
             anyhow::bail!("workspace {ws:?} has no modules; run `sb init <dir>` first");
         }
@@ -1634,23 +1643,29 @@ fn sb_home() -> Result<SbHome> {
     SbHome::from_config(&cfg)
 }
 
-/// `sb ws create <name>`: write `./sb.flow.yaml` naming the workspace,
-/// then install it like any other workspace package. A folder that already
-/// holds a flow (either name) is refused.
+/// `sb ws create <name>`: write `./sb.workspace.yaml` naming the workspace
+/// (no modules) and `./sb.flow.yaml` (the `default` flow, no nodes), then
+/// install them like any other workspace package. A folder that already
+/// holds either file, or a 0.5 `flow.yaml`, is refused.
 fn cmd_ws_create(name: &str) -> Result<()> {
     sb_core::validate_identifier(name)
         .map_err(|e| anyhow::anyhow!("invalid workspace name {name:?}: {e}"))?;
     let cfg = load_config()?;
     let home = SbHome::from_config(&cfg)?;
     let cwd = std::env::current_dir().context("getting cwd")?;
-    if let Some(existing) = sb_workspace::find_flow_file(&cwd) {
+    let workspace_file = sb_workspace::new_workspace_file(&cwd);
+    let flow_file = sb_workspace::new_flow_file(&cwd);
+    sb_workspace::refuse_removed_flow_file(&cwd)?;
+    if let Some(existing) = [&workspace_file, &flow_file]
+        .into_iter()
+        .find(|p| p.exists())
+    {
         anyhow::bail!(
             "{} already exists; install it with `sb install .`, or create the workspace in \
              another folder",
             existing.display()
         );
     }
-    let flow = sb_workspace::new_flow_file(&cwd);
     let dir = home.workspace_dir(name);
     if dir.exists() {
         anyhow::bail!(
@@ -1659,14 +1674,23 @@ fn cmd_ws_create(name: &str) -> Result<()> {
             dir.display()
         );
     }
-    std::fs::write(&flow, format!("name: {name}\nmodules: {{}}\n"))
-        .with_context(|| format!("writing {}", flow.display()))?;
-    println!("wrote {}", flow.display());
-    let report = match sb_workspace::install_flow(&home, &flow, None) {
+    std::fs::write(&workspace_file, sb_workspace::empty_workspace_text(name))
+        .with_context(|| format!("writing {}", workspace_file.display()))?;
+    if let Err(e) = std::fs::write(&flow_file, sb_workspace::EMPTY_FLOW_TEXT) {
+        let _ = std::fs::remove_file(&workspace_file);
+        return Err(e).with_context(|| format!("writing {}", flow_file.display()));
+    }
+    println!(
+        "wrote {} and {}",
+        sb_workspace::WORKSPACE_FILE,
+        sb_workspace::DEFAULT_FLOW_FILE
+    );
+    let report = match sb_workspace::install_workspace(&home, &workspace_file, None) {
         Ok(r) => r,
         Err(e) => {
             // Leave no half-made workspace behind.
-            let _ = std::fs::remove_file(&flow);
+            let _ = std::fs::remove_file(&workspace_file);
+            let _ = std::fs::remove_file(&flow_file);
             return Err(e);
         }
     };
@@ -1757,9 +1781,9 @@ fn cmd_ws_uninstall(name: &str, clean: bool) -> Result<()> {
 /// The repository folder of an installed workspace when sb cloned it into
 /// `<sb_home>/repos/`; `None` for a local folder or a `--dir` clone, which
 /// belong to the user.
-fn sb_made_clone(home: &SbHome, src: &sb_core::FlowSource) -> Option<PathBuf> {
+fn sb_made_clone(home: &SbHome, src: &sb_core::WorkspaceSource) -> Option<PathBuf> {
     src.url.as_ref()?;
-    let repo = src.repo_flow.parent()?;
+    let repo = src.repo_workspace.parent()?;
     let repos = home.root().join(REPOS_DIR);
     let repos = repos.canonicalize().unwrap_or(repos);
     (repo.starts_with(&repos) && repo != repos).then(|| repo.to_path_buf())
@@ -1785,14 +1809,14 @@ fn cmd_ws_list() -> Result<()> {
         let marker = if e.active { "*" } else { " " };
         let source = match sb_workspace::installed_source(&home, &e.name) {
             Ok(Some(src)) => src.url.clone().unwrap_or_else(|| {
-                src.repo_flow
+                src.repo_workspace
                     .parent()
-                    .unwrap_or(&src.repo_flow)
+                    .unwrap_or(&src.repo_workspace)
                     .display()
                     .to_string()
             }),
             Ok(None) => String::new(),
-            Err(_) => "(flow unreadable)".to_owned(),
+            Err(_) => "(workspace unreadable)".to_owned(),
         };
         let stale = matches!(sb_workspace::is_stale(&home, &e.name), Ok(Some(_)));
         any_stale |= stale;
@@ -1804,7 +1828,7 @@ fn cmd_ws_list() -> Result<()> {
         println!("{}", line.trim_end());
     }
     if any_stale {
-        println!("[stale]: the repo flow changed after install; run `sb install <source>`");
+        println!("[stale]: a repository file changed after install; run `sb install <source>`");
     }
     Ok(())
 }
@@ -1830,7 +1854,6 @@ fn cmd_init(a: InitArgs) -> Result<()> {
         root: &root,
         language,
         force: a.force,
-        docker: a.docker,
     };
     let outcome = sb_workspace::init_module(&home, &opts)?;
     let lang_tag = outcome.language.map(|l| l.as_str()).unwrap_or("?");
@@ -1846,13 +1869,13 @@ fn cmd_init(a: InitArgs) -> Result<()> {
     if outcome.io_dir_created {
         println!("  created IO directory");
     }
-    match (&outcome.repo_flow, outcome.flow_appended) {
+    match (&outcome.repo_workspace, outcome.workspace_appended) {
         (Some(repo), true) => println!("  registered in {}", repo.display()),
         (Some(repo), false) => println!("  (already registered in {})", repo.display()),
         (None, true) => println!("  registered in workspace {}", outcome.workspace),
         (None, false) => println!("  (already registered in workspace {})", outcome.workspace),
     }
-    if outcome.repo_flow.is_some() {
+    if outcome.repo_workspace.is_some() {
         println!("  installed workspace {} (active)", outcome.workspace);
     }
     crate::deprecation::warn_all(&outcome.deprecations);
@@ -1899,7 +1922,7 @@ const REPOS_DIR: &str = "repos";
 enum PackageKind {
     /// `sb.app.yml`
     App,
-    /// `sb.flow.yaml`
+    /// `sb.workspace.yaml`, or a 0.7 `sb.flow.yaml`
     Workspace,
 }
 
@@ -1907,31 +1930,42 @@ enum PackageKind {
 /// folder, or the URL it was cloned from).
 fn package_kind(root: &Path, shown: &str) -> Result<PackageKind> {
     let app = root.join(sb_apps::MANIFEST_FILE).is_file();
-    let flow = sb_workspace::find_flow_file(root);
-    match (app, flow) {
-        (true, Some(flow)) => anyhow::bail!(
+    let workspace = sb_workspace::find_package_file(root);
+    match (app, workspace) {
+        (true, Some(file)) => anyhow::bail!(
             "{shown} has both sb.app.yml and {}; a package is one or the other",
-            file_name_of(&flow)
+            file_name_of(&file)
         ),
         (true, None) => Ok(PackageKind::App),
         (false, Some(_)) => Ok(PackageKind::Workspace),
         (false, None) => {
             // A 0.5 `flow.yaml` alone gets the rename hint instead.
             sb_workspace::refuse_removed_flow_file(root)?;
+            if sb_workspace::new_flow_file(root).is_file() {
+                anyhow::bail!(
+                    "{shown} has {} but no {}; a workspace package lists its modules in {} \
+                     and keeps {} for the flow (see sbcli_workspace.md)",
+                    sb_workspace::DEFAULT_FLOW_FILE,
+                    sb_workspace::WORKSPACE_FILE,
+                    sb_workspace::WORKSPACE_FILE,
+                    sb_workspace::DEFAULT_FLOW_FILE
+                );
+            }
             anyhow::bail!(
                 "{shown} has neither sb.app.yml (an app package) nor {} (a workspace \
                  package) at its root",
-                sb_workspace::FLOW_FILE
+                sb_workspace::WORKSPACE_FILE
             )
         }
     }
 }
 
-/// The workspace flow at the root of package folder `root`: `sb.flow.yaml`,
-/// whether or not it exists (so a later error names the file that is
-/// missing).
-fn package_flow(root: &Path) -> PathBuf {
-    sb_workspace::find_flow_file(root).unwrap_or_else(|| sb_workspace::new_flow_file(root))
+/// The file the workspace package at `root` installs from:
+/// `sb.workspace.yaml`, or a 0.7 `sb.flow.yaml`; `sb.workspace.yaml`
+/// whether or not it exists when it holds neither (so a later error names
+/// the file that is missing).
+fn package_file(root: &Path) -> PathBuf {
+    sb_workspace::find_package_file(root).unwrap_or_else(|| sb_workspace::new_workspace_file(root))
 }
 
 /// `p`'s file name for messages, or the whole path when it has none.
@@ -1954,7 +1988,7 @@ fn cmd_install(a: &InstallArgs, only: Option<PackageKind>) -> Result<()> {
                 "{}: no such folder; pass a package folder (one holding sb.app.yml or \
                  {}) or a git URL",
                 a.source,
-                sb_workspace::FLOW_FILE
+                sb_workspace::WORKSPACE_FILE
             )
         } else {
             e
@@ -1975,8 +2009,8 @@ fn cmd_install(a: &InstallArgs, only: Option<PackageKind>) -> Result<()> {
                     install_app(&home, &a.source, a.prefetch)
                 }
                 PackageKind::Workspace => {
-                    let flow = package_flow(&dir);
-                    let report = sb_workspace::install_flow(&home, &flow, None)?;
+                    let file = package_file(&dir);
+                    let report = sb_workspace::install_workspace(&home, &file, None)?;
                     finish_workspace_install(&cfg, &home, &report, a.force)
                 }
             }
@@ -2060,8 +2094,8 @@ fn install_from_git(
         }
         PackageKind::Workspace => {
             let root = checkout.into_workspace_root(home, url)?;
-            let flow = package_flow(&root);
-            let report = sb_workspace::install_flow(home, &flow, Some(&recorded))?;
+            let file = package_file(&root);
+            let report = sb_workspace::install_workspace(home, &file, Some(&recorded))?;
             finish_workspace_install(cfg, home, &report, a.force)
         }
     }
@@ -2080,10 +2114,10 @@ fn workspace_installed_from(home: &SbHome, recorded: &str) -> Option<(String, Pa
     let entries = sb_workspace::list_workspaces(home).ok()?;
     entries.into_iter().find_map(|e| {
         let src = sb_workspace::installed_source(home, &e.name).ok()??;
-        if src.url.as_deref() != Some(recorded) || !src.repo_flow.is_file() {
+        if src.url.as_deref() != Some(recorded) || !src.repo_workspace.is_file() {
             return None;
         }
-        Some((e.name, src.repo_flow.parent()?.to_path_buf()))
+        Some((e.name, src.repo_workspace.parent()?.to_path_buf()))
     })
 }
 
@@ -2156,7 +2190,7 @@ impl Checkout {
     }
 
     /// Where the workspace repository lives from now on. A staged clone
-    /// moves to `<sb_home>/repos/<name>/`, `<name>` being the flow's
+    /// moves to `<sb_home>/repos/<name>/`, `<name>` being the workspace's
     /// `name:` or else the repository folder name; an existing clone of
     /// the same URL there is fast-forwarded and used instead.
     fn into_workspace_root(self, home: &SbHome, url: &str) -> Result<PathBuf> {
@@ -2183,22 +2217,15 @@ impl Checkout {
     }
 }
 
-/// The name a freshly cloned workspace installs under: its flow's `name:`,
-/// else the repository folder name of `url`.
+/// The name a freshly cloned workspace installs under: its
+/// `sb.workspace.yaml`'s `name:` (or the 0.7 `sb.flow.yaml`'s), else the
+/// repository folder name of `url`.
 fn staged_workspace_name(repo: &Path, url: &str) -> Result<String> {
-    let flow_path = package_flow(repo);
-    let shown = file_name_of(&flow_path);
-    let text = std::fs::read_to_string(&flow_path)
+    let file = package_file(repo);
+    let shown = file_name_of(&file);
+    let workspace = sb_workspace::read_repo_workspace(&file)
         .with_context(|| format!("reading {shown} from {url}"))?;
-    let flow: sb_core::WorkspaceFlow = if text.trim().is_empty() {
-        sb_core::WorkspaceFlow::default()
-    } else {
-        if let Some(e) = sb_core::probe_legacy_flow_keys(&text) {
-            anyhow::bail!("{shown} from {url}: {e}");
-        }
-        serde_yaml::from_str(&text).with_context(|| format!("parsing {shown} from {url}"))?
-    };
-    let name = flow
+    let name = workspace
         .name
         .unwrap_or_else(|| sb_apps::source::repo_dir_name(url));
     sb_core::validate_identifier(&name).map_err(|e| {
@@ -2295,8 +2322,8 @@ fn git_pull_ff(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The steps after a workspace's flow is installed, one line each:
-/// workspace, modules, each message source (import + compile into the
+/// The steps after a workspace is installed, one line each: workspace,
+/// modules, flows, each message source (import + compile into the
 /// configured vault), each module's io regeneration. Message conflicts
 /// fail the command after every step has run, unless `force`. Deprecated
 /// forms the repo uses are announced on stderr first.
@@ -2310,21 +2337,12 @@ fn finish_workspace_install(
     let verb = if report.created { "created" } else { "updated" };
     println!("-- workspace {}: {verb}, active", report.name);
 
-    let held: Vec<&str> = report
-        .modules
-        .iter()
-        .filter(|m| !m.up)
-        .map(|m| m.name.as_str())
-        .collect();
-    let mut line = format!("-- modules: {} registered", report.modules.len());
-    if !held.is_empty() {
-        line.push_str(&format!(
-            ", {} with up: false ({})",
-            held.len(),
-            held.join(", ")
-        ));
+    println!("-- modules: {} registered", report.modules.len());
+    if report.flows.is_empty() {
+        println!("-- flows: none");
+    } else {
+        println!("-- flows: {}", report.flows.join(", "));
     }
-    println!("{line}");
     for m in report.modules.iter().filter(|m| !m.exists) {
         eprintln!(
             "warning: module {}: no module manifest at {} yet; run `sb init` in its folder",
@@ -2336,7 +2354,7 @@ fn finish_workspace_install(
     let repo_dir = sb_workspace::installed_source(home, &report.name)
         .ok()
         .flatten()
-        .and_then(|src| src.repo_flow.parent().map(Path::to_path_buf));
+        .and_then(|src| src.repo_workspace.parent().map(Path::to_path_buf));
     let vctx = configured_vault(cfg)?;
     vctx.ensure_installed()?;
     let conflicts = install_messages(cfg, &vctx, &report.messages, repo_dir.as_deref(), force)?;
@@ -2958,7 +2976,8 @@ fn doctor_workspace_checks(cfg: &SbCliConfig) -> sb_doctor::Report {
 }
 
 /// [`sb_doctor::check_workspace`] for installed workspace `name`, against
-/// the configured vault (where `sb install` imports messages).
+/// the configured vault (where `sb install` imports messages). Every
+/// installed flow is read; one that does not read is a `ws flows` row.
 fn workspace_checks(cfg: &SbCliConfig, home: &SbHome, name: &str) -> Vec<sb_doctor::CheckResult> {
     let fail = |msg: String| {
         vec![sb_doctor::CheckResult {
@@ -2966,15 +2985,32 @@ fn workspace_checks(cfg: &SbCliConfig, home: &SbHome, name: &str) -> Vec<sb_doct
             status: sb_doctor::CheckStatus::Fail(msg),
         }]
     };
-    let flow = match sb_workspace::read_flow(home, name) {
-        Ok(f) => f,
+    let workspace = match sb_workspace::read_workspace(home, name) {
+        Ok(w) => w,
         Err(e) => {
             return fail(format!(
                 "{name}: cannot read {}: {e:#}",
-                home.flow_yaml(name).display()
+                home.workspace_file(name).display()
             ));
         }
     };
+    let flow_names = match sb_workspace::list_flows(home, name) {
+        Ok(names) => names,
+        Err(e) => {
+            return fail(format!(
+                "{name}: cannot list {}: {e:#}",
+                home.flows_dir(name).display()
+            ));
+        }
+    };
+    let mut flows = Vec::new();
+    let mut flow_errors = Vec::new();
+    for flow in flow_names {
+        match sb_workspace::read_flow(home, name, &flow) {
+            Ok(f) => flows.push((flow, f)),
+            Err(e) => flow_errors.push((flow, format!("{e:#}"))),
+        }
+    }
     let vault_root = match sb_config::resolve_messages_root(cfg) {
         Ok(r) => r,
         Err(e) => return fail(format!("{name}: cannot resolve the vault: {e:#}")),
@@ -2984,9 +3020,11 @@ fn workspace_checks(cfg: &SbCliConfig, home: &SbHome, name: &str) -> Vec<sb_doct
         cfg,
         &sb_doctor::WorkspaceView {
             name,
-            flow: &flow,
+            workspace: &workspace,
+            flows: &flows,
+            flow_errors: &flow_errors,
             vault_root: &vault_root,
-            stale_repo_flow: stale.as_ref().map(|(repo, _)| repo.as_path()),
+            stale_repo: stale.as_ref().map(|(repo, _)| repo.as_path()),
             host: sb_core::Host::current(),
         },
     )
@@ -4830,12 +4868,12 @@ fn cmd_topic_pub(a: TopicPubCli) -> Result<()> {
     Ok(())
 }
 
-/// The active workspace's module registry (`sb.flow.yaml::modules`: module
-/// name → its module manifest).
+/// The active workspace's module registry (`sb.workspace.yaml`'s
+/// `modules:`: module name → its module manifest).
 type ModuleRegistry = std::collections::BTreeMap<String, PathBuf>;
 
 /// [`ModuleRegistry`] of the active workspace, or `None` when there is no
-/// config, no active workspace, or its flow does not read. Only
+/// config, no active workspace, or its inventory does not read. Only
 /// used to look up a topic's schema, which is a fallback, so every failure
 /// is silent.
 fn active_module_registry() -> Option<ModuleRegistry> {
@@ -4846,9 +4884,9 @@ fn active_module_registry() -> Option<ModuleRegistry> {
 fn module_registry_for(cfg: &SbCliConfig) -> Option<ModuleRegistry> {
     let home = SbHome::from_config(cfg).ok()?;
     let workspace = active_workspace(&home).ok()??;
-    sb_workspace::read_flow(&home, &workspace)
+    sb_workspace::read_workspace(&home, &workspace)
         .ok()
-        .map(|flow| flow.module_paths())
+        .map(|w| w.modules)
 }
 
 /// Transport for `sb topic listen/pub`: `--transport` when given, else the
@@ -4931,16 +4969,16 @@ fn require_active_workspace() -> Result<(SbCliConfig, SbHome, String)> {
     Ok((cfg, home, ws))
 }
 
-/// Warn (and carry on) when the active workspace's repo flow
-/// (`sb.flow.yaml`) was edited after it was installed: `sb up` / `sb run` /
-/// `sb stop` use the installed copy.
+/// Warn (and carry on) when a repository file of the active workspace
+/// (`sb.workspace.yaml` or a flow) was edited after it was installed:
+/// `sb up` / `sb run` / `sb stop` use the installed copy.
 fn warn_if_stale(home: &SbHome, ws: &str) {
-    if let Ok(Some((repo_flow, _))) = sb_workspace::is_stale(home, ws) {
-        let file = repo_flow.file_name().map_or_else(
-            || repo_flow.display().to_string(),
+    if let Ok(Some((repo_file, _))) = sb_workspace::is_stale(home, ws) {
+        let file = repo_file.file_name().map_or_else(
+            || repo_file.display().to_string(),
             |f| f.to_string_lossy().into_owned(),
         );
-        let repo = repo_flow.parent().unwrap_or(&repo_flow);
+        let repo = repo_file.parent().unwrap_or(&repo_file);
         eprintln!(
             "warning: {file} at {} is newer than the installed copy; run sb install",
             repo.display()
@@ -4948,12 +4986,14 @@ fn warn_if_stale(home: &SbHome, ws: &str) {
     }
 }
 
-/// `sb up`: plan, refuse a running session, build every module inline,
-/// then open the windows. Nothing touches tmux state until the builds pass.
-fn cmd_up() -> Result<()> {
+/// `sb up [FLOW]`: plan the flow (`default` when `None`), refuse a running
+/// session, build every node inline, then open the windows and record the
+/// flow as the active one. Nothing touches tmux state until the builds
+/// pass.
+fn cmd_up(flow: Option<&str>) -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
     warn_if_stale(&home, &ws);
-    let plan = sb_launch::plan_workspace(&home, &ws, &sb_core::Host::current())?;
+    let plan = sb_launch::plan_up(&home, &ws, flow, &sb_core::Host::current())?;
     crate::deprecation::warn_all(&plan.deprecations);
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
     sb_launch::ensure_no_session(&tmux, &plan.session)?;
@@ -4963,7 +5003,8 @@ fn cmd_up() -> Result<()> {
     sb_launch::run_builds(&plan)?;
     let outcome = sb_launch::up(&plan, &tmux)?;
     println!(
-        "launched {} window(s) in tmux session {:?}",
+        "flow {}: launched {} window(s) in tmux session {:?}",
+        plan.flow,
         outcome.windows.len(),
         outcome.session
     );

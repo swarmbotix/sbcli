@@ -6,16 +6,20 @@ tmux.
 
 This document is normative for behavior shipped at L5, extended by the
 native launch of `sb 0.6.0+` (§1 onward). `sb 0.7.0+` launches every
-module natively (§1.4).
+module natively (§1.4). `sb 0.8.0+` launches the nodes of one flow,
+`sb up [FLOW]` (§2), and `sb run` follows the flow `sb up` launched
+(§3).
 
 The canonical spec is `requirements.md` in the sbcli **source
 repository**, a maintainer document that is not part of your install;
 when it and this page disagree, it wins.
 
 Related: [sbcli_module.md](sbcli_module.md) (the `sb.module.yaml` these
-verbs build and start from), [sbcli_ws.md](sbcli_ws.md) (the
-`sb.flow.yaml` registry, instances, `up: false`),
-[sbcli_init.md](sbcli_init.md) (which writes the manifest).
+verbs build and start from), [sbcli_flow.md](sbcli_flow.md) (flows:
+nodes, instances, instance settings, wires),
+[sbcli_workspace.md](sbcli_workspace.md) (the modules a workspace
+holds), [sbcli_ws.md](sbcli_ws.md) (the installed copy these verbs
+read), [sbcli_init.md](sbcli_init.md) (which writes the manifest).
 
 ---
 
@@ -27,7 +31,7 @@ instance of each module in its own window, and closes those windows
 again on `sb stop` or `sb down`.
 
 ```
-sb up
+sb up [FLOW]                                    (the nodes of one flow; default: default)
  1. build   cam: cargo build --release          (inline, in your terminal)
             viz: cmake -S . -B build ... then cmake --build build ...
  2. launch  tmux session  sb-<active_workspace>
@@ -48,9 +52,10 @@ come from forgetting one of them:
    each module's `build` in your terminal, in order, before the first
    tmux call. The first failure stops everything, so **a failed build
    leaves no session behind**.
-3. **One window per instance.** A module with instances in
-   `sb.flow.yaml` gets one window per instance, named `<module>-<id>`;
-   a module without gets one window named `<module>` (§1.1).
+3. **One window per instance.** A node with instances in the flow
+   gets one window per instance, named `<module>-<id>`; a node without
+   gets one window named `<module>` (§1.1). Only the flow's nodes are
+   built and started (sb 0.8.0+).
 4. **The launched command is the module's `start` command, run
    directly**, with no shell in between: the program and its arguments,
    in the module root, with the manifest's environment
@@ -65,7 +70,7 @@ independently scrollable.
 
 ### 1.1 Window naming
 
-| Module | Instances in `sb.flow.yaml` | Windows |
+| Node | Instances in the flow | Windows |
 |---|---|---|
 | `cam` | `[left, right]` | `cam-left`, `cam-right` |
 | `detector` | none | `detector` |
@@ -98,15 +103,18 @@ Checked in this order, before anything is built or tmux is touched:
 
 1. **An active workspace exists.** Otherwise:
    ``no active workspace; run `sb ws create <name> && sb ws set <name>` first``
-2. **The module resolves through the installed `sb.flow.yaml`.** Module
-   paths come from the registry (the workspace's installed copy, see
+2. **The module resolves through the installed workspace.** Module
+   paths come from the registry (the installed `sb.workspace.yaml`, see
    [sbcli_ws.md](sbcli_ws.md) §4.3), never from cwd, so every launch
    verb works from any directory.
-3. **The module's manifest reads and resolves for this host**: it
+3. **The flow resolves** (sb 0.8.0+, `sb up` and `sb run`): the named
+   flow, the active flow, or `default` is installed and loads, and the
+   module is one of its nodes ([sbcli_flow.md](sbcli_flow.md) §7).
+4. **The module's manifest reads and resolves for this host**: it
    parses, the host is among its `platforms` (§2 for how `sb up`
    treats an unsupported module), it has a start command, and its
    placeholders expand ([sbcli_module.md](sbcli_module.md) §12).
-4. **tmux is resolvable**: the `tmux:` path in `sb.config.yml` if set,
+5. **tmux is resolvable**: the `tmux:` path in `sb.config.yml` if set,
    otherwise `tmux` on `PATH`, and on Windows `psmux` on `PATH` as a
    last resort (§11). `sb doctor` validates it.
 
@@ -128,41 +136,59 @@ their `deprecated` row ([sbcli_doctor.md](sbcli_doctor.md) §4.11), and
 
 ---
 
-## 2. `sb up`
+## 2. `sb up [FLOW]`
 
 ```
-sb up
+sb up [FLOW]
 ```
 
-Build and launch every module in the active workspace's `sb.flow.yaml`,
-one window per instance, in a detached session. No arguments, and no
-passthrough args; that is `sb run`'s job. An instance's own `args` and
-`env` from `sb.flow.yaml` do apply.
+Build and launch the nodes of one flow of the active workspace, one
+window per instance, in a detached session (sb 0.8.0+). `FLOW` is a
+flow name ([sbcli_flow.md](sbcli_flow.md) §7.1); without it, the flow
+named `default` (`sb.flow.yaml`). No passthrough args; that is
+`sb run`'s job. An instance's own `args` and `env` from the flow's
+`instance_settings` do apply.
 
 In order:
 
-1. **Plan.** Read the installed copy, resolve every module's manifest
-   for this host (§1.3). Modules with `up: false` are left out. Three
-   kinds of module are skipped, each with a `skipped <module>: <reason>`
-   line on stdout, printed before any build: a module whose `platforms:`
-   do not list this host, a Unity module (it has no start command), and
-   a module whose instances declare `docker:` (`sb` does not start
-   containers yet; [sbcli_module.md](sbcli_module.md) §11.6). The
-   session check also happens here.
+1. **Plan.** Read the installed workspace and the installed flow,
+   and resolve the manifest of every node for this host (§1.3). Only
+   the flow's nodes are planned: a registered module that is not a node
+   is neither built nor started. Two kinds of node are skipped, each
+   with a `skipped <module>: <reason>` line on stdout, printed before
+   any build: a module whose `platforms:` do not list this host, and a
+   Unity module (it has no start command). The session check also
+   happens here.
 2. **Build.** Run each planned module's `build`, inline, printing
    `building <module>: <command>` before each command. The first failure
    stops `sb up` with a non-zero exit, before any session exists.
 3. **Launch.** Create the `sb-<workspace>` session and one window per
-   instance.
+   instance, then record the flow as the workspace's **active flow**,
+   which `sb run` reads (§3; [sbcli_flow.md](sbcli_flow.md) §7.4).
 
 ```console
 $ sb up
 building cam: cargo build --release
     Finished `release` profile [optimized] target(s) in 0.21s
-launched 3 window(s) in tmux session "sb-docdemo"
+flow default: launched 3 window(s) in tmux session "sb-docdemo"
   - cam-left
   - cam-right
   - detector
+attach with: tmux attach -t sb-docdemo
+```
+
+The launch line names the flow (sb 0.8.0+):
+`flow <name>: launched <n> window(s) in tmux session "<session>"`.
+Another flow of the same workspace:
+
+```console
+$ sb up calib
+building cam: cargo build --release
+building calib: cargo build --release
+flow calib: launched 3 window(s) in tmux session "sb-docdemo"
+  - cam-left
+  - cam-right
+  - calib
 attach with: tmux attach -t sb-docdemo
 ```
 
@@ -173,40 +199,42 @@ $ sb up
 skipped cam_gige_ht: not supported on windows-x86_64 (declares: linux)
 building viz: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 building viz: cmake --build build --config Release
-launched 2 window(s) in tmux session "sb-docdemo"
+flow default: launched 2 window(s) in tmux session "sb-docdemo"
   - detector
   - viz
 attach with: tmux attach -t sb-docdemo
 ```
 
-The other two reasons read
-`unity modules have no start command (launch them from their editor)`
-and `instance <id> declares docker:, which native launch does not run yet`
-([sbcli_module.md](sbcli_module.md) §11.6 has the way forward).
+The other reason reads
+`unity modules have no start command (launch them from their editor)`;
+leave a Unity module out of the flow's `nodes:` to keep the line away.
 
 Warnings, such as the stale-copy warning below, go to stderr and never
 change these lines.
 
-**`up: false` modules are skipped** (sb 0.5.0+). A module registered as
-`{ path: ..., up: false }` ([sbcli_ws.md](sbcli_ws.md) §4.4) is neither
-built nor given a window by `sb up`; start it on its own with
-`sb run <module>`.
+**Only the flow's nodes run** (sb 0.8.0+). A module registered in
+`sb.workspace.yaml` but absent from the flow's `nodes:` is neither
+built nor given a window. To run a tool such as a calibrator, give it a
+flow of its own and `sb down && sb up <that flow>`
+([sbcli_flow.md](sbcli_flow.md) §9). This replaces the per-module
+`up` flag of earlier releases.
 
 **A stale installed copy warns** (sb 0.5.0+). When the workspace was
-installed from a repository and the repo `sb.flow.yaml` is newer than
-the installed copy (you edited it, or pulled, without reinstalling),
-`sb up` prints, on stderr,
+installed from a repository and a repository file (`sb.workspace.yaml`
+or a flow) is newer than the installed copy (you edited it, or pulled,
+without reinstalling), `sb up` prints, on stderr,
 
 ```
 warning: sb.flow.yaml at /home/el/ws_ips is newer than the installed copy; run sb install
 ```
 
-and launches from the installed copy anyway. Run `sb install <repo>`
-(or `sb ws update <name>`) to bring the installed copy up to date.
-`sb run` gives the same warning.
+and launches from the installed copy anyway. Run
+`sb install <repo>` (or `sb ws update <name>`) to bring the installed
+copy up to date. `sb run` gives the same warning.
 
-**`sb up` refuses to touch an existing session.** Re-launching a
-workspace is explicitly `sb down && sb up`:
+**`sb up` refuses to touch an existing session.** The session belongs
+to the workspace, not to a flow, so re-launching, or switching to
+another flow, is explicitly `sb down && sb up [FLOW]`:
 
 ```console
 $ sb up
@@ -217,22 +245,24 @@ The session check comes before the builds, so a refused `sb up` costs
 no build time. Other refusals:
 
 ```console
-$ sb up
-error: workspace "emptyws" has no modules in its flow; run `sb init` to adopt one
+$ sb up calibration
+error: no flow named calibration in workspace docdemo (flows: default, calib)
 
 $ sb up
-error: workspace "tools" has no modules to launch: every module in its flow has `up: false` (use `sb run <module>` to start one)
+error: flow default has no nodes
 
 $ sb up
-error: workspace "rig" has nothing to launch on windows-x86_64: cam_gige_ht: not supported on windows-x86_64 (declares: linux)
+error: flow default has nothing to launch on windows-x86_64: cam_gige_ht: not supported on windows-x86_64 (declares: linux)
 ```
 
-The last one is printed when every module that is not `up: false` was
-skipped. A manifest that does not resolve (a bad `platforms` key, a
-`start` with two commands, an unknown placeholder) stops `sb up` in
-step 1 with the error from [sbcli_module.md](sbcli_module.md) §12; a
-failing build stops it in step 2 with the build's own output above the
-error.
+`flow <f> has no nodes` is what a fresh `sb ws create` gives until a
+module is added to `nodes:` and the workspace is reinstalled
+([sbcli_flow.md](sbcli_flow.md) §3). The last refusal is printed when
+every node of the flow was skipped. A manifest that does not resolve (a
+bad `platforms` key, a `start` with two commands, an unknown
+placeholder) stops `sb up` in step 1 with the error from
+[sbcli_module.md](sbcli_module.md) §12; a failing build stops it in
+step 2 with the build's own output above the error.
 
 ---
 
@@ -243,12 +273,15 @@ sb run [--fg] <MODULE>[:<ID>] [ARGS]...
 ```
 
 Build one module, then start it in the `sb-<workspace>` session,
-creating the session if it does not exist yet.
+creating the session if it does not exist yet. `sb 0.8.0+` takes the
+module's instances and instance settings from the **active flow**, the
+one the last `sb up` launched, or from `default` when no flow has been
+launched yet ([sbcli_flow.md](sbcli_flow.md) §7.4).
 
 | Argument | Required | Meaning |
 |---|---|---|
-| `<MODULE>` | yes | Module name as registered in the active workspace's `sb.flow.yaml`. Starts **every** instance of the module (or its one window, without instances). A module marked `up: false` can be run (sb 0.5.0+); the flag only keeps it out of `sb up`. |
-| `<MODULE>:<ID>` | instead of `<MODULE>` | One instance only (sb 0.6.0+). `<ID>` must be one of the module's instances. |
+| `<MODULE>` | yes | Module name as registered in the active workspace's `sb.workspace.yaml`, and (sb 0.8.0+) a node of the active flow. Starts **every** instance of the node in that flow (or its one window, without instances). |
+| `<MODULE>:<ID>` | instead of `<MODULE>` | One instance only (sb 0.6.0+). `<ID>` must be one of the node's instances in the active flow. |
 | `--fg` | no | Run in this terminal instead of tmux (§3.1, sb 0.6.0+). |
 | `[ARGS]...` | no | Passthrough args, placed where the start command has `{args}` (§7) |
 
@@ -256,7 +289,7 @@ creating the session if it does not exist yet.
 there is never a duplicate window for one instance. After starting,
 `sb run <module>` also closes windows named `<module>` or `<module>-*`
 that are no longer in the plan, such as an instance you removed from
-`sb.flow.yaml`.
+the flow.
 
 Output, one line per window:
 
@@ -281,11 +314,15 @@ Refusals specific to `sb run`:
 
 | Situation | Error |
 |---|---|
+| not a node of the active flow (sb 0.8.0+) | `module calib is not a node of flow default` |
 | unknown instance | `module "cam" has no instance "top" (instances: left, right)` |
 | `:<id>` on a module without instances | ``module "detector" has no instances; run it as `sb run detector` `` |
 | this host not in `platforms:` | `module "cam_gige_ht" is not supported on windows-x86_64 (declares: linux)` |
-| an instance declares `docker:` | `module "cam_gige_ht": instance left declares docker:, ...` (as in §2) |
-| malformed target | `bad target "cam:left:x": expected <module> or <module>:<id>` | Under the hood the
+| malformed target | `bad target "cam:left:x": expected <module> or <module>:<id>` |
+
+A module that is registered but belongs to another flow is started by
+launching that flow (`sb down && sb up <flow>`), after which `sb run`
+follows it. Under the hood the
 replace path is `tmux respawn-window -k`, not `kill-window` +
 `new-window`: killing the last window in a session also kills the
 session (and, on default config, the tmux server), which would break
@@ -322,7 +359,7 @@ one (sb 0.6.0+).
 
 | Argument | Required | Meaning |
 |---|---|---|
-| `<MODULE>` | yes | Module name as registered in the active workspace's `sb.flow.yaml`. Every instance's window is closed. |
+| `<MODULE>` | yes | Module name as registered in the active workspace's `sb.workspace.yaml`. Every instance's window is closed. `sb stop` does not read the flow. |
 | `[ARGS]...` | no | Passthrough args for `scripts.stop`, where it has `{args}` |
 
 ```console
@@ -357,9 +394,10 @@ The practical consequences:
 - A program that needs to flush or release something on shutdown should
   handle `SIGHUP` (and `SIGTERM`, for `sb down` and for runs outside
   `sb`).
-- If the module's real work runs somewhere else (a docker container, a
+- If the module's real work runs somewhere else (a container, a
   systemd unit, a remote box), `scripts.stop` is exactly the right tool:
-  the closed window held only the launcher.
+  the closed window held only the launcher. For containers started
+  through Docker Compose, see [sbcli_module.md](sbcli_module.md) §14.
 - `scripts.stop` runs once per module, in the module root, with the
   module's `env:`. It has no `{id}`
   ([sbcli_module.md](sbcli_module.md) §5).
@@ -374,7 +412,7 @@ releasing hardware, deleting lock files.
 ```yaml
 # sb.module.yaml
 scripts:
-  stop: docker rm -f cam_gige_ht-left cam_gige_ht-right
+  stop: docker compose down --remove-orphans
 ```
 
 ### 4.3 Two wrinkles worth knowing
@@ -444,7 +482,8 @@ Unlike `sb down`, a missing session **is** an error here.
 
 `sb run` forwards everything after `<module>[:<id>]` into the start
 command, verbatim and in order, where the command has `{args}`: after
-the instance's own `args` from `sb.flow.yaml`, and before the
+the instance's own `args` from the flow's `instance_settings`, and
+before the
 `--id <id>` that `sb` appends for an instance. The command is never
 parsed by a shell, so a value with spaces stays one argument without
 any quoting tricks.
@@ -507,15 +546,17 @@ that crashed on startup still shows its window and its last output.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `no active workspace` | no `active` marker set | `sb ws create <name> && sb ws set <name>` |
-| `module "x" not registered in workspace "y"` | module absent from `sb.flow.yaml` | `sb init` from the module root |
-| `has no modules to launch` | every module is marked `up: false` (sb 0.5.0+) | `sb run <module>`, or set `up: true` in the repo `sb.flow.yaml` and reinstall |
-| `warning: sb.flow.yaml at … is newer than the installed copy` | edited or pulled without reinstalling (sb 0.5.0+) | `sb install <repo>` or `sb ws update <name>` |
-| a module listed in the repo `sb.flow.yaml` is not launched | the installed copy predates the edit, or the module has `up: false` | reinstall; check `up:` |
+| `module "x" not registered in workspace "y"` | module absent from `sb.workspace.yaml` | `sb init` from the module root |
+| `flow <f> has no nodes` | the flow's `nodes:` is empty, as `sb ws create` writes it (sb 0.8.0+) | list the modules under `nodes:` and `sb install .` ([sbcli_flow.md](sbcli_flow.md) §3) |
+| `no flow named <f> in workspace <ws> (flows: …)` | a typo, or the flow file was added after the last install (sb 0.8.0+) | `sb install .`, then `sb up <f>` |
+| `module <m> is not a node of flow <f>` on `sb run` | the active flow does not run that module (sb 0.8.0+) | `sb down && sb up <a flow that lists it>`, or add it to the flow's `nodes:` and reinstall |
+| `warning: <file> at … is newer than the installed copy` | edited or pulled without reinstalling (sb 0.5.0+) | `sb install <repo>` or `sb ws update <name>` |
+| a module listed in the repository is not launched | it is not a node of the flow `sb up` launched, or the installed copy predates the edit | add it to the flow's `nodes:`; reinstall |
 | `skipped <module>: …` on `sb up` | the manifest's `platforms:` does not list this host | expected; add the platform if the module does run here ([sbcli_module.md](sbcli_module.md) §6) |
 | `sb up` stopped after a `building` line, no session | that module's build failed | fix the build; its output is above the error |
-| `skipped <m>: unity modules have no start command …` | Unity modules launch from the editor | expected; `up: false` keeps the line away |
-| `skipped <m>: instance <id> declares docker: …` | native launch does not start containers yet | [sbcli_module.md](sbcli_module.md) §11.6 |
-| `has nothing to launch on <os>-<arch>` | every module that is not `up: false` was skipped | read the reasons in the message |
+| `skipped <m>: unity modules have no start command …` | Unity modules launch from the editor | expected; leave the module out of the flow's `nodes:` to keep the line away |
+| `has nothing to launch on <os>-<arch>` | every node of the flow was skipped | read the reasons in the message |
+| a container keeps running after `sb stop` | the window held only the `docker compose` client | teardown in `scripts.stop` ([sbcli_module.md](sbcli_module.md) §14) |
 | `unknown placeholder {…}` | a typo in `scripts:` or `env:` | [sbcli_module.md](sbcli_module.md) §5 |
 | a window shows `No such file or directory` | the start command names a binary that was not built under that name | override `scripts.start` ([sbcli_module.md](sbcli_module.md) §3.2) |
 | the program never sees passthrough args | the custom `start` has no `{args}` | add `{args}` |
@@ -524,8 +565,9 @@ that crashed on startup still shows its window and its last output.
 | `sb stop` "worked" but the process is still alive | the real work is not the window's process | `scripts.stop` must reach it (container, unit, remote); see §4.1 |
 | `scripts.stop` never ran during teardown | `sb down` runs none by design | `sb stop <module>` per module first (§5) |
 | a module that used to start from its own launch script now starts the wrong program, or none | `sb 0.7.0+` never runs per-module launch scripts; the module starts from its manifest and the language defaults (§1.4) | declare `scripts:` ([sbcli_module.md](sbcli_module.md) §11.3) |
-| `[WARN] deprecated` in `sb ws check` / `sb doctor` | files from before 0.6.0 are still in the workspace; they are ignored | [sbcli_module.md](sbcli_module.md) §11 |
+| `[WARN] deprecated` in `sb ws check` / `sb doctor` | files from before 0.6.0 are still in the workspace and ignored, or (sb 0.8.0) the repository's `sb.flow.yaml` is still in the 0.7 shape | [sbcli_module.md](sbcli_module.md) §11; [sbcli_workspace.md](sbcli_workspace.md) §7 |
 | Two workspaces fighting over one session | they are not: sessions are per workspace | `tmux ls` shows `sb-<workspace>` for each |
+| `sb up calib` refused while the default flow runs | the session is per workspace, not per flow (sb 0.8.0+) | `sb down && sb up calib` |
 
 ---
 

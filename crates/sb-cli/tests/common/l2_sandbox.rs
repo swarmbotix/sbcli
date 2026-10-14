@@ -29,8 +29,8 @@ pub struct WsSandbox {
     config_path: PathBuf,
     /// Default working directory of [`Self::cmd`]: `<tempdir>/cwd`, a
     /// sibling of every module root rather than an ancestor, so the repo
-    /// `flow.yaml` `sb ws create` writes there never encloses a module and
-    /// `sb init` keeps registering into the active workspace.
+    /// `sb.workspace.yaml` `sb ws create` writes there never encloses a
+    /// module and `sb init` keeps registering into the active workspace.
     cwd: PathBuf,
 }
 
@@ -61,8 +61,9 @@ impl WsSandbox {
     /// Spawn an `sb` command with `SB_CONFIG` pointed at the test config.
     ///
     /// The working directory defaults to [`Self::cwd`]: `sb ws create`
-    /// writes `./flow.yaml`, which must land in the sandbox rather than in
-    /// the crate's source tree. Tests that need another cwd set their own.
+    /// writes `./sb.workspace.yaml` and `./sb.flow.yaml`, which must land in
+    /// the sandbox rather than in the crate's source tree. Tests that need
+    /// another cwd set their own.
     pub fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sb"));
         c.current_dir(&self.cwd);

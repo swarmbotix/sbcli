@@ -1,5 +1,5 @@
-//! `sb install <folder|url>` on a workspace package (a root `sb.flow.yaml`),
-//! `sb ws uninstall`, and the package-kind detection errors.
+//! `sb install <folder|url>` on a workspace package (a root
+//! `sb.workspace.yaml` plus its flow files), and `sb ws uninstall`.
 
 mod common;
 use common::WsSandbox;
@@ -7,28 +7,36 @@ use common::WsSandbox;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use sb_core::{FLOW_FILE, MODULE_FILE, WorkspaceFlow};
+use sb_core::{DEFAULT_FLOW_FILE, MODULE_FILE, WORKSPACE_FILE, Workspace};
 
-const FLOW: &str = "\
+const WORKSPACE: &str = "\
 name: ws_fix
 modules:
   pubber: pubber
-  calib: { path: calib, up: false }
+  calib: calib
 messages:
-  - style: ros2
+  custom:
+    style: ros2
     path: messages/custom
     backends: [proto]
 ";
 
+/// The default flow runs pubber; calib runs in its own flow.
+const FLOW: &str = "nodes: [pubber]\n";
+const CALIB_FLOW: &str = "nodes: [calib]\n";
+
 const PING_V1: &str = "syntax = \"proto3\";\n\npackage swarmbotix.custom;\n\n\
                        message Ping {\n  uint32 seq = 1;\n}\n";
 
-/// A workspace repository at `<tempdir>/<dir>`: two modules (calib with
-/// `up: false`) and one message source holding `custom/Ping.proto`.
+/// A workspace repository at `<tempdir>/<dir>`: two modules, two flows
+/// (`default` runs pubber, `calib` runs calib), and one message source
+/// holding `custom/Ping.proto`.
 fn fixture_repo(s: &WsSandbox, dir: &str) -> PathBuf {
     let repo = s.tempdir().join(dir);
     for (path, body) in [
-        (repo.join(FLOW_FILE), FLOW),
+        (repo.join(WORKSPACE_FILE), WORKSPACE),
+        (repo.join(DEFAULT_FLOW_FILE), FLOW),
+        (repo.join("calib.flow.yaml"), CALIB_FLOW),
         (
             repo.join("pubber").join(MODULE_FILE),
             "module: pubber\nlanguage: rust\n",
@@ -71,9 +79,14 @@ fn ok(out: &Output, what: &str) -> String {
     text(&out.stdout)
 }
 
-fn installed(s: &WsSandbox, name: &str) -> WorkspaceFlow {
-    let body =
-        std::fs::read_to_string(s.sb_home().join("workspaces").join(name).join(FLOW_FILE)).unwrap();
+fn installed(s: &WsSandbox, name: &str) -> Workspace {
+    let body = std::fs::read_to_string(
+        s.sb_home()
+            .join("workspaces")
+            .join(name)
+            .join(WORKSPACE_FILE),
+    )
+    .unwrap();
     serde_yaml::from_str(&body).unwrap()
 }
 
@@ -92,7 +105,8 @@ fn install_workspace_folder_then_reinstall_then_uninstall_clean() {
     assert_eq!(
         stdout,
         "-- workspace ws_fix: created, active\n\
-         -- modules: 2 registered, 1 with up: false (calib)\n\
+         -- modules: 2 registered\n\
+         -- flows: default, calib\n\
          -- messages: ros2 <- messages/custom: 1 imported, 0 unchanged, 0 conflicts; \
          compiled [proto]\n\
          -- io: calib 0 written, 0 unchanged\n\
@@ -100,20 +114,34 @@ fn install_workspace_folder_then_reinstall_then_uninstall_clean() {
          done. next: sb up\n"
     );
 
-    // Installed copy: absolute paths, provenance, the up: false kept.
-    let flow = installed(&s, "ws_fix");
-    assert_eq!(flow.name.as_deref(), Some("ws_fix"));
+    // Installed copy: absolute paths and provenance in sb.workspace.yaml,
+    // each flow copied as it is under flows/.
+    let workspace = installed(&s, "ws_fix");
+    assert_eq!(workspace.name.as_deref(), Some("ws_fix"));
     assert_eq!(
-        flow.modules["pubber"].path,
+        workspace.modules["pubber"],
         canon.join("pubber").join(MODULE_FILE)
     );
-    assert!(flow.modules["pubber"].up);
-    assert!(!flow.modules["calib"].up);
-    assert!(flow.modules.values().all(|m| m.path.is_absolute()));
-    assert_eq!(flow.messages[0].path, canon.join("messages").join("custom"));
-    let src = flow.source.expect("installed copy records its source");
-    assert_eq!(src.repo_flow, canon.join(FLOW_FILE));
+    assert!(workspace.modules.values().all(|p| p.is_absolute()));
+    assert_eq!(
+        workspace.messages[0].path,
+        canon.join("messages").join("custom")
+    );
+    let src = workspace
+        .source
+        .clone()
+        .expect("installed copy records its source");
+    assert_eq!(src.repo_workspace, canon.join(WORKSPACE_FILE));
     assert_eq!(src.url, None);
+    let flows = s.sb_home().join("workspaces/ws_fix/flows");
+    assert_eq!(
+        std::fs::read_to_string(flows.join(DEFAULT_FLOW_FILE)).unwrap(),
+        FLOW
+    );
+    assert_eq!(
+        std::fs::read_to_string(flows.join("calib.flow.yaml")).unwrap(),
+        CALIB_FLOW
+    );
     // Nothing deprecated in this repo, so nothing is announced.
     assert!(
         !text(&out.stderr).contains("is deprecated since"),
@@ -141,7 +169,7 @@ fn install_workspace_folder_then_reinstall_then_uninstall_clean() {
         "{stdout}"
     );
     let again = installed(&s, "ws_fix");
-    assert_eq!(again.modules, flow.modules);
+    assert_eq!(again.modules, workspace.modules);
 
     // A changed message conflicts until --force.
     std::fs::write(
@@ -190,7 +218,7 @@ fn install_workspace_folder_then_reinstall_then_uninstall_clean() {
     );
     assert!(!s.sb_home().join("workspaces").join("ws_fix").exists());
     assert!(!repo.join("pubber/swarmbotix_io").exists());
-    assert!(repo.join(FLOW_FILE).is_file());
+    assert!(repo.join(WORKSPACE_FILE).is_file());
     let active = std::fs::read_to_string(s.sb_home().join("active")).unwrap();
     assert!(active.trim().is_empty(), "{active:?}");
 }
@@ -226,13 +254,16 @@ fn install_from_git_url_clones_into_repos_and_updates_in_place() {
     );
     let clone = s.sb_home().join("repos").join("ws_fix");
     assert!(
-        clone.join(FLOW_FILE).is_file(),
+        clone.join(WORKSPACE_FILE).is_file(),
         "no clone at {}",
         clone.display()
     );
     let src = installed(&s, "ws_fix").source.unwrap();
     assert_eq!(src.url.as_deref(), Some(url.as_str()));
-    assert!(src.repo_flow.starts_with(clone.canonicalize().unwrap()));
+    assert!(
+        src.repo_workspace
+            .starts_with(clone.canonicalize().unwrap())
+    );
 
     // Installing the same URL again pulls the clone and reinstalls.
     let out = s.cmd().args(["install", &url]).output().unwrap();
@@ -252,7 +283,7 @@ fn install_from_git_url_clones_into_repos_and_updates_in_place() {
     assert!(stdout.contains("removed clone"), "{stdout}");
     assert!(!clone.exists());
     assert!(
-        repo.join(FLOW_FILE).is_file(),
+        repo.join(WORKSPACE_FILE).is_file(),
         "the upstream repo is untouched"
     );
 }

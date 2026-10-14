@@ -4,7 +4,7 @@ io_dir: swarmbotix_io
 scripts:
   start: "target/release/pub_frame{exe} {args}"
 publishers:
-- name: frame
-  topic: frame
-  type: ros2/std/ImageStamped
-  transport: iceoryx2
+  frame:
+    topic: frame
+    type: ros2/std/ImageStamped
+    transport: iceoryx2

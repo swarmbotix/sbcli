@@ -2,12 +2,13 @@
 //!
 //! File ↔ type ↔ owner mapping:
 //!
-//! | File             | Type              | Owner               |
-//! | ---------------- | ----------------- | ------------------- |
-//! | `sb.config.yml`  | `SbCliConfig`     | the CLI itself      |
-//! | `sb.module.yaml` | `ModuleDevConfig` | per-module, dev     |
-//! | `sb.prd.yml`     | `ModulePrdConfig` | per-module, prod    |
-//! | `sb.flow.yaml`   | `WorkspaceFlow`   | workspace registry  |
+//! | File                | Type              | Owner                    |
+//! | ------------------- | ----------------- | ------------------------ |
+//! | `sb.config.yml`     | `SbCliConfig`     | the CLI itself           |
+//! | `sb.module.yaml`    | `ModuleDevConfig` | per-module, dev          |
+//! | `sb.prd.yml`        | `ModulePrdConfig` | per-module, prod         |
+//! | `sb.workspace.yaml` | `Workspace`       | workspace inventory      |
+//! | `<name>.flow.yaml`  | `Flow`            | one launchable graph     |
 //!
 //! `sb.module.yaml` and `sb.flow.yaml` replaced `sb.dev.yml` and
 //! `flow.yaml` in 0.6.0, and the old names are not read since 0.7.0.
@@ -16,6 +17,13 @@
 //! [`removed_flow_file_message`]). sb-core does no file IO, so probing is
 //! the caller's.
 //!
+//! In 0.8.0 the 0.7 `sb.flow.yaml` (module paths, messages, inline
+//! instances, and wires in one file) split into `sb.workspace.yaml` and
+//! one `*.flow.yaml` per flow, `sb.flow.yaml` being the flow named
+//! `default`. A 0.7-shape `sb.flow.yaml` is still read in 0.8.0:
+//! [`probe_legacy_flow_shape`] detects it and [`convert_legacy_flow`]
+//! turns it into a [`Workspace`] and the default [`Flow`].
+//!
 //! Every field is `Option<T>` where it can legitimately be absent in a
 //! given layer; `SbCliConfig::merge` then resolves the layering.
 
@@ -23,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::host::{Host, is_valid_platform_key};
@@ -37,8 +46,45 @@ use crate::transport::Transport;
 
 /// A module's manifest, at the module root.
 pub const MODULE_FILE: &str = "sb.module.yaml";
-/// A workspace's flow, at the repository root (and the installed copy).
-pub const FLOW_FILE: &str = "sb.flow.yaml";
+/// A workspace's inventory (modules and message sources), at the
+/// repository root and in the installed copy.
+pub const WORKSPACE_FILE: &str = "sb.workspace.yaml";
+/// The file of the flow named [`DEFAULT_FLOW_NAME`], at the repository
+/// root.
+pub const DEFAULT_FLOW_FILE: &str = "sb.flow.yaml";
+/// Every other flow's file is `<name>` followed by this suffix.
+pub const FLOW_SUFFIX: &str = ".flow.yaml";
+/// The flow `sb up` launches when no flow is named.
+pub const DEFAULT_FLOW_NAME: &str = "default";
+/// The default flow's file under its pre-0.8.0 constant name; the same
+/// value as [`DEFAULT_FLOW_FILE`].
+pub const FLOW_FILE: &str = DEFAULT_FLOW_FILE;
+
+/// The flow a file name holds: [`DEFAULT_FLOW_FILE`] is
+/// [`DEFAULT_FLOW_NAME`], `calib.flow.yaml` is `calib`.
+///
+/// `None` when `file_name` is not a flow file name: no [`FLOW_SUFFIX`],
+/// an empty stem, a path separator, or `default.flow.yaml` (the default
+/// flow's file is [`DEFAULT_FLOW_FILE`], so that name would shadow it).
+pub fn flow_name_of(file_name: &str) -> Option<String> {
+    if file_name == DEFAULT_FLOW_FILE {
+        return Some(DEFAULT_FLOW_NAME.to_owned());
+    }
+    let stem = file_name.strip_suffix(FLOW_SUFFIX)?;
+    let valid = !stem.is_empty() && stem != DEFAULT_FLOW_NAME && !stem.contains(['/', '\\']);
+    valid.then(|| stem.to_owned())
+}
+
+/// The file name of the flow `flow`: [`DEFAULT_FLOW_FILE`] for
+/// [`DEFAULT_FLOW_NAME`], `<flow>.flow.yaml` otherwise. The inverse of
+/// [`flow_name_of`].
+pub fn flow_file_name(flow: &str) -> String {
+    if flow == DEFAULT_FLOW_NAME {
+        DEFAULT_FLOW_FILE.to_owned()
+    } else {
+        format!("{flow}{FLOW_SUFFIX}")
+    }
+}
 
 /// The names a module directory is probed for: [`MODULE_FILE`] only.
 pub fn module_file_candidates() -> [&'static str; 1] {
@@ -504,11 +550,30 @@ pub struct ModuleDevConfig {
     #[serde(default, skip_serializing_if = "Platforms::is_empty")]
     pub platforms: Platforms,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// On disk a map keyed by entry name; the 0.7 list of `- name: ...`
+    /// entries is also read. Written as the map, in this order.
+    #[serde(
+        default,
+        deserialize_with = "ports_from_map_or_list",
+        serialize_with = "ports_to_map",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub publishers: Vec<PubSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Same forms as `publishers`.
+    #[serde(
+        default,
+        deserialize_with = "ports_from_map_or_list",
+        serialize_with = "ports_to_map",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub subscribers: Vec<SubSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Written as a list of names; see [`ServiceSpec`] for what is read.
+    #[serde(
+        default,
+        deserialize_with = "services_from_any",
+        serialize_with = "services_to_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub services: Vec<ServiceSpec>,
 }
 
@@ -564,7 +629,7 @@ impl ModuleDevConfig {
 
     /// Re-run the per-entry load-time rules (`topic:`/`key:`, `type:`,
     /// `encoding:`, `mime:`) on a config built in code. The error names the
-    /// entry the way a load error would: `publishers[0]: ...`.
+    /// entry by its index, the list-form spelling: `publishers[0]: ...`.
     ///
     /// Also checks the launch keys: every `platforms:` key is known, and
     /// `scripts.start` (top level or in any overlay) is at most one
@@ -1065,11 +1130,25 @@ pub fn python_fallback(host: &Host) -> &'static str {
 #[serde(deny_unknown_fields)]
 pub struct ModulePrdConfig {
     pub module: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // Read in both forms like the dev manifest; still written as the
+    // list, since this file ships to consumers outside sb.
+    #[serde(
+        default,
+        deserialize_with = "ports_from_map_or_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub publishers: Vec<PubSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "ports_from_map_or_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub subscribers: Vec<SubSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "services_from_any",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub services: Vec<ServiceSpec>,
 }
 
@@ -1122,10 +1201,137 @@ fn validate_entries(publishers: &[PubSpec], subscribers: &[SubSpec]) -> Result<(
 }
 
 /// One `services:` entry. Only the name is declared today.
+///
+/// On disk `services:` is a list of names. A map keyed by name (each
+/// value empty, or a map whose optional `name:` equals the key) and the
+/// 0.7 list of `name:` maps are also read. The manifest writes the list
+/// of names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSpec {
     pub name: String,
+}
+
+fn services_from_any<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ServiceSpec>, D::Error> {
+    d.deserialize_any(ServicesVisitor)
+}
+
+fn services_to_list<S: serde::Serializer>(
+    services: &[ServiceSpec],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(services.iter().map(|svc| svc.name.as_str()))
+}
+
+/// `services:` as a list (of names or `name:` maps), a map keyed by
+/// name, or nothing.
+struct ServicesVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ServicesVisitor {
+    type Value = Vec<ServiceSpec>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a list of service names, or a map keyed by service name")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(service) = seq.next_element_seed(ServiceSeed { key: None })? {
+            out.push(service);
+        }
+        Ok(out)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out: Vec<ServiceSpec> = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if out.iter().any(|svc| svc.name == key) {
+                return Err(duplicate_key(&key));
+            }
+            out.push(map.next_value_seed(ServiceSeed { key: Some(key) })?);
+        }
+        Ok(out)
+    }
+}
+
+/// One `services:` entry. `key` is its map key in the map form (the
+/// value is then empty or a map with an optional `name:`), `None` in the
+/// list form (a name, or a map with `name:`).
+struct ServiceSeed {
+    key: Option<String>,
+}
+
+/// The map spelling of one service, in either form.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapValue {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for ServiceSeed {
+    type Value = ServiceSpec;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<ServiceSpec, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for ServiceSeed {
+    type Value = ServiceSpec;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.key.is_some() {
+            f.write_str("nothing, or a map with an optional name:")
+        } else {
+            f.write_str("a service name, or a map with name:")
+        }
+    }
+
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ServiceSpec, E> {
+        if self.key.is_some() {
+            return Err(E::invalid_type(
+                serde::de::Unexpected::Str(s),
+                &"nothing, or a map with an optional name:",
+            ));
+        }
+        Ok(ServiceSpec { name: s.to_owned() })
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<ServiceSpec, E> {
+        let Some(name) = self.key else {
+            return Err(E::invalid_type(
+                serde::de::Unexpected::Unit,
+                &"a service name, or a map with name:",
+            ));
+        };
+        Ok(ServiceSpec { name })
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<ServiceSpec, E> {
+        let Some(name) = self.key else {
+            return Err(E::invalid_type(
+                serde::de::Unexpected::Option,
+                &"a service name, or a map with name:",
+            ));
+        };
+        Ok(ServiceSpec { name })
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<ServiceSpec, A::Error> {
+        let inner =
+            ServiceMapValue::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        let name = settle_name::<A::Error>(self.key, inner.name)?;
+        Ok(ServiceSpec { name })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1312,6 +1518,43 @@ impl std::fmt::Display for Encoding {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Serde helpers for keys read as a map or a list
+// ─────────────────────────────────────────────────────────────────────
+
+/// A key present with no value (`modules:`) reads as the default, like
+/// an absent key.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// The error for a map key seen twice. `serde_yaml` reports duplicates
+/// only for its own `Mapping`, so the hand-written map visitors check,
+/// with the same wording.
+fn duplicate_key<E: serde::de::Error>(key: &str) -> E {
+    E::custom(format!("duplicate entry with key {key:?}"))
+}
+
+/// The name of an entry: its map key in the map form, its `name:` in the
+/// list form. In the map form an inner `name:` must equal the key.
+fn settle_name<E: serde::de::Error>(
+    key: Option<String>,
+    inner: Option<String>,
+) -> Result<String, E> {
+    match (key, inner) {
+        (Some(key), Some(inner)) if inner != key => {
+            Err(E::custom(format!("name {inner} does not match the key")))
+        }
+        (Some(key), _) => Ok(key),
+        (None, Some(inner)) => Ok(inner),
+        (None, None) => Err(E::missing_field("name")),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Pub / Sub specs (shared between dev and prd configs)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1376,7 +1619,11 @@ impl SubSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSpec {
-    name: String,
+    /// Absent in the map form, where the key is the name (an inner
+    /// `name:` must equal it); required in the list form. Never written
+    /// in the map form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     topic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1418,6 +1665,11 @@ enum RawSpecError {
     NameNotTopic { name: String },
     #[error(transparent)]
     Rule(#[from] SpecRuleError),
+    /// No name from a map key or `name:`. The visitors report the list
+    /// form's missing `name:` themselves, so only a [`RawSpec`] built
+    /// elsewhere reaches this.
+    #[error("missing field `name`")]
+    MissingName,
 }
 
 impl RawSpec {
@@ -1435,12 +1687,13 @@ impl RawSpec {
         match (self.topic.as_deref(), self.key.as_deref()) {
             (Some(_), Some(_)) => Err(TopicRefError::BothTopicAndKey.into()),
             (None, None) => {
-                if self.name.is_empty() || !self.name.chars().all(is_valid_segment_char) {
+                let name = self.name.as_deref().unwrap_or_default();
+                if name.is_empty() || !name.chars().all(is_valid_segment_char) {
                     return Err(RawSpecError::NameNotTopic {
-                        name: self.name.clone(),
+                        name: name.to_owned(),
                     });
                 }
-                TopicRef::owned(&self.name).map_err(|_| RawSpecError::EmptyTopic)
+                TopicRef::owned(name).map_err(|_| RawSpecError::EmptyTopic)
             }
             (None, Some(key)) => Ok(TopicRef::key(key)?),
             (Some(topic), None) if topic.starts_with('/') => {
@@ -1496,7 +1749,7 @@ impl TryFrom<RawSpec> for PubSpec {
     fn try_from(raw: RawSpec) -> Result<Self, Self::Error> {
         let topic = raw.checked_topic_ref()?;
         Ok(Self {
-            name: raw.name,
+            name: raw.name.ok_or(RawSpecError::MissingName)?,
             topic,
             msg_type: raw.msg_type,
             transport: raw.transport,
@@ -1511,7 +1764,7 @@ impl TryFrom<RawSpec> for SubSpec {
     fn try_from(raw: RawSpec) -> Result<Self, Self::Error> {
         let topic = raw.checked_topic_ref()?;
         Ok(Self {
-            name: raw.name,
+            name: raw.name.ok_or(RawSpecError::MissingName)?,
             topic,
             msg_type: raw.msg_type,
             transport: raw.transport,
@@ -1525,7 +1778,7 @@ impl From<PubSpec> for RawSpec {
     fn from(p: PubSpec) -> Self {
         let (topic, key) = split_topic(p.topic);
         Self {
-            name: p.name,
+            name: Some(p.name),
             topic,
             key,
             msg_type: p.msg_type,
@@ -1540,7 +1793,7 @@ impl From<SubSpec> for RawSpec {
     fn from(s: SubSpec) -> Self {
         let (topic, key) = split_topic(s.topic);
         Self {
-            name: s.name,
+            name: Some(s.name),
             topic,
             key,
             msg_type: s.msg_type,
@@ -1562,50 +1815,154 @@ const SPEC_FIELDS: &[&str] = &[
     "mime",
 ];
 
-/// Deserializes a [`RawSpec`] and converts it inside the map visit, so a
-/// `topic:`/`key:` or `type:`/`encoding:` error carries the entry's own
-/// path (`publishers[0]: ...`) rather than the enclosing list's.
-struct SpecVisitor<T>(std::marker::PhantomData<T>);
+/// What a ports key deserializes into: checked entries, or (for the
+/// loose scan in [`legacy_topics_in`]) the raw ones.
+trait FromRawSpec: Sized {
+    fn from_raw_spec(raw: RawSpec) -> Result<Self, RawSpecError>;
+}
 
-impl<'de, T> serde::de::Visitor<'de> for SpecVisitor<T>
-where
-    T: TryFrom<RawSpec, Error = RawSpecError>,
-{
+impl FromRawSpec for PubSpec {
+    fn from_raw_spec(raw: RawSpec) -> Result<Self, RawSpecError> {
+        Self::try_from(raw)
+    }
+}
+
+impl FromRawSpec for SubSpec {
+    fn from_raw_spec(raw: RawSpec) -> Result<Self, RawSpecError> {
+        Self::try_from(raw)
+    }
+}
+
+impl FromRawSpec for RawSpec {
+    fn from_raw_spec(raw: RawSpec) -> Result<Self, RawSpecError> {
+        Ok(raw)
+    }
+}
+
+/// Deserializes one pub/sub entry and converts it inside the visit, so a
+/// `topic:`/`key:` or `type:`/`encoding:` error carries the entry's own
+/// path (`publishers[0]: ...` in the list form, `publishers.markers: ...`
+/// in the map form) rather than the enclosing key's.
+///
+/// `key` is the entry's map key in the map form, which becomes its name;
+/// an inner `name:` must then equal it. The list form passes `None` and
+/// requires `name:`.
+struct SpecVisitor<T> {
+    key: Option<String>,
+    marker: std::marker::PhantomData<T>,
+}
+
+impl<T> SpecVisitor<T> {
+    fn new(key: Option<String>) -> Self {
+        Self {
+            key,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'de, T: FromRawSpec> serde::de::DeserializeSeed<'de> for SpecVisitor<T> {
+    type Value = T;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<T, D::Error> {
+        d.deserialize_struct("PortEntry", SPEC_FIELDS, self)
+    }
+}
+
+impl<'de, T: FromRawSpec> serde::de::Visitor<'de> for SpecVisitor<T> {
     type Value = T;
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a pub/sub entry with name, optional topic or key, type, and transport")
+        f.write_str("a pub/sub entry with type and transport, and optional topic or key")
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
-        let raw = RawSpec::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-        T::try_from(raw).map_err(serde::de::Error::custom)
+        let mut raw = RawSpec::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        raw.name = Some(settle_name::<A::Error>(self.key, raw.name.take())?);
+        T::from_raw_spec(raw).map_err(serde::de::Error::custom)
     }
 
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<T, A::Error> {
-        let raw = RawSpec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
-        T::try_from(raw).map_err(serde::de::Error::custom)
+        let mut raw = RawSpec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
+        raw.name = Some(settle_name::<A::Error>(self.key, raw.name.take())?);
+        T::from_raw_spec(raw).map_err(serde::de::Error::custom)
     }
 }
 
 impl<'de> Deserialize<'de> for PubSpec {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        d.deserialize_struct(
-            "PubSpec",
-            SPEC_FIELDS,
-            SpecVisitor(std::marker::PhantomData),
-        )
+        serde::de::DeserializeSeed::deserialize(SpecVisitor::<Self>::new(None), d)
     }
 }
 
 impl<'de> Deserialize<'de> for SubSpec {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        d.deserialize_struct(
-            "SubSpec",
-            SPEC_FIELDS,
-            SpecVisitor(std::marker::PhantomData),
-        )
+        serde::de::DeserializeSeed::deserialize(SpecVisitor::<Self>::new(None), d)
     }
+}
+
+fn ports_from_map_or_list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromRawSpec,
+{
+    d.deserialize_any(PortsVisitor(std::marker::PhantomData))
+}
+
+/// `publishers:` / `subscribers:` as a map keyed by entry name, the 0.7
+/// list of entries with `name:`, or nothing.
+struct PortsVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: FromRawSpec> serde::de::Visitor<'de> for PortsVisitor<T> {
+    type Value = Vec<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a map of entries keyed by name, or a list of entries with name:")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Vec<T>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Vec<T>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+        let mut out: Vec<T> = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(entry) = seq.next_element_seed(SpecVisitor::<T>::new(None))? {
+            out.push(entry);
+        }
+        Ok(out)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Vec<T>, A::Error> {
+        let mut out: Vec<T> = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(duplicate_key(&key));
+            }
+            out.push(map.next_value_seed(SpecVisitor::<T>::new(Some(key)))?);
+        }
+        Ok(out)
+    }
+}
+
+/// The ports as a map from name to the entry's other keys, in list
+/// order. `topic:` is still written when it equals the name.
+fn ports_to_map<S, T>(ports: &[T], s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    T: Clone + Into<RawSpec>,
+{
+    let mut map = s.serialize_map(Some(ports.len()))?;
+    for port in ports {
+        let mut raw: RawSpec = port.clone().into();
+        let name = raw.name.take().unwrap_or_default();
+        map.serialize_entry(&name, &raw)?;
+    }
+    map.end()
 }
 
 /// A `topic: /...` entry found by [`legacy_topics_in`]. sb 0.5.0 reads it
@@ -1624,14 +1981,15 @@ pub struct LegacyTopic {
 /// Scan raw module manifest text for legacy `topic: /...` entries.
 ///
 /// Uses a loose parse that ignores every other top-level key, so it works
-/// on files the strict [`ModuleDevConfig`] would reject. Never errors:
-/// text that does not parse yields an empty list.
+/// on files the strict [`ModuleDevConfig`] would reject; both the map and
+/// the list form of the ports are read. Never errors: text that does not
+/// parse yields an empty list.
 pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
     #[derive(Deserialize)]
     struct Loose {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "ports_from_map_or_list")]
         publishers: Vec<RawSpec>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "ports_from_map_or_list")]
         subscribers: Vec<RawSpec>,
     }
 
@@ -1643,7 +2001,7 @@ pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
             let topic = spec.topic.filter(|t| t.starts_with('/'))?;
             Some(LegacyTopic {
                 role,
-                name: spec.name,
+                name: spec.name.unwrap_or_default(),
                 key: topic.trim_start_matches('/').to_owned(),
                 topic,
             })
@@ -1658,86 +2016,55 @@ pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// WorkspaceFlow — `sb.flow.yaml`
+// Workspace — `sb.workspace.yaml`
 // ─────────────────────────────────────────────────────────────────────
 
-/// Workspace module registry. Maps module name → path to its manifest.
+/// The workspace inventory: its name, the modules it owns, and the
+/// message directories it imports. Which modules run, how many copies of
+/// each, and how they are wired belongs to a [`Flow`].
 ///
 /// Two copies of this shape exist:
 ///
-/// - the **repo copy**, an `sb.flow.yaml` at a repository root, written by
-///   hand (and by `sb init`). Module and message paths are relative to
+/// - the **repo copy**, [`WORKSPACE_FILE`] at a repository root, written
+///   by hand (and by `sb init`). Module and message paths are relative to
 ///   that file's directory; `name:` optionally names the workspace.
 /// - the **installed copy** under `<sb_home>/workspaces/<name>/`, derived
 ///   from the repo copy on install. Every path is absolute and `source:`
 ///   records where it came from.
-///
-/// Instances are the workspace's deployment topology: one tmux window,
-/// and one node in the L6 graph editor, per declared instance of a
-/// module. They sit under the module entry
-/// (`cam: { path: cam, instances: [left, right] }`); the pre-0.6.0
-/// top-level `instances:` map is not read since 0.7.0
-/// ([`probe_legacy_flow_keys`]). A module with no instances runs as a
-/// single (un-suffixed) process.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceFlow {
+pub struct Workspace {
     /// Workspace name. Absent = the repo copy's directory name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default)]
-    pub modules: BTreeMap<String, ModuleRef>,
-    /// Message directories imported into the vault on install.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The sb version the workspace needs (`">=0.8"`). Free text; not
+    /// enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sb: Option<String>,
+    /// Module name to its directory (or its manifest's path). A
+    /// `modules:` key with no value reads as empty.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub modules: BTreeMap<String, PathBuf>,
+    /// Message directories imported into the vault on install. On disk a
+    /// map keyed by [`MessageSource::label`]; the 0.7 list is also read,
+    /// and a `messages:` key with no value reads as empty.
+    #[serde(
+        default,
+        deserialize_with = "messages_from_map_or_list",
+        serialize_with = "messages_to_map",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub messages: Vec<MessageSource>,
-    /// Subscriber to publisher links, `<module>.<entry>:
-    /// <module>[<selector>].<entry>`. Parsed and validated in 0.6.0; see
-    /// [`WorkspaceFlow::wires`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub wires: BTreeMap<String, String>,
     /// Provenance of an installed copy. Never present in a repo copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<FlowSource>,
+    pub source: Option<WorkspaceSource>,
 }
 
-impl WorkspaceFlow {
-    /// Every module's path, ignoring `up:`. The shape pre-0.5.0 readers of
-    /// `modules` expect.
-    pub fn module_paths(&self) -> BTreeMap<String, PathBuf> {
-        self.modules
-            .iter()
-            .map(|(name, m)| (name.clone(), m.path.clone()))
-            .collect()
-    }
-
-    /// Look up a single instance by `(module, id)`. Returns `None` if
-    /// the module has no instances declared or no instance with that id.
-    pub fn instance(&self, module: &str, id: &str) -> Option<&ModuleInstance> {
-        self.instances_for(module).iter().find(|i| i.id == id)
-    }
-
-    /// The module's instances: the list under its `modules:` entry, empty
-    /// for a module that declares none or is not registered.
-    pub fn instances_for(&self, module: &str) -> &[ModuleInstance] {
-        self.modules
-            .get(module)
-            .map_or(&[][..], |m| m.instances.as_slice())
-    }
-
-    /// The parsed `wires:`, in key order. Errors are grammar only
-    /// ([`FlowValidationError::BadWire`]); whether the named modules and
-    /// entries exist needs the manifests, which `sb doctor` checks.
-    pub fn wires(&self) -> Result<Vec<Wire>, FlowValidationError> {
-        self.wires
-            .iter()
-            .map(|(lhs, rhs)| parse_wire(lhs, rhs))
-            .collect()
-    }
-
-    /// Validate the workspace name, module paths, message sources, every
-    /// instance id (rejecting duplicates within one module's list), and
-    /// the grammar of every wire. Call after deserializing the flow so bad
-    /// input fails at load time, not at launch time.
+impl Workspace {
+    /// Validate the workspace name, every module name (an identifier,
+    /// like a manifest's `module:`), every module path (non-empty), and
+    /// every message source. Call after deserializing so bad input fails
+    /// at load time, not at launch time.
     pub fn validate(&self) -> Result<(), FlowValidationError> {
         if let Some(name) = &self.name {
             validate_identifier(name).map_err(|e| FlowValidationError::BadName {
@@ -1745,251 +2072,58 @@ impl WorkspaceFlow {
                 source: e,
             })?;
         }
-        for (module, m) in &self.modules {
-            if m.path.as_os_str().is_empty() {
+        for (module, path) in &self.modules {
+            validate_identifier(module).map_err(|e| FlowValidationError::BadModuleName {
+                module: module.clone(),
+                source: e,
+            })?;
+            if path.as_os_str().is_empty() {
                 return Err(FlowValidationError::EmptyModulePath {
                     module: module.clone(),
                 });
             }
-            validate_instance_list(module, &m.instances)?;
         }
         for (index, src) in self.messages.iter().enumerate() {
             src.validate(index)?;
         }
-        self.wires()?;
         Ok(())
     }
 }
 
-/// Pre-parse check for flow keys sb no longer reads. A top-level
-/// `instances:` key gives [`FlowValidationError::LegacyTopLevelInstances`].
-/// Run it on the raw text before the strict parse, which would reject the
-/// key only as an unknown field. Text that is not a YAML mapping gives
-/// `None`; the strict parse reports what is wrong with it.
-pub fn probe_legacy_flow_keys(yaml: &str) -> Option<FlowValidationError> {
-    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(yaml)
-    else {
-        return None;
-    };
-    map.contains_key("instances")
-        .then_some(FlowValidationError::LegacyTopLevelInstances)
-}
-
-/// Every id in one module's instance list is valid and unique.
-fn validate_instance_list(
-    module: &str,
-    list: &[ModuleInstance],
-) -> Result<(), FlowValidationError> {
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for inst in list {
-        validate_instance_id(&inst.id).map_err(|e| FlowValidationError::BadInstanceId {
-            module: module.to_owned(),
-            id: inst.id.clone(),
-            source: e,
-        })?;
-        if !seen.insert(inst.id.as_str()) {
-            return Err(FlowValidationError::DuplicateInstanceId {
-                module: module.to_owned(),
-                id: inst.id.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum FlowValidationError {
-    #[error("module {module:?} instance id {id:?} is invalid: {source}")]
-    BadInstanceId {
-        module: String,
-        id: String,
-        #[source]
-        source: InstanceIdError,
-    },
-    #[error("module {module:?} declares instance id {id:?} more than once")]
-    DuplicateInstanceId { module: String, id: String },
-    #[error("workspace name {name:?} is invalid: {source}")]
-    BadName {
-        name: String,
-        #[source]
-        source: IdentError,
-    },
-    #[error("module {module:?} has an empty path")]
-    EmptyModulePath { module: String },
-    #[error("messages[{index}]: style {style:?} is invalid (allowed: [A-Za-z0-9_])")]
-    BadMessageStyle { index: usize, style: String },
-    #[error("messages[{index}]: path is empty")]
-    EmptyMessagePath { index: usize },
-    #[error("messages[{index}]: unknown backend {backend:?} (expected one of: proto, fb, iox2)")]
-    UnknownBackend { index: usize, backend: String },
-    /// A top-level `instances:` map, the pre-0.6.0 form. Raised by
-    /// [`probe_legacy_flow_keys`] before the strict parse.
-    #[error(
-        "top-level instances: is no longer read since 0.7.0; move each list under \
-         modules.<name>.instances (see sbcli_module.md §Migrating)"
-    )]
-    LegacyTopLevelInstances,
-    /// `(lhs, reason)`: the wire's key and what is wrong with it.
-    #[error("wires.{0}: {1}")]
-    BadWire(String, String),
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// One `modules:` value in the flow: where the module's manifest is,
-/// whether `sb up` launches it, and its instances.
-///
-/// On disk it is either a bare path (`pubber` or
-/// `pubber/sb.module.yaml`), which means `up: true` and no instances, or a
-/// map `{ path: ..., up: false, instances: [...] }`. A module with
-/// `up: false` is still registered (`sb run` / `sb stop` work on it); only
-/// the whole-workspace `sb up` skips it. Serialises back to the bare form
-/// only when `up` is true and `instances` is empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(into = "ModuleRefRaw")]
-pub struct ModuleRef {
-    pub path: PathBuf,
-    pub up: bool,
-    /// One window per entry under `sb up`. Empty = one un-suffixed
-    /// process.
-    pub instances: Vec<ModuleInstance>,
-}
-
-impl ModuleRef {
-    /// A module `sb up` launches (`up: true`), with no instances.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            up: true,
-            instances: Vec::new(),
-        }
-    }
-}
-
-impl From<PathBuf> for ModuleRef {
-    fn from(path: PathBuf) -> Self {
-        Self::new(path)
-    }
-}
-
-// By reference because `skip_serializing_if` passes `&bool`.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_true(b: &bool) -> bool {
-    *b
-}
-
-/// The two YAML spellings of a [`ModuleRef`].
+/// Where an installed workspace came from. Written only into the
+/// installed copy under `<sb_home>/workspaces/<name>/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ModuleRefRaw {
-    /// `name: path`, meaning `up: true` and no instances.
-    Path(PathBuf),
-    /// `name: { path: ..., up: ..., instances: [...] }`; `up` defaults to
-    /// `true` and is written only when `false`.
-    Full {
-        path: PathBuf,
-        #[serde(default = "default_true", skip_serializing_if = "is_true")]
-        up: bool,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        instances: Vec<ModuleInstance>,
-    },
-}
-
-impl From<ModuleRefRaw> for ModuleRef {
-    fn from(raw: ModuleRefRaw) -> Self {
-        match raw {
-            ModuleRefRaw::Path(path) => Self::new(path),
-            ModuleRefRaw::Full {
-                path,
-                up,
-                instances,
-            } => Self {
-                path,
-                up,
-                instances,
-            },
-        }
-    }
-}
-
-impl From<ModuleRef> for ModuleRefRaw {
-    fn from(m: ModuleRef) -> Self {
-        if m.up && m.instances.is_empty() {
-            Self::Path(m.path)
-        } else {
-            Self::Full {
-                path: m.path,
-                up: m.up,
-                instances: m.instances,
-            }
-        }
-    }
-}
-
-/// The map spelling of a [`ModuleRef`], parsed strictly so a typo'd key
-/// is reported by name instead of as "matched no variant".
-#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ModuleRefMap {
-    path: PathBuf,
-    #[serde(default = "default_true")]
-    up: bool,
-    #[serde(default)]
-    instances: Vec<ModuleInstance>,
+pub struct WorkspaceSource {
+    /// Absolute path of the repo copy that was installed.
+    pub repo_workspace: PathBuf,
+    /// Git URL the repo was cloned from; enables `update_from_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// RFC 3339 UTC time of the install, e.g. `2026-10-13T08:35:23Z`.
+    pub installed_at: String,
 }
 
-// Hand-written rather than `#[serde(from = "ModuleRefRaw")]`: an untagged
-// enum reports every mismatch as "data did not match any variant", which
-// hides an `upp:` typo or a non-boolean `up:` from the user. Accepts
-// exactly the shapes `ModuleRefRaw` describes.
-impl<'de> Deserialize<'de> for ModuleRef {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct ModuleRefVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for ModuleRefVisitor {
-            type Value = ModuleRef;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a module path, or a map with `path:` and optional `up:`, `instances:`")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ModuleRef, E> {
-                Ok(ModuleRef::new(s))
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> Result<ModuleRef, A::Error> {
-                let m =
-                    ModuleRefMap::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(ModuleRef {
-                    path: m.path,
-                    up: m.up,
-                    instances: m.instances,
-                })
-            }
-        }
-
-        d.deserialize_any(ModuleRefVisitor)
-    }
-}
-
-/// One `messages:` entry in `flow.yaml`: a directory of `.proto` files
+/// One `messages:` entry in the workspace: a directory of `.proto` files
 /// imported into the vault under `style`.
 ///
 /// `path` holds `<ns>/<Leaf>.proto` files, or flat `<Leaf>.proto` files
 /// (namespace = the directory's own name). `backends` picks what
 /// `sb message compile` emits for it, among `proto`, `fb`, `iox2`;
 /// empty means the style's own default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// On disk `messages:` is a map from `label` to the entry's `style`,
+/// `path`, and `backends`. The 0.7 list of entries is also read; there
+/// `label:` is optional and defaults to the last component of `path`,
+/// with `_2`, `_3`, ... appended when that label is already taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MessageSource {
+    /// The entry's key under `messages:`. It only names the entry;
+    /// nothing resolves through it.
+    pub label: String,
     pub style: String,
     pub path: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backends: Vec<String>,
 }
 
@@ -2023,40 +2157,465 @@ impl MessageSource {
     }
 }
 
-/// Where an installed flow came from. Written only into the installed
-/// copy under `<sb_home>/workspaces/<name>/`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The on-disk fields of a [`MessageSource`], in either form.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FlowSource {
-    /// Absolute path of the repo copy that was installed.
-    pub repo_flow: PathBuf,
-    /// Git URL the repo was cloned from; enables `update_from_source`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// RFC 3339 UTC time of the install, e.g. `2026-10-13T08:35:23Z`.
-    pub installed_at: String,
+struct MessageSourceRaw {
+    #[serde(default)]
+    label: Option<String>,
+    style: String,
+    path: PathBuf,
+    #[serde(default)]
+    backends: Vec<String>,
 }
 
-/// One deployed instance of a module: a tmux window under `sb up` and a
-/// node in the L6 graph.
+impl MessageSourceRaw {
+    fn into_source(self, label: String) -> MessageSource {
+        MessageSource {
+            label,
+            style: self.style,
+            path: self.path,
+            backends: self.backends,
+        }
+    }
+}
+
+/// The label of a list-form entry without `label:`: the last component
+/// of its path, or the whole path when it has none (`.`, `..`).
+fn default_message_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |leaf| leaf.to_string_lossy().into_owned(),
+    )
+}
+
+/// `base`, or `base_2`, `base_3`, ... whichever is first not taken by an
+/// entry already in `taken`.
+fn unused_message_label(taken: &[MessageSource], base: String) -> String {
+    let free = |label: &str| taken.iter().all(|m| m.label != label);
+    if free(&base) {
+        return base;
+    }
+    let mut n = 2_usize;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if free(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+// One list-form element: `label:` optional, defaulting to the path's
+// last component.
+impl<'de> Deserialize<'de> for MessageSource {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut raw = MessageSourceRaw::deserialize(d)?;
+        let label = raw
+            .label
+            .take()
+            .unwrap_or_else(|| default_message_label(&raw.path));
+        Ok(raw.into_source(label))
+    }
+}
+
+fn messages_from_map_or_list<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<MessageSource>, D::Error> {
+    d.deserialize_any(MessagesVisitor)
+}
+
+/// `messages:` as a map keyed by label, the 0.7 list, or nothing.
+struct MessagesVisitor;
+
+impl<'de> serde::de::Visitor<'de> for MessagesVisitor {
+    type Value = Vec<MessageSource>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a map of message sources keyed by label, or a list of message sources")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut out: Vec<MessageSource> = Vec::new();
+        while let Some(mut raw) = seq.next_element::<MessageSourceRaw>()? {
+            let label = match raw.label.take() {
+                Some(label) if out.iter().any(|m| m.label == label) => {
+                    return Err(duplicate_key(&label));
+                }
+                Some(label) => label,
+                None => unused_message_label(&out, default_message_label(&raw.path)),
+            };
+            out.push(raw.into_source(label));
+        }
+        Ok(out)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out: Vec<MessageSource> = Vec::new();
+        while let Some(label) = map.next_key::<String>()? {
+            if out.iter().any(|m| m.label == label) {
+                return Err(duplicate_key(&label));
+            }
+            out.push(map.next_value_seed(MessageSeed { label })?);
+        }
+        Ok(out)
+    }
+}
+
+/// One map-form `messages:` value; its key is the label. Checked inside
+/// the value so an error reads `messages.<label>: ...`.
+struct MessageSeed {
+    label: String,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for MessageSeed {
+    type Value = MessageSource;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<MessageSource, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for MessageSeed {
+    type Value = MessageSource;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a message source with style:, path:, and optional backends:")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<MessageSource, A::Error> {
+        let mut raw =
+            MessageSourceRaw::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        if let Some(inner) = raw.label.take().filter(|inner| *inner != self.label) {
+            return Err(serde::de::Error::custom(format!(
+                "label {inner} does not match the key"
+            )));
+        }
+        Ok(raw.into_source(self.label))
+    }
+}
+
+fn messages_to_map<S: serde::Serializer>(
+    sources: &[MessageSource],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Value<'a> {
+        style: &'a str,
+        path: &'a Path,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        backends: &'a Vec<String>,
+    }
+
+    let mut map = s.serialize_map(Some(sources.len()))?;
+    for src in sources {
+        let value = Value {
+            style: &src.style,
+            path: &src.path,
+            backends: &src.backends,
+        };
+        map.serialize_entry(&src.label, &value)?;
+    }
+    map.end()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Flow — `sb.flow.yaml`, `<name>.flow.yaml`
+// ─────────────────────────────────────────────────────────────────────
+
+/// One launchable graph over the workspace's modules: which modules run
+/// (`nodes`), how many copies of each (`instances`), per-copy settings
+/// (`instance_settings`), and which publisher feeds which subscribers
+/// (`wires`).
+///
+/// A workspace has any number of flows, one per `*.flow.yaml` at the
+/// repository root; [`DEFAULT_FLOW_FILE`] holds the flow named
+/// [`DEFAULT_FLOW_NAME`]. `sb up [FLOW]` launches one flow's nodes.
+///
+/// An instance is one tmux window under `sb up` and one node in the L6
+/// graph editor. Its id is the suffix appended to the module on the wire
+/// and in the window name (`<module>-<id>`, see
+/// [`crate::topic::instance_module`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Flow {
+    /// Flow name. Absent = the file's flow name ([`flow_name_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The workspace modules this flow launches, each listed once.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub nodes: Vec<String>,
+    /// Node to its instance ids. A node absent here runs as one
+    /// un-suffixed process.
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub instances: BTreeMap<String, Vec<String>>,
+    /// Node to instance id to that instance's settings.
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub instance_settings: BTreeMap<String, BTreeMap<String, InstanceSettings>>,
+    /// Publisher-first links, in file order. On disk a map from
+    /// `<module>[<selector>].<entry>` to one `<module>.<entry>` or a list
+    /// of them.
+    #[serde(
+        default,
+        deserialize_with = "wires_from_map",
+        serialize_with = "wires_to_map",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub wires: Vec<Wire>,
+}
+
+impl Flow {
+    /// Whether `module` is one of this flow's nodes.
+    pub fn is_node(&self, module: &str) -> bool {
+        self.nodes.iter().any(|n| n == module)
+    }
+
+    /// The node's instance ids; empty for a singleton or a module that is
+    /// not a node.
+    pub fn instances_for(&self, node: &str) -> &[String] {
+        self.instances.get(node).map_or(&[][..], Vec::as_slice)
+    }
+
+    /// The settings of instance `id` of `node`, if any are declared.
+    pub fn settings_for(&self, node: &str, id: &str) -> Option<&InstanceSettings> {
+        self.instance_settings.get(node)?.get(id)
+    }
+
+    /// One [`ModuleInstance`] per instance of `node`, in declaration
+    /// order, carrying its settings (or none). Empty for a singleton.
+    pub fn resolved_instances(&self, node: &str) -> Vec<ModuleInstance> {
+        self.instances_for(node)
+            .iter()
+            .map(|id| {
+                let settings = self.settings_for(node, id).cloned().unwrap_or_default();
+                ModuleInstance {
+                    id: id.clone(),
+                    label: settings.label,
+                    args: settings.args,
+                    env: settings.env,
+                }
+            })
+            .collect()
+    }
+
+    /// Check the flow on its own, without the manifests:
+    ///
+    /// - every node is an identifier and listed once;
+    /// - every `instances` and `instance_settings` key is a node;
+    /// - instance ids pass [`validate_instance_id`] and are unique per
+    ///   node;
+    /// - every `instance_settings` id is one of that node's instances;
+    /// - every wire parses, both of its sides name nodes, and a `[{id}]`
+    ///   selector has only subscribers with instances.
+    ///
+    /// Whether the wired entries exist, and their transports and types,
+    /// are `sb doctor`'s checks.
+    pub fn validate(&self) -> Result<(), FlowValidationError> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for node in &self.nodes {
+            validate_identifier(node).map_err(|e| FlowValidationError::BadModuleName {
+                module: node.clone(),
+                source: e,
+            })?;
+            if !seen.insert(node.as_str()) {
+                return Err(FlowValidationError::DuplicateNode(node.clone()));
+            }
+        }
+        for (node, ids) in &self.instances {
+            if !self.is_node(node) {
+                return Err(FlowValidationError::UnknownNode(
+                    "instances".to_owned(),
+                    node.clone(),
+                ));
+            }
+            validate_instance_list(node, ids)?;
+        }
+        for (node, by_id) in &self.instance_settings {
+            if !self.is_node(node) {
+                return Err(FlowValidationError::UnknownNode(
+                    "instance_settings".to_owned(),
+                    node.clone(),
+                ));
+            }
+            let ids = self.instances_for(node);
+            if let Some(id) = by_id.keys().find(|id| !ids.contains(id)) {
+                return Err(FlowValidationError::SettingsForUnknownInstance(
+                    node.clone(),
+                    id.clone(),
+                ));
+            }
+        }
+        self.wires
+            .iter()
+            .try_for_each(|wire| self.validate_wire(wire))
+    }
+
+    fn validate_wire(&self, wire: &Wire) -> Result<(), FlowValidationError> {
+        let lhs = wire.source.to_string();
+        let rhs: Vec<String> = wire.sinks.iter().map(ToString::to_string).collect();
+        // Grammar again, for wires built in code rather than parsed.
+        parse_wire(&lhs, &rhs)?;
+        let modules =
+            std::iter::once(&wire.source.module).chain(wire.sinks.iter().map(|s| &s.module));
+        for module in modules {
+            if !self.is_node(module) {
+                return Err(FlowValidationError::UnknownNode(
+                    format!("wires.{lhs}"),
+                    module.clone(),
+                ));
+            }
+        }
+        if wire.source.selector == WireSelector::SameId {
+            if let Some(sink) = wire
+                .sinks
+                .iter()
+                .find(|s| self.instances_for(&s.module).is_empty())
+            {
+                return Err(FlowValidationError::BadWire(
+                    lhs,
+                    format!("{{id}} but {} has no instances", sink.module),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Every id in one node's instance list is valid and unique.
+fn validate_instance_list(node: &str, ids: &[String]) -> Result<(), FlowValidationError> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for id in ids {
+        validate_instance_id(id).map_err(|e| FlowValidationError::BadInstanceId {
+            module: node.to_owned(),
+            id: id.clone(),
+            source: e,
+        })?;
+        if !seen.insert(id.as_str()) {
+            return Err(FlowValidationError::DuplicateInstanceId {
+                module: node.to_owned(),
+                id: id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One `instance_settings.<node>.<id>` value. Every key is optional.
+///
+/// `label` is a free-form display string for the L6 graph editor (absent
+/// = the id). `args` are appended to the start command and `env` is
+/// merged over the manifest's, for this instance only. On disk `args` is
+/// one string, split like a script line ([`Script::parse_line`]), or a
+/// list with one argument per item.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "argv_from_str_or_list",
+        serialize_with = "argv_to_str",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl InstanceSettings {
+    /// True when no key is set.
+    pub fn is_empty(&self) -> bool {
+        self.label.is_none() && self.args.is_empty() && self.env.is_empty()
+    }
+}
+
+fn argv_from_str_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    d.deserialize_any(ArgvVisitor)
+}
+
+/// `args:` as one line split like a script line, a list of arguments
+/// taken verbatim, or nothing.
+struct ArgvVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ArgvVisitor {
+    type Value = Vec<String>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an argument string, or a list of arguments")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Vec<String>, E> {
+        if s.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Script::parse_line(s).map_err(E::custom)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Vec<String>, E> {
+        Ok(vec![n.to_string()])
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<Vec<String>, E> {
+        Ok(vec![n.to_string()])
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Vec<String>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Vec<String>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(arg) = seq.next_element::<String>()? {
+            out.push(arg);
+        }
+        Ok(out)
+    }
+}
+
+/// One string when every argument is a plain token (so
+/// [`Script::parse_line`] splits it back unchanged), a list otherwise.
+fn argv_to_str<S: serde::Serializer>(args: &[String], s: S) -> Result<S::Ok, S::Error> {
+    if args.iter().all(|a| is_plain_token(a)) {
+        s.serialize_str(&args.join(" "))
+    } else {
+        s.collect_seq(args)
+    }
+}
+
+/// One instance of a node, as the launcher sees it: the id plus its
+/// [`InstanceSettings`]. Built by [`Flow::resolved_instances`]; never
+/// read or written directly.
 ///
 /// `id` is the suffix appended to the module on the wire and in the
-/// window name (`<module>-<id>` → e.g. `cam_gige_ht-left`; see
-/// [`crate::topic::instance_module`]). `label` is a free-form display
-/// string for the L6 graph editor; if absent, the UI falls back to `id`.
-/// `args` are appended to the start command and `env` is merged over the
-/// manifest's for this instance only. `docker` carries per-instance
-/// container settings; if absent, the instance runs as a plain process.
-///
-/// On disk an instance is a bare id (`left`, or a number such as `1`)
-/// when only `id` is set, or a map `{ id, label, args, env, docker }`.
+/// window name (`<module>-<id>`, e.g. `cam_gige_ht-left`; see
+/// [`crate::topic::instance_module`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleInstance {
     pub id: String,
     pub label: Option<String>,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
-    pub docker: Option<DockerSpec>,
 }
 
 impl ModuleInstance {
@@ -2067,143 +2626,77 @@ impl ModuleInstance {
             label: None,
             args: Vec::new(),
             env: BTreeMap::new(),
-            docker: None,
-        }
-    }
-
-    /// Only `id` is set, so the instance is written as a bare id.
-    fn is_bare(&self) -> bool {
-        self.label.is_none() && self.args.is_empty() && self.env.is_empty() && self.docker.is_none()
-    }
-}
-
-/// The map spelling of a [`ModuleInstance`], parsed strictly so a typo'd
-/// key is reported by name.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModuleInstanceMap {
-    id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    args: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    docker: Option<DockerSpec>,
-}
-
-impl From<ModuleInstanceMap> for ModuleInstance {
-    fn from(m: ModuleInstanceMap) -> Self {
-        Self {
-            id: m.id,
-            label: m.label,
-            args: m.args,
-            env: m.env,
-            docker: m.docker,
         }
     }
 }
 
-impl From<ModuleInstance> for ModuleInstanceMap {
-    fn from(i: ModuleInstance) -> Self {
-        Self {
-            id: i.id,
-            label: i.label,
-            args: i.args,
-            env: i.env,
-            docker: i.docker,
-        }
-    }
-}
-
-impl Serialize for ModuleInstance {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        if self.is_bare() {
-            s.serialize_str(&self.id)
-        } else {
-            ModuleInstanceMap::from(self.clone()).serialize(s)
-        }
-    }
-}
-
-// Hand-written for the same reason as `ModuleRef`'s: an untagged enum
-// would hide a typo'd key behind "data did not match any variant".
-impl<'de> Deserialize<'de> for ModuleInstance {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct ModuleInstanceVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for ModuleInstanceVisitor {
-            type Value = ModuleInstance;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(
-                    "an instance id, or a map with `id:` and optional `label:`, `args:`, \
-                     `env:`, `docker:`",
-                )
-            }
-
-            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ModuleInstance, E> {
-                Ok(ModuleInstance::new(s))
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<ModuleInstance, E> {
-                Ok(ModuleInstance::new(n.to_string()))
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<ModuleInstance, E> {
-                Ok(ModuleInstance::new(n.to_string()))
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> Result<ModuleInstance, A::Error> {
-                let m = ModuleInstanceMap::deserialize(
-                    serde::de::value::MapAccessDeserializer::new(map),
-                )?;
-                Ok(m.into())
-            }
-        }
-
-        d.deserialize_any(ModuleInstanceVisitor)
-    }
-}
-
-/// Per-instance container settings. Every field is optional so an
-/// instance can opt into individual flags without listing the others.
-/// `image` is the docker image tag (e.g. `cam_gige_ht:latest`); a
-/// missing image is a preflight error at `sb init --docker` time.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DockerSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub devices: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mounts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpus: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FlowValidationError {
+    #[error("module {module:?} instance id {id:?} is invalid: {source}")]
+    BadInstanceId {
+        module: String,
+        id: String,
+        #[source]
+        source: InstanceIdError,
+    },
+    #[error("module {module:?} declares instance id {id:?} more than once")]
+    DuplicateInstanceId { module: String, id: String },
+    #[error("workspace name {name:?} is invalid: {source}")]
+    BadName {
+        name: String,
+        #[source]
+        source: IdentError,
+    },
+    /// A workspace `modules:` key or a flow node that is not an
+    /// identifier.
+    #[error("module name {module:?} is invalid: {source}")]
+    BadModuleName {
+        module: String,
+        #[source]
+        source: IdentError,
+    },
+    #[error("module {module:?} has an empty path")]
+    EmptyModulePath { module: String },
+    #[error("messages[{index}]: style {style:?} is invalid (allowed: [A-Za-z0-9_])")]
+    BadMessageStyle { index: usize, style: String },
+    #[error("messages[{index}]: path is empty")]
+    EmptyMessagePath { index: usize },
+    #[error("messages[{index}]: unknown backend {backend:?} (expected one of: proto, fb, iox2)")]
+    UnknownBackend { index: usize, backend: String },
+    /// `(flow_item, name)`: an `instances` or `instance_settings` key, or
+    /// a module named by `wires.<lhs>`, that is not a node of the flow.
+    #[error("{0}: unknown node {1}")]
+    UnknownNode(String, String),
+    /// A node listed more than once under `nodes:`.
+    #[error("nodes: {0} is listed more than once")]
+    DuplicateNode(String),
+    /// `(node, id)`: settings for an id that is not one of the node's
+    /// instances.
+    #[error("instance_settings.{0}: {1} is not an instance of {0}")]
+    SettingsForUnknownInstance(String, String),
+    /// `(lhs, reason)`: the wire's key and what is wrong with it.
+    #[error("wires.{0}: {1}")]
+    BadWire(String, String),
+    /// A `sb.flow.yaml` that [`probe_legacy_flow_shape`] took for the 0.7
+    /// shape but that does not parse as one. Carries the parse error.
+    #[error("sb.flow.yaml in the 0.7 shape does not parse: {0}")]
+    LegacyFlowShape(String),
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Wires — `wires:` in the flow
+// Wires — `wires:` in a flow
 // ─────────────────────────────────────────────────────────────────────
 
-/// One `wires:` entry: a subscriber entry and the publisher entry it
-/// reads from.
+/// One `wires:` entry: a publisher entry and every subscriber entry it
+/// feeds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wire {
-    pub sub: WireEnd,
-    pub pub_: WireSource,
+    pub source: WireSource,
+    /// One or more; never empty in a parsed wire.
+    pub sinks: Vec<WireEnd>,
 }
 
-/// The subscriber side, `<module>.<entry>`.
+/// A subscriber side, `<module>.<entry>`. Takes no selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireEnd {
     pub module: String,
@@ -2215,7 +2708,8 @@ pub struct WireEnd {
 pub enum WireSelector {
     /// No brackets: the publisher is a singleton.
     None,
-    /// `[{id}]`: the instance with the subscriber instance's own id.
+    /// `[{id}]`: each subscriber instance reads the publisher instance
+    /// with its own id.
     SameId,
     /// `[*]`: every instance.
     All,
@@ -2232,29 +2726,73 @@ pub struct WireSource {
     pub entry: String,
 }
 
-/// Parse one wire: `lhs` is `<module>.<entry>`, `rhs` is
-/// `<module>[<selector>].<entry>` or `<module>.<entry>`.
+/// The bracketed spelling, empty for [`WireSelector::None`].
+impl std::fmt::Display for WireSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => Ok(()),
+            Self::SameId => f.write_str("[{id}]"),
+            Self::All => f.write_str("[*]"),
+            Self::Id(id) => write!(f, "[{id}]"),
+        }
+    }
+}
+
+/// `<module>[<selector>].<entry>`, the wire's key on disk.
+impl std::fmt::Display for WireSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}.{}", self.module, self.selector, self.entry)
+    }
+}
+
+/// `<module>.<entry>`.
+impl std::fmt::Display for WireEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.module, self.entry)
+    }
+}
+
+/// Parse one wire: `lhs` is the publisher, `<module>[<selector>].<entry>`
+/// or `<module>.<entry>`; `rhs` is one or more subscribers, each
+/// `<module>.<entry>`.
 ///
 /// Each side splits on its first `.`. Modules and entries must pass
 /// [`validate_identifier`]; the selector is `{id}`, `*`, or an id passing
-/// [`validate_instance_id`]. Errors are [`FlowValidationError::BadWire`].
-pub fn parse_wire(lhs: &str, rhs: &str) -> Result<Wire, FlowValidationError> {
+/// [`validate_instance_id`], and only the publisher may carry one.
+/// Errors are [`FlowValidationError::BadWire`].
+pub fn parse_wire(lhs: &str, rhs: &[String]) -> Result<Wire, FlowValidationError> {
     parse_wire_parts(lhs, rhs)
         .map_err(|reason| FlowValidationError::BadWire(lhs.to_owned(), reason))
 }
 
-fn parse_wire_parts(lhs: &str, rhs: &str) -> Result<Wire, String> {
-    Ok(Wire {
-        sub: parse_wire_end(lhs)?,
-        pub_: parse_wire_source(rhs)?,
-    })
+fn parse_wire_parts(lhs: &str, rhs: &[String]) -> Result<Wire, String> {
+    let source = parse_wire_source(lhs)?;
+    if rhs.is_empty() {
+        return Err("no subscriber on the right side".to_owned());
+    }
+    let sinks = rhs
+        .iter()
+        .map(|sink| parse_wire_sink(sink))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Wire { source, sinks })
 }
 
-/// The subscriber side, `<module>.<entry>`.
-fn parse_wire_end(lhs: &str) -> Result<WireEnd, String> {
-    let (module, entry) = lhs
+/// A subscriber side; a selector there is the classic mistake of the
+/// 0.7 direction, so it gets its own message.
+fn parse_wire_sink(sink: &str) -> Result<WireEnd, String> {
+    if sink.contains(['[', ']']) {
+        return Err(format!(
+            "subscriber {sink:?} takes no selector; selectors go on the publisher (left) side"
+        ));
+    }
+    parse_wire_end(sink)
+}
+
+/// A subscriber side, `<module>.<entry>`.
+fn parse_wire_end(sink: &str) -> Result<WireEnd, String> {
+    let (module, entry) = sink
         .split_once('.')
-        .ok_or_else(|| format!("subscriber {lhs:?} is not <module>.<entry>"))?;
+        .ok_or_else(|| format!("subscriber {sink:?} is not <module>.<entry>"))?;
     check_wire_ident("subscriber module", module)?;
     check_wire_ident("subscriber entry", entry)?;
     Ok(WireEnd {
@@ -2264,14 +2802,14 @@ fn parse_wire_end(lhs: &str) -> Result<WireEnd, String> {
 }
 
 /// The publisher side, `<module>[<selector>].<entry>` or `<module>.<entry>`.
-fn parse_wire_source(rhs: &str) -> Result<WireSource, String> {
-    let (head, entry) = rhs.split_once('.').ok_or_else(|| {
-        format!("publisher {rhs:?} is not <module>.<entry> or <module>[<selector>].<entry>")
+fn parse_wire_source(source: &str) -> Result<WireSource, String> {
+    let (head, entry) = source.split_once('.').ok_or_else(|| {
+        format!("publisher {source:?} is not <module>.<entry> or <module>[<selector>].<entry>")
     })?;
     let (module, selector) = if let Some((module, rest)) = head.split_once('[') {
         let sel = rest
             .strip_suffix(']')
-            .ok_or_else(|| format!("publisher {rhs:?} has no ']' closing the selector"))?;
+            .ok_or_else(|| format!("publisher {source:?} has no ']' closing the selector"))?;
         (module, parse_wire_selector(sel)?)
     } else {
         (head, WireSelector::None)
@@ -2297,6 +2835,384 @@ fn parse_wire_selector(sel: &str) -> Result<WireSelector, String> {
 
 fn check_wire_ident(what: &str, s: &str) -> Result<(), String> {
     validate_identifier(s).map_err(|e| format!("{what} {s:?} is invalid: {e}"))
+}
+
+fn wires_from_map<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Wire>, D::Error> {
+    d.deserialize_any(WiresVisitor)
+}
+
+/// `wires:` as a map from publisher to subscribers, or nothing.
+struct WiresVisitor;
+
+impl<'de> serde::de::Visitor<'de> for WiresVisitor {
+    type Value = Vec<Wire>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "a map from <module>[<selector>].<entry> to one <module>.<entry> or a list of them",
+        )
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Vec<Wire>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Vec<Wire>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Vec<Wire>, A::Error> {
+        let mut out = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(lhs) = map.next_key::<String>()? {
+            if !seen.insert(lhs.clone()) {
+                return Err(duplicate_key(&lhs));
+            }
+            out.push(map.next_value_seed(WireSeed { lhs })?);
+        }
+        Ok(out)
+    }
+}
+
+/// One `wires:` value, parsed against its key inside the value so an
+/// error reads `wires.<lhs>: <reason>`.
+struct WireSeed {
+    lhs: String,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for WireSeed {
+    type Value = Wire;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Wire, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for WireSeed {
+    type Value = Wire;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a subscriber <module>.<entry>, or a list of them")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Wire, E> {
+        parse_wire_parts(&self.lhs, &[s.to_owned()]).map_err(E::custom)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Wire, A::Error> {
+        let mut rhs = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(sink) = seq.next_element::<String>()? {
+            rhs.push(sink);
+        }
+        parse_wire_parts(&self.lhs, &rhs).map_err(serde::de::Error::custom)
+    }
+}
+
+fn wires_to_map<S: serde::Serializer>(wires: &[Wire], s: S) -> Result<S::Ok, S::Error> {
+    let mut map = s.serialize_map(Some(wires.len()))?;
+    for wire in wires {
+        map.serialize_entry(&wire.source.to_string(), &WireSinks(&wire.sinks))?;
+    }
+    map.end()
+}
+
+/// A wire's right side on disk: one subscriber as a string, several as a
+/// list.
+struct WireSinks<'a>(&'a [WireEnd]);
+
+impl Serialize for WireSinks<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if let [one] = self.0 {
+            s.collect_str(one)
+        } else {
+            s.collect_seq(self.0.iter().map(ToString::to_string))
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// The 0.7 `sb.flow.yaml`, read for 0.8.0 only
+// ─────────────────────────────────────────────────────────────────────
+
+/// Keys only the 0.7 flow shape had at the top level.
+const LEGACY_FLOW_KEYS: [&str; 3] = ["modules", "messages", "source"];
+
+/// Whether `yaml` is a flow in the 0.7 shape: a mapping with no `nodes:`
+/// key and at least one key only that shape had (`modules:`, `messages:`,
+/// `source:`). Text that is not a YAML mapping gives `false`; the strict
+/// [`Flow`] parse then reports what is wrong with it. Pure; no IO.
+pub fn probe_legacy_flow_shape(yaml: &str) -> bool {
+    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(yaml)
+    else {
+        return false;
+    };
+    !map.contains_key("nodes") && LEGACY_FLOW_KEYS.iter().any(|key| map.contains_key(*key))
+}
+
+/// The deprecation a caller pushes when it reads a flow through
+/// [`convert_legacy_flow`].
+pub fn legacy_flow_deprecation() -> Deprecation {
+    Deprecation::new(
+        "sb.flow.yaml in the 0.7 shape",
+        "split it into sb.workspace.yaml and sb.flow.yaml; see sbcli_workspace.md §Migrating",
+    )
+}
+
+/// Convert a 0.7-shape `sb.flow.yaml` into the workspace and the default
+/// flow it stands for. Pure; both results are validated before they are
+/// returned.
+///
+/// - `name:`, `modules:` (paths only), `messages:`, and `source:` go to
+///   the [`Workspace`]; `source.repo_flow` becomes `repo_workspace`.
+/// - The nodes are the modules without `up: false`, in name order.
+/// - Inline instances become `instances`; an instance's `label`, `args`,
+///   and `env` become its `instance_settings`; `docker:` is dropped.
+/// - `wires:` flip from `<sub>: <pub>` to publisher-first, and the
+///   subscribers of one publisher spelling are grouped into one wire. A
+///   wire end on an `up: false` module is dropped, since that module is
+///   not a node.
+pub fn convert_legacy_flow(yaml: &str) -> Result<(Workspace, Flow), FlowValidationError> {
+    let legacy: LegacyFlow = serde_yaml::from_str(yaml)
+        .map_err(|e| FlowValidationError::LegacyFlowShape(e.to_string()))?;
+    let skipped: BTreeSet<&str> = legacy
+        .modules
+        .iter()
+        .filter(|(_, m)| !m.up)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut flow = Flow::default();
+    for (name, module) in legacy.modules.iter().filter(|(_, m)| m.up) {
+        flow.nodes.push(name.clone());
+        if module.instances.is_empty() {
+            continue;
+        }
+        let ids = module.instances.iter().map(|i| i.id.clone()).collect();
+        flow.instances.insert(name.clone(), ids);
+        let settings: BTreeMap<String, InstanceSettings> = module
+            .instances
+            .iter()
+            .filter(|i| !i.settings.is_empty())
+            .map(|i| (i.id.clone(), i.settings.clone()))
+            .collect();
+        if !settings.is_empty() {
+            flow.instance_settings.insert(name.clone(), settings);
+        }
+    }
+    flow.wires = flip_legacy_wires(&legacy.wires, &skipped)?;
+    let workspace = Workspace {
+        name: legacy.name,
+        sb: None,
+        modules: legacy
+            .modules
+            .into_iter()
+            .map(|(name, m)| (name, m.path))
+            .collect(),
+        messages: legacy.messages,
+        source: legacy.source.map(|s| WorkspaceSource {
+            repo_workspace: s.repo_flow,
+            url: s.url,
+            installed_at: s.installed_at,
+        }),
+    };
+    workspace.validate()?;
+    flow.validate()?;
+    Ok((workspace, flow))
+}
+
+/// The 0.7 `<sub>: <pub>` wires, publisher-first and grouped by publisher
+/// spelling. Ends on a module in `skipped` (`up: false`) are dropped.
+fn flip_legacy_wires(
+    wires: &BTreeMap<String, String>,
+    skipped: &BTreeSet<&str>,
+) -> Result<Vec<Wire>, FlowValidationError> {
+    let mut by_source: BTreeMap<String, Wire> = BTreeMap::new();
+    for (lhs, rhs) in wires {
+        let bad = |reason: String| FlowValidationError::BadWire(lhs.clone(), reason);
+        let sink = parse_wire_end(lhs).map_err(bad)?;
+        let source = parse_wire_source(rhs).map_err(bad)?;
+        if skipped.contains(sink.module.as_str()) || skipped.contains(source.module.as_str()) {
+            continue;
+        }
+        by_source
+            .entry(source.to_string())
+            .or_insert_with(|| Wire {
+                source,
+                sinks: Vec::new(),
+            })
+            .sinks
+            .push(sink);
+    }
+    Ok(by_source.into_values().collect())
+}
+
+/// The 0.7 `sb.flow.yaml`, read only by [`convert_legacy_flow`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyFlow {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    modules: BTreeMap<String, LegacyModule>,
+    #[serde(default, deserialize_with = "messages_from_map_or_list")]
+    messages: Vec<MessageSource>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    wires: BTreeMap<String, String>,
+    #[serde(default)]
+    source: Option<LegacySource>,
+}
+
+/// The 0.7 `source:` of an installed copy.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySource {
+    repo_flow: PathBuf,
+    #[serde(default)]
+    url: Option<String>,
+    installed_at: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One 0.7 `modules:` value: a bare path (`up: true`, no instances), or
+/// a map with `path:` and optional `up:` and `instances:`.
+struct LegacyModule {
+    path: PathBuf,
+    up: bool,
+    instances: Vec<LegacyInstance>,
+}
+
+/// The map spelling of a [`LegacyModule`], parsed strictly so a typo'd
+/// key is reported by name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyModuleMap {
+    path: PathBuf,
+    #[serde(default = "default_true")]
+    up: bool,
+    #[serde(default)]
+    instances: Vec<LegacyInstance>,
+}
+
+// Hand-written rather than an untagged enum, which would report every
+// mismatch as "data did not match any variant" and hide an `upp:` typo.
+impl<'de> Deserialize<'de> for LegacyModule {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct LegacyModuleVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LegacyModuleVisitor {
+            type Value = LegacyModule;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a module path, or a map with `path:` and optional `up:`, `instances:`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<LegacyModule, E> {
+                Ok(LegacyModule {
+                    path: PathBuf::from(s),
+                    up: true,
+                    instances: Vec::new(),
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<LegacyModule, A::Error> {
+                let m = LegacyModuleMap::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(LegacyModule {
+                    path: m.path,
+                    up: m.up,
+                    instances: m.instances,
+                })
+            }
+        }
+
+        d.deserialize_any(LegacyModuleVisitor)
+    }
+}
+
+/// One 0.7 inline instance: a bare id (`left`, or a number such as `1`),
+/// or a map with `id:` and optional `label:`, `args:`, `env:`, `docker:`.
+struct LegacyInstance {
+    id: String,
+    settings: InstanceSettings,
+}
+
+/// The map spelling of a [`LegacyInstance`]. `docker:` is accepted in
+/// any shape and dropped.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyInstanceMap {
+    id: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default, deserialize_with = "argv_from_str_or_list")]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default, rename = "docker")]
+    _docker: Option<serde::de::IgnoredAny>,
+}
+
+impl<'de> Deserialize<'de> for LegacyInstance {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct LegacyInstanceVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LegacyInstanceVisitor {
+            type Value = LegacyInstance;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "an instance id, or a map with `id:` and optional `label:`, `args:`, \
+                     `env:`, `docker:`",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<LegacyInstance, E> {
+                Ok(LegacyInstance {
+                    id: s.to_owned(),
+                    settings: InstanceSettings::default(),
+                })
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<LegacyInstance, E> {
+                Ok(LegacyInstance {
+                    id: n.to_string(),
+                    settings: InstanceSettings::default(),
+                })
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<LegacyInstance, E> {
+                Ok(LegacyInstance {
+                    id: n.to_string(),
+                    settings: InstanceSettings::default(),
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<LegacyInstance, A::Error> {
+                let m = LegacyInstanceMap::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(LegacyInstance {
+                    id: m.id,
+                    settings: InstanceSettings {
+                        label: m.label,
+                        args: m.args,
+                        env: m.env,
+                    },
+                })
+            }
+        }
+
+        d.deserialize_any(LegacyInstanceVisitor)
+    }
 }
 
 #[cfg(test)]
@@ -2409,60 +3325,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn workspace_flow_without_instances_key_still_parses() {
-        // Pre-instances flow shape — must continue to parse so existing
-        // user workspaces keep working when sb is upgraded.
-        let y = "modules:\n  camera: /home/u/projects/camera/sb.module.yaml\n";
-        assert_eq!(probe_legacy_flow_keys(y), None);
-        let f: WorkspaceFlow = serde_yaml::from_str(y).unwrap();
-        assert_eq!(f.modules.len(), 1);
-        assert!(f.instances_for("camera").is_empty());
-        assert!(f.validate().is_ok());
-    }
-
-    #[test]
-    fn workspace_flow_validate_rejects_bad_instance_id() {
-        for bad in ["", "a b", "a/b", "a.b"] {
-            let cam = ModuleRef {
-                instances: vec![ModuleInstance::new(bad)],
-                ..ModuleRef::new("apps/cam")
-            };
-            let f = WorkspaceFlow {
-                modules: BTreeMap::from([("cam".to_owned(), cam)]),
-                ..Default::default()
-            };
-            assert!(
-                matches!(f.validate(), Err(FlowValidationError::BadInstanceId { .. })),
-                "{bad:?} should fail validation",
-            );
-        }
-    }
-
-    #[test]
-    fn workspace_flow_validate_rejects_duplicate_instance_id() {
-        let left = ModuleInstance::new("left");
-        let cam = ModuleRef {
-            instances: vec![left.clone(), left],
-            ..ModuleRef::new("apps/cam")
-        };
-        let f = WorkspaceFlow {
-            modules: BTreeMap::from([("cam".to_owned(), cam)]),
-            ..Default::default()
-        };
-        assert!(matches!(
-            f.validate(),
-            Err(FlowValidationError::DuplicateInstanceId { .. })
-        ));
-        // The pre-0.6.0 top-level form is refused with the migration hint
-        // by the probe; the strict parse alone rejects it as unknown.
-        let y = "modules:\n  cam: apps/cam\ninstances:\n  cam: [left]\n";
-        let e = probe_legacy_flow_keys(y).unwrap();
-        assert_eq!(e, FlowValidationError::LegacyTopLevelInstances);
-        assert!(e.to_string().contains("no longer read since 0.7.0"), "{e}");
-        assert!(serde_yaml::from_str::<WorkspaceFlow>(y).is_err());
-    }
-
     // ── encoding: / type: / mime: rules ───────────────────────────────
 
     #[test]
@@ -2565,57 +3427,61 @@ mod tests {
         );
     }
 
-    // ── flow.yaml modules: / messages: / source: ──────────────────────
+    // ── the 0.7 sb.flow.yaml ──────────────────────────────────────────
 
     #[test]
-    fn module_ref_string_and_map_forms() {
-        let y = "modules:\n  a: apps/a\n  b:\n    path: apps/b\n    up: false\n  \
-                 c:\n    path: apps/c\n  d:\n    path: apps/d\n    \
-                 instances: [left, 2, { id: right, args: [--debug], env: { K: v } }]\n";
-        let f: WorkspaceFlow = serde_yaml::from_str(y).unwrap();
-        f.validate().unwrap();
-        assert_eq!(f.modules["a"], ModuleRef::new("apps/a"));
-        assert_eq!(
-            f.modules["b"],
-            ModuleRef {
-                up: false,
-                ..ModuleRef::new("apps/b")
-            }
+    fn legacy_flow_splits_into_workspace_and_flow() {
+        let y = concat!(
+            "name: ws_ips\n",
+            "modules:\n",
+            "  a: apps/a\n",
+            "  b:\n",
+            "    path: apps/b\n",
+            "    up: false\n",
+            "  c:\n",
+            "    path: apps/c\n",
+            "  d:\n",
+            "    path: apps/d\n",
+            "    instances: [left, 2, { id: right, args: [--debug], env: { K: v }, ",
+            "docker: { image: cam } }]\n",
+            "messages:\n",
+            "- style: acme\n",
+            "  path: msgs/custom\n",
+            "wires:\n",
+            "  a.markers: d[*].markers\n",
+            "  c.markers: d[*].markers\n",
+            "  b.markers: d[left].markers\n",
         );
-        // Map form without `up:` means up: true and re-emits as a string.
-        assert_eq!(f.modules["c"], ModuleRef::new("apps/c"));
-        // Inline instances: bare id, numeric id, and the map form.
-        let ids: Vec<&str> = f.instances_for("d").iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, ["left", "2", "right"]);
-        assert_eq!(f.instances_for("d")[2].args, ["--debug"]);
-        assert_eq!(f.instances_for("d")[2].env["K"], "v");
-        assert!(f.instances_for("a").is_empty());
-        let out = serde_yaml::to_string(&f).unwrap();
-        assert!(out.contains("a: apps/a\n"), "{out}");
-        assert!(out.contains("c: apps/c\n"), "{out}");
-        assert!(out.contains("path: apps/b"), "{out}");
-        assert!(out.contains("up: false"), "{out}");
-        assert!(out.contains("path: apps/d"), "{out}");
-        assert!(out.contains("- left\n"), "{out}");
-        assert_eq!(out.matches("up:").count(), 1, "{out}");
-        yaml_fixed_point(&f);
-        assert_eq!(
-            f.module_paths(),
-            BTreeMap::from([
-                ("a".to_owned(), PathBuf::from("apps/a")),
-                ("b".to_owned(), PathBuf::from("apps/b")),
-                ("c".to_owned(), PathBuf::from("apps/c")),
-                ("d".to_owned(), PathBuf::from("apps/d")),
-            ])
-        );
-        assert_eq!(
-            ModuleRef::from(ModuleRefRaw::Full {
-                path: "x".into(),
-                up: true,
-                instances: vec![],
-            }),
-            ModuleRef::new("x")
-        );
+        assert!(probe_legacy_flow_shape(y));
+        assert!(!probe_legacy_flow_shape("nodes: [a]\n"));
+        let (ws, flow) = convert_legacy_flow(y).unwrap();
+        assert_eq!(ws.name.as_deref(), Some("ws_ips"));
+        assert_eq!(ws.modules.len(), 4);
+        assert_eq!(ws.modules["b"], PathBuf::from("apps/b"));
+        assert_eq!(ws.messages[0].label, "custom");
+        // `up: false` is not a node; inline instances split into ids and
+        // settings, and `docker:` is dropped.
+        assert_eq!(flow.nodes, ["a", "c", "d"]);
+        assert_eq!(flow.instances_for("d"), ["left", "2", "right"]);
+        let right = flow.settings_for("d", "right").unwrap();
+        assert_eq!(right.args, ["--debug"]);
+        assert_eq!(right.env["K"], "v");
+        assert!(flow.settings_for("d", "left").is_none());
+        // Wires flip publisher-first and group by publisher; the wire into
+        // the `up: false` module goes with it.
+        assert_eq!(flow.wires.len(), 1);
+        assert_eq!(flow.wires[0].source.to_string(), "d[*].markers");
+        let sinks: Vec<String> = flow.wires[0]
+            .sinks
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(sinks, ["a.markers", "c.markers"]);
+        // A typo'd key is still reported by name.
+        let e = convert_legacy_flow("modules:\n  a:\n    path: a\n    upp: no\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown field `upp`"), "{e}");
     }
 
     // ── sb.module.yaml launch keys ────────────────────────────────────
@@ -2723,16 +3589,8 @@ mod tests {
     }
 
     #[test]
-    fn module_ref_rejects_unknown_keys_by_name() {
-        let e = serde_yaml::from_str::<WorkspaceFlow>("modules:\n  a:\n    path: a\n    upp: no\n")
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("unknown field `upp`"), "{e}");
-    }
-
-    #[test]
-    fn flow_validate_rejects_bad_name_style_and_backend() {
-        let bad_name = WorkspaceFlow {
+    fn workspace_validate_rejects_bad_name_style_and_backend() {
+        let bad_name = Workspace {
             name: Some("my-ws".into()),
             ..Default::default()
         };
@@ -2740,8 +3598,17 @@ mod tests {
             bad_name.validate(),
             Err(FlowValidationError::BadName { .. })
         ));
-        let bad_style = WorkspaceFlow {
+        let bad_module = Workspace {
+            modules: BTreeMap::from([("my-cam".to_owned(), PathBuf::from("cam"))]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            bad_module.validate(),
+            Err(FlowValidationError::BadModuleName { .. })
+        ));
+        let bad_style = Workspace {
             messages: vec![MessageSource {
+                label: "x".into(),
                 style: "../x".into(),
                 path: "m".into(),
                 backends: vec![],
@@ -2752,8 +3619,9 @@ mod tests {
             bad_style.validate(),
             Err(FlowValidationError::BadMessageStyle { index: 0, .. })
         ));
-        let bad_backend = WorkspaceFlow {
+        let bad_backend = Workspace {
             messages: vec![MessageSource {
+                label: "m".into(),
                 style: "acme".into(),
                 path: "m".into(),
                 backends: vec!["proto".into(), "capnp".into()],
@@ -2762,5 +3630,175 @@ mod tests {
         };
         let e = bad_backend.validate().unwrap_err();
         assert!(e.to_string().contains("\"capnp\""), "{e}");
+    }
+
+    // ── 0.8 ports map form ────────────────────────────────────────────
+
+    #[test]
+    fn ports_map_and_list_forms_write_the_same_map() {
+        let map_form = concat!(
+            "module: ips_detect\n",
+            "language: rust\n",
+            "publishers:\n",
+            "  markers:\n",
+            "    type: ros2/custom/MarkerDetections\n",
+            "    transport: zenoh\n",
+            "  status:\n",
+            "    topic: health\n",
+            "    type: ros2/std/StringStamped\n",
+            "    transport: zenoh\n",
+            "subscribers:\n",
+            "  image:\n",
+            "    name: image\n",
+            "    type: ros2/sensor_msgs/Image1280x1024\n",
+            "    transport: iceoryx2\n",
+            "  commands:\n",
+            "    key: dev01/ops/console/zenoh/cmd\n",
+            "    type: ros2/std/StringStamped\n",
+            "    transport: zenoh\n",
+            "services:\n",
+            "  cam_param:\n",
+            "  reset: {}\n",
+        );
+        let list_form = concat!(
+            "module: ips_detect\n",
+            "language: rust\n",
+            "publishers:\n",
+            "- name: markers\n",
+            "  type: ros2/custom/MarkerDetections\n",
+            "  transport: zenoh\n",
+            "- name: status\n",
+            "  topic: health\n",
+            "  type: ros2/std/StringStamped\n",
+            "  transport: zenoh\n",
+            "subscribers:\n",
+            "- name: image\n",
+            "  type: ros2/sensor_msgs/Image1280x1024\n",
+            "  transport: iceoryx2\n",
+            "- name: commands\n",
+            "  key: dev01/ops/console/zenoh/cmd\n",
+            "  type: ros2/std/StringStamped\n",
+            "  transport: zenoh\n",
+            "services:\n",
+            "- name: cam_param\n",
+            "- reset\n",
+        );
+        let from_map: ModuleDevConfig = serde_yaml::from_str(map_form).unwrap();
+        let from_list: ModuleDevConfig = serde_yaml::from_str(list_form).unwrap();
+        assert_eq!(from_map, from_list);
+        let text = serde_yaml::to_string(&from_map).unwrap();
+        assert_eq!(text, serde_yaml::to_string(&from_list).unwrap());
+        // The map form, in file order (not sorted), with no `name:`;
+        // services as a list of names.
+        assert!(
+            text.contains("publishers:\n  markers:\n    topic: markers\n"),
+            "{text}"
+        );
+        assert!(text.find("  image:") < text.find("  commands:"), "{text}");
+        assert!(!text.contains("name:"), "{text}");
+        assert!(text.contains("- cam_param\n"), "{text}");
+        assert!(text.contains("- reset\n"), "{text}");
+        yaml_fixed_point(&from_map);
+        // In the map form an inner `name:` must equal the key, and errors
+        // name the entry by its key.
+        let e = load_err(
+            "publishers:\n  markers:\n    name: other\n    type: a/b/C\n    transport: zenoh\n",
+        );
+        assert!(
+            e.contains("publishers.markers: name other does not match the key"),
+            "{e}"
+        );
+    }
+
+    // ── 0.8 flows ─────────────────────────────────────────────────────
+
+    /// `flow` with `edit` applied, which must fail validation; the error.
+    fn flow_fails(flow: &Flow, edit: impl FnOnce(&mut Flow)) -> String {
+        let mut broken = flow.clone();
+        edit(&mut broken);
+        broken.validate().unwrap_err().to_string()
+    }
+
+    #[test]
+    fn flow_validate_rules() {
+        let y = concat!(
+            "nodes: [cam, detect, track]\n",
+            "instances:\n",
+            "  cam: [sb00, sb01]\n",
+            "  detect: [sb00, 1]\n",
+            "instance_settings:\n",
+            "  detect:\n",
+            "    sb00:\n",
+            "      label: East wall\n",
+            "      args: --debug --fps 30\n",
+            "      env:\n",
+            "        RUST_LOG: debug\n",
+            "wires:\n",
+            "  cam[{id}].image: detect.image\n",
+            "  detect[*].markers: [track.markers]\n",
+            "  cam[sb01].status: [track.status, detect.status]\n",
+        );
+        let flow: Flow = serde_yaml::from_str(y).unwrap();
+        flow.validate().unwrap();
+        assert_eq!(flow.instances_for("detect"), ["sb00", "1"]);
+        assert!(flow.instances_for("track").is_empty());
+        let detect = flow.resolved_instances("detect");
+        assert_eq!(detect[0].args, ["--debug", "--fps", "30"]);
+        assert_eq!(detect[0].label.as_deref(), Some("East wall"));
+        assert_eq!(detect[1], ModuleInstance::new("1"));
+        assert_eq!(flow.wires[0].source.selector, WireSelector::SameId);
+        assert_eq!(flow.wires[2].sinks.len(), 2);
+        yaml_fixed_point(&flow);
+
+        // One broken rule at a time.
+        assert_eq!(
+            flow_fails(&flow, |f| f.nodes.push("cam".into())),
+            "nodes: cam is listed more than once"
+        );
+        let e = flow_fails(&flow, |f| f.nodes.push("my-node".into()));
+        assert!(e.starts_with("module name \"my-node\" is invalid"), "{e}");
+        assert_eq!(
+            flow_fails(&flow, |f| {
+                f.instances.insert("viz".into(), vec!["a".into()]);
+            }),
+            "instances: unknown node viz"
+        );
+        let e = flow_fails(&flow, |f| {
+            f.instances.get_mut("cam").unwrap().push("a b".into());
+        });
+        assert!(e.contains("instance id \"a b\" is invalid"), "{e}");
+        let e = flow_fails(&flow, |f| {
+            f.instances.get_mut("cam").unwrap().push("sb00".into());
+        });
+        assert!(
+            e.contains("declares instance id \"sb00\" more than once"),
+            "{e}"
+        );
+        assert_eq!(
+            flow_fails(&flow, |f| {
+                let detect = f.instance_settings.get_mut("detect").unwrap();
+                detect.insert("sb09".into(), InstanceSettings::default());
+            }),
+            "instance_settings.detect: sb09 is not an instance of detect"
+        );
+        assert_eq!(
+            flow_fails(&flow, |f| f.nodes.retain(|n| n != "track")),
+            "wires.detect[*].markers: unknown node track"
+        );
+        assert_eq!(
+            flow_fails(&flow, |f| {
+                f.instances.remove("detect");
+                f.instance_settings.clear();
+            }),
+            "wires.cam[{id}].image: {id} but detect has no instances"
+        );
+        // Selectors go on the publisher side only; caught at load.
+        let e = serde_yaml::from_str::<Flow>("nodes: [a, b]\nwires:\n  a.x: b[*].y\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("wires.a.x: subscriber \"b[*].y\" takes no selector"),
+            "{e}"
+        );
     }
 }

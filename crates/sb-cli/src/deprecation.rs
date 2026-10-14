@@ -11,21 +11,19 @@
 //! finds the same deprecated input in six modules prints one line, not six.
 //! stdout is never written: scripted callers parse it.
 //!
-//! Nothing is deprecated in 0.7.0: the surface 0.6.0 deprecated (the four
-//! pre-`sb io` verbs, the legacy file names, run and stop scripts,
-//! top-level `instances:`) was removed in 0.7.0. The helpers stay so the
-//! next deprecation reuses them.
+//! 0.8.0 deprecates one item: a repository `sb.flow.yaml` in the 0.7 shape
+//! (modules and wiring in one file), which `sb install` still reads,
+//! converted into `sb.workspace.yaml` plus the default flow.
+//! 0.8.1 removes it. (The surface 0.6.0 deprecated was removed in 0.7.0;
+//! `sb init --docker` was removed in 0.8.0 without a deprecation period.)
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-// Placeholders: no deprecated item uses SINCE / UNTIL in 0.7.0. Set both
-// when the next deprecation lands.
-
 /// The release that started warning.
-pub const SINCE: &str = "0.7.0";
+pub const SINCE: &str = "0.8.0";
 /// The release that removes the deprecated surface.
-pub const UNTIL: &str = "0.8.0";
+pub const UNTIL: &str = "0.8.1";
 
 /// Items this process has already announced.
 static ANNOUNCED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();

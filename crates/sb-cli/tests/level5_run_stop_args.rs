@@ -9,7 +9,7 @@
 //! asserts the args round-tripped intact.
 
 mod common;
-use common::l5_sandbox::{wait_for_file, yaml_path};
+use common::l5_sandbox::wait_for_file;
 use common::{L5Sandbox, list_windows, tmux_launch_supported};
 
 #[test]
@@ -34,10 +34,7 @@ fn level5_run_forwards_args_to_start() {
         sentinel.display()
     );
     let alpha = sb.native("alpha", &manifest);
-    sb.write_installed_flow(&format!(
-        "modules:\n  alpha: {}\n",
-        yaml_path(&alpha.manifest())
-    ));
+    sb.write_installed(&[&alpha], "nodes: [alpha]\n");
 
     let out = sb
         .cmd()
@@ -93,10 +90,7 @@ fn level5_stop_passes_args_to_scripts_stop() {
         sentinel.display()
     );
     let alpha = sb.native("alpha", &manifest);
-    sb.write_installed_flow(&format!(
-        "modules:\n  alpha: {}\n",
-        yaml_path(&alpha.manifest())
-    ));
+    sb.write_installed(&[&alpha], "nodes: [alpha]\n");
 
     // Start the module, then stop it with a passthrough arg.
     let out = sb.cmd().args(["run", "alpha"]).output().unwrap();

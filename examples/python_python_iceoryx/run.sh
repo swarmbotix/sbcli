@@ -36,7 +36,9 @@ export SB_CONFIG="$SB_HOME/sb.config.yml"
 PUBBER="$EXAMPLE_DIR/pubber"
 SUBBER="$EXAMPLE_DIR/subber"
 
-# `sb ws create` writes ./sb.flow.yaml; keep it in the scratch home, not here.
+# `sb ws create` writes ./sb.workspace.yaml and ./sb.flow.yaml; keep them in
+# the scratch home, not here. This example runs both ends itself, so no
+# flow lists them as nodes.
 mkdir -p "$SB_HOME/ws"
 ( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo

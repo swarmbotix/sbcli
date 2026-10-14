@@ -154,7 +154,7 @@ source that names one wins, and the JSON line reports which in
    - Bare topic: the cwd module's entry the name resolved to.
    - Fully-qualified `<device>/<workspace>/<module>/<zenoh|iox2>/<topic>`
      (a leading `/` is accepted and dropped, sb 0.5.0+):
-     `<module>` is looked up in the active workspace's `sb.flow.yaml`, first as
+     `<module>` is looked up in the active workspace's installed `sb.workspace.yaml`, first as
      written, then without its instance suffix (`ips_track-sb00` is found
      as `ips_track`). In that module's `sb.module.yaml`, publishers are searched
      before subscribers for an entry whose transport is the path's and
@@ -713,15 +713,23 @@ compile (§5.1.1), so the full set is safe there.
 
 ---
 
-### 4.7 Repository messages: `sb.flow.yaml` `messages:` (sb 0.5.0+)
+### 4.7 Repository messages: `sb.workspace.yaml` `messages:` (sb 0.5.0+)
 
 A workspace repository can carry its own message definitions and list
-them in its `sb.flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.1):
+them in its `sb.workspace.yaml` (sb 0.8.0+; the repository
+`sb.flow.yaml` before, [sbcli_workspace.md](sbcli_workspace.md) §2.2),
+keyed by a label:
 
 ```yaml
 messages:
-  - { style: ros2, path: messages/custom, backends: [proto, iox2] }
+  custom:
+    style: ros2
+    path: messages/custom
+    backends: [proto, iox2]
 ```
+
+The label only names the entry. The 0.7 list form, one item per entry
+with no label, is still read.
 
 `sb install` (and `sb ws install`, `sb ws update`) imports each entry
 into the **configured** vault (`messages_root`, never one discovered
@@ -730,7 +738,7 @@ from the current directory) and then compiles it. There is no
 prints one line, for example
 `-- messages: ros2 <- messages/custom: 1 imported, 0 unchanged, 0 conflicts; compiled [proto, iox2]`.
 
-**Import**: `path` (relative to `sb.flow.yaml`) is copied into
+**Import**: `path` (relative to `sb.workspace.yaml`) is copied into
 `<messages_root>/<style>/message_definitions/` (`<defs>` below):
 
 | Source file | Lands at | Vault name |

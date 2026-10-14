@@ -1,10 +1,14 @@
 //! L5: launch modules in a tmux/psmux session.
 //!
-//! `sb up` reads the active workspace's installed flow, loads every module
-//! manifest (`sb.module.yaml`), merges it for the host
+//! `sb up [FLOW]` reads the active workspace's installed inventory
+//! (`sb.workspace.yaml`) and one of its flows (`flows/<flow>.flow.yaml`,
+//! `default` unless named), loads the module manifest (`sb.module.yaml`) of
+//! every node of that flow, merges it for the host
 //! ([`ModuleDevConfig::resolve`]), runs each module's build inline, and then
 //! creates a tmux session named `sb-<workspace>` with one window per
-//! instance: `<module>-<id>`, or `<module>` for a module without instances.
+//! instance: `<module>-<id>`, or `<module>` for a node without instances.
+//! The flow it launched becomes the workspace's active flow, which
+//! `sb run` and `sb stop` read.
 //!
 //! Every module launches natively: sb runs the resolved `start` argv itself,
 //! with tmux `-c <root>`, one `-e` per environment variable, the argv as
@@ -14,9 +18,9 @@
 //! the pre-0.6 `sb.dev.yml` is refused with a rename hint.
 //!
 //! Plan, then execute: the `plan_*` functions check every precondition
-//! (flow, manifests, platform support, placeholder expansion) and
-//! [`run_builds`] runs every build before any tmux call that changes state,
-//! so a failed build never leaves a session behind (TDD #2 in
+//! (workspace, flow, manifests, platform support, placeholder expansion)
+//! and [`run_builds`] runs every build before any tmux call that changes
+//! state, so a failed build never leaves a session behind (TDD #2 in
 //! [level5.html](../../plan/level5.html)).
 //!
 //! tmux targets are exact: sessions as `=<name>`, windows by the `@<id>`
@@ -35,10 +39,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use sb_core::expand::{ExpandCtx, ExpandError, expand_argv, expand_str};
 use sb_core::topic::instance_module;
 use sb_core::{
-    Deprecation, Host, MODULE_FILE, ManifestError, ModuleDevConfig, ModuleInstance, Resolved,
-    WorkspaceFlow, current_manifest_path, python_fallback, python_venv_relpath,
+    DEFAULT_FLOW_NAME, Deprecation, Flow, Host, MODULE_FILE, ManifestError, ModuleDevConfig,
+    ModuleInstance, Resolved, Workspace, current_manifest_path, python_fallback,
+    python_venv_relpath,
 };
-use sb_workspace::{SbHome, find_module_file, read_flow, refuse_removed_module_file};
+use sb_workspace::{
+    SbHome, active_flow, find_module_file, read_flow, read_workspace, refuse_removed_module_file,
+    set_active_flow,
+};
 
 /// One argv, already split (the same type as `sb_core::Argv`).
 type Argv = Vec<String>;
@@ -98,32 +106,41 @@ pub struct BuildStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
     pub workspace: String,
+    /// The flow the plan was read from: the one `sb up` named (else
+    /// `default`), or for `sb run` the workspace's active flow (else
+    /// `default`).
+    pub flow: String,
     pub session: String,
     /// One per module that has build commands, in pane order.
     pub builds: Vec<BuildStep>,
     pub panes: Vec<Pane>,
-    /// `(module, reason)` for modules `sb up` leaves out on this host.
+    /// `(module, reason)` for nodes `sb up` leaves out on this host.
     pub skipped: Vec<(String, String)>,
     /// Deprecated input found while planning, for the CLI to announce.
-    /// Nothing sb-launch reads is deprecated in 0.7.0, so this is empty;
-    /// it stays so the next deprecation reaches the CLI the same way.
+    /// Nothing sb-launch reads is deprecated in 0.8.0 (a 0.7 flow is
+    /// converted at install time), so this is empty; it stays so the next
+    /// deprecation reaches the CLI the same way.
     pub deprecations: Vec<Deprecation>,
     /// Modules whose every instance is in this plan. [`run`] closes their
     /// `<module>` / `<module>-*` windows that the plan no longer names
     /// (instances removed from the flow). Empty for `<module>:<id>` targets.
     pub prune: Vec<String>,
+    /// Where [`up`] records `flow` as the workspace's active flow.
+    home: SbHome,
 }
 
 impl LaunchPlan {
-    fn new(workspace: &str) -> Self {
+    fn new(home: &SbHome, workspace: &str, flow: &str) -> Self {
         Self {
             workspace: workspace.to_string(),
+            flow: flow.to_string(),
             session: session_name(workspace),
             builds: Vec::new(),
             panes: Vec::new(),
             skipped: Vec::new(),
             deprecations: Vec::new(),
             prune: Vec::new(),
+            home: home.clone(),
         }
     }
 }
@@ -137,75 +154,76 @@ pub struct StopPlan {
     pub module: String,
     /// Some: `scripts.stop`, run inline after the windows are closed.
     pub stop: Option<BuildStep>,
-    /// As [`LaunchPlan::deprecations`]: empty in 0.7.0.
+    /// As [`LaunchPlan::deprecations`]: empty in 0.8.0.
     pub deprecations: Vec<Deprecation>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Plan: read the installed flow + every module manifest
+// Plan: read the installed workspace, a flow, and every module manifest
 // ─────────────────────────────────────────────────────────────────────
 
-/// Plan `sb up`: every module with `up: true`, one pane per instance.
+/// Plan `sb up [FLOW]`: every node of flow `flow` (`default` when `None`),
+/// one pane per instance the flow lists for it, one un-suffixed pane for
+/// a node it lists none for.
 ///
-/// Modules the host does not support, modules with no start command
-/// (unity), and modules whose instances ask for docker are listed in
-/// `skipped` instead. Every other problem (missing manifest, parse error,
-/// bad placeholder) is an error here, before tmux is touched.
-pub fn plan_workspace(home: &SbHome, workspace: &str, host: &Host) -> Result<LaunchPlan> {
-    let flow = load_flow(home, workspace)?;
-    if flow.modules.is_empty() {
-        bail!("workspace {workspace:?} has no modules in its flow; run `sb init` to adopt one");
+/// Nodes the host does not support and nodes with no start command
+/// (unity) are listed in `skipped` instead. Every other problem (a flow
+/// that is not installed, a node that is not a module of the workspace,
+/// a missing manifest, a parse error, a bad placeholder) is an error here,
+/// before tmux is touched.
+pub fn plan_up(
+    home: &SbHome,
+    workspace: &str,
+    flow: Option<&str>,
+    host: &Host,
+) -> Result<LaunchPlan> {
+    let flow_name = flow.unwrap_or(DEFAULT_FLOW_NAME);
+    let inventory = load_workspace(home, workspace)?;
+    let flow = read_flow(home, workspace, flow_name)?;
+    if flow.nodes.is_empty() {
+        bail!("flow {flow_name} has no nodes");
     }
-    let mut plan = LaunchPlan::new(workspace);
-    for (key, entry) in flow.modules.iter().filter(|(_, m)| m.up) {
-        let lm = load_module(key, &entry.path)?;
+    let mut plan = LaunchPlan::new(home, workspace, flow_name);
+    for node in &flow.nodes {
+        let entry = registered(&inventory, workspace, flow_name, node)?;
+        let lm = load_module(node, entry)?;
         if !lm.dev.supports_host(host) {
             plan.skipped
-                .push((key.clone(), unsupported_reason(&lm.dev, host)));
+                .push((node.clone(), unsupported_reason(&lm.dev, host)));
             continue;
         }
         let resolved = match lm.dev.resolve(host) {
             Ok(resolved) => resolved,
             Err(ManifestError::NoStart(lang)) => {
                 plan.skipped.push((
-                    key.clone(),
+                    node.clone(),
                     format!("{lang} modules have no start command (launch them from their editor)"),
                 ));
                 continue;
             }
             Err(e) => return Err(resolve_error(&lm, e)),
         };
-        let instances = flow.instances_for(key);
-        if let Some(id) = docker_instance(instances) {
-            plan.skipped.push((key.clone(), docker_reason(id)));
-            continue;
-        }
         let native = Native::new(&lm, resolved, workspace, host)?;
         if let Some(step) = native.build_step()? {
             push_build(&mut plan.builds, step);
         }
+        let instances = flow.resolved_instances(node);
         if instances.is_empty() {
             plan.panes.push(native.pane(None, &[])?);
         } else {
-            for inst in instances {
+            for inst in &instances {
                 plan.panes.push(native.pane(Some(inst), &[])?);
             }
         }
     }
     if plan.panes.is_empty() {
-        if plan.skipped.is_empty() {
-            bail!(
-                "workspace {workspace:?} has no modules to launch: every module in its flow \
-                 has `up: false` (use `sb run <module>` to start one)"
-            );
-        }
         let reasons: Vec<String> = plan
             .skipped
             .iter()
             .map(|(module, reason)| format!("{module}: {reason}"))
             .collect();
         bail!(
-            "workspace {workspace:?} has nothing to launch on {}: {}",
+            "flow {flow_name} has nothing to launch on {}: {}",
             host_label(host),
             reasons.join("; ")
         );
@@ -216,9 +234,10 @@ pub fn plan_workspace(home: &SbHome, workspace: &str, host: &Host) -> Result<Lau
 /// Plan `sb run <target> [args...]`.
 ///
 /// `target` is `<module>` (every instance) or `<module>:<id>` (one
-/// instance). `args` are appended after each instance's own `args`.
-/// `up: false` is ignored here: it only keeps a module out of `sb up`. An
-/// unsupported platform is an error that names the supported ones.
+/// instance). `args` are appended after each instance's own `args`. The
+/// module must be a node of the workspace's active flow (else of
+/// `default`), which also supplies its instances. An unsupported platform
+/// is an error that names the supported ones.
 pub fn plan_run(
     home: &SbHome,
     workspace: &str,
@@ -227,34 +246,35 @@ pub fn plan_run(
     host: &Host,
 ) -> Result<LaunchPlan> {
     let (key, id) = parse_target(target)?;
-    let flow = load_flow(home, workspace)?;
-    let entry = registered(&flow, workspace, key)?;
-    let lm = load_module(key, &entry.path)?;
-    let mut plan = LaunchPlan::new(workspace);
+    let (flow_name, flow) = load_current_flow(home, workspace)?;
+    ensure_node(&flow, &flow_name, key)?;
+    let inventory = load_workspace(home, workspace)?;
+    let entry = registered(&inventory, workspace, &flow_name, key)?;
+    let lm = load_module(key, entry)?;
+    let mut plan = LaunchPlan::new(home, workspace, &flow_name);
     if !lm.dev.supports_host(host) {
         bail!("module {key:?} is {}", unsupported_reason(&lm.dev, host));
     }
     let resolved = lm.dev.resolve(host).map_err(|e| resolve_error(&lm, e))?;
-    let instances = flow.instances_for(key);
+    let instances = flow.resolved_instances(key);
     let chosen: Vec<&ModuleInstance> = match id {
         None => instances.iter().collect(),
         Some(id) => {
             if instances.is_empty() {
-                bail!("module {key:?} has no instances; run it as `sb run {key}`");
+                bail!(
+                    "module {key:?} has no instances in flow {flow_name}; run it as `sb run {key}`"
+                );
             }
             let inst = instances.iter().find(|i| i.id == id).ok_or_else(|| {
                 let ids: Vec<&str> = instances.iter().map(|i| i.id.as_str()).collect();
                 anyhow!(
-                    "module {key:?} has no instance {id:?} (instances: {})",
+                    "module {key:?} has no instance {id:?} in flow {flow_name} (instances: {})",
                     ids.join(", ")
                 )
             })?;
             vec![inst]
         }
     };
-    if let Some(docker) = docker_instance(chosen.iter().copied()) {
-        bail!("module {key:?}: {}", docker_reason(docker));
-    }
     let native = Native::new(&lm, resolved, workspace, host)?;
     if let Some(step) = native.build_step()? {
         plan.builds.push(step);
@@ -274,7 +294,8 @@ pub fn plan_run(
 
 /// Plan `sb stop <module> [args...]`: close every `<module>` /
 /// `<module>-*` window, then run `scripts.stop` (with `args` available as
-/// `{args}`) if the manifest declares one.
+/// `{args}`) if the manifest declares one. Any module of the workspace
+/// can be stopped; no flow is read.
 pub fn plan_stop(
     home: &SbHome,
     workspace: &str,
@@ -288,9 +309,14 @@ pub fn plan_stop(
              drop the :<id> from {module:?}"
         );
     }
-    let flow = load_flow(home, workspace)?;
-    let entry = registered(&flow, workspace, module)?;
-    let lm = load_module(module, &entry.path)?;
+    let inventory = load_workspace(home, workspace)?;
+    let entry = inventory.modules.get(module).ok_or_else(|| {
+        anyhow!(
+            "module {module:?} not registered in workspace {workspace:?}; \
+                 run `sb init` from its root first"
+        )
+    })?;
+    let lm = load_module(module, entry)?;
     let mut plan = StopPlan {
         session: session_name(workspace),
         module: lm.dev.module.clone(),
@@ -308,22 +334,45 @@ pub fn plan_stop(
     Ok(plan)
 }
 
-fn load_flow(home: &SbHome, workspace: &str) -> Result<WorkspaceFlow> {
-    read_flow(home, workspace)
-        .with_context(|| format!("reading the installed flow of workspace {workspace:?}"))
+fn load_workspace(home: &SbHome, workspace: &str) -> Result<Workspace> {
+    read_workspace(home, workspace)
+        .with_context(|| format!("reading the installed workspace {workspace:?}"))
 }
 
-fn registered<'f>(
-    flow: &'f WorkspaceFlow,
+/// The flow `sb run` acts in: the workspace's active flow (the one
+/// `sb up` launched last), else `default`.
+fn load_current_flow(home: &SbHome, workspace: &str) -> Result<(String, Flow)> {
+    let name = active_flow(home, workspace)?.unwrap_or_else(|| DEFAULT_FLOW_NAME.to_string());
+    let flow = read_flow(home, workspace, &name)?;
+    Ok((name, flow))
+}
+
+/// `Err` unless `module` is a node of `flow` (named `flow_name`).
+fn ensure_node(flow: &Flow, flow_name: &str, module: &str) -> Result<()> {
+    if !flow.is_node(module) {
+        bail!("module {module} is not a node of flow {flow_name}");
+    }
+    Ok(())
+}
+
+/// The manifest path the workspace records for node `key` of flow
+/// `flow_name`.
+fn registered<'w>(
+    inventory: &'w Workspace,
     workspace: &str,
+    flow_name: &str,
     key: &str,
-) -> Result<&'f sb_core::ModuleRef> {
-    flow.modules.get(key).ok_or_else(|| {
-        anyhow!(
-            "module {key:?} not registered in workspace {workspace:?}; \
-             run `sb init` from its root first"
-        )
-    })
+) -> Result<&'w Path> {
+    inventory
+        .modules
+        .get(key)
+        .map(PathBuf::as_path)
+        .ok_or_else(|| {
+            anyhow!(
+                "flow {flow_name}: node {key} is not a module of workspace {workspace:?}; \
+                 run `sb init` from its root first"
+            )
+        })
 }
 
 /// `<module>` or `<module>:<id>`.
@@ -337,7 +386,7 @@ fn parse_target(target: &str) -> Result<(&str, Option<&str>)> {
 
 /// A module manifest read from disk.
 struct LoadedModule {
-    /// Key in the flow's `modules:` map.
+    /// The module's name in the workspace (the flow's node name).
     key: String,
     manifest: PathBuf,
     dev: ModuleDevConfig,
@@ -363,8 +412,8 @@ fn load_module(key: &str, entry: &Path) -> Result<LoadedModule> {
     })
 }
 
-/// The manifest a flow entry points at. Installed flows record the file
-/// itself; a directory is probed for `sb.module.yaml`.
+/// The manifest a workspace entry points at. Installed workspaces record
+/// the file itself; a directory is probed for `sb.module.yaml`.
 ///
 /// An install made before 0.7.0 may have recorded `.../sb.dev.yml`. That
 /// entry stands for the `sb.module.yaml` beside it
@@ -393,8 +442,8 @@ fn locate_manifest(key: &str, entry: &Path) -> Result<PathBuf> {
         }
     }
     bail!(
-        "module {key:?}: module manifest not found at {} (registered in the workspace \
-         flow, but the file is missing; did the module directory move? run `sb install` again)",
+        "module {key:?}: module manifest not found at {} (registered in the workspace, \
+         but the file is missing; did the module directory move? run `sb install` again)",
         entry.display()
     )
 }
@@ -424,20 +473,6 @@ fn resolve_error(lm: &LoadedModule, e: ManifestError) -> anyhow::Error {
         lm.key,
         lm.manifest.display()
     ))
-}
-
-/// The first instance that declares `docker:`. Native launch does not run
-/// containers yet, and running the host binary in their place would be
-/// wrong, so such a module is skipped (`sb up`) or refused (`sb run`).
-fn docker_instance<'f>(instances: impl IntoIterator<Item = &'f ModuleInstance>) -> Option<&'f str> {
-    instances
-        .into_iter()
-        .find(|i| i.docker.is_some())
-        .map(|i| i.id.as_str())
-}
-
-fn docker_reason(id: &str) -> String {
-    format!("instance {id} declares docker:, which native launch does not run yet")
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -813,14 +848,15 @@ pub struct UpOutcome {
     pub windows: Vec<String>,
 }
 
-/// `sb up`: create the session and one window per pane. Run
-/// [`run_builds`] first.
+/// `sb up`: record the plan's flow as the workspace's active flow, then
+/// create the session and one window per pane. Run [`run_builds`] first.
 ///
 /// If the session already exists, this errors: re-launching a workspace
 /// is `sb down && sb up`, explicit, no surprises. If adding a window fails,
 /// the half-launched session is killed before the error is returned.
 pub fn up(plan: &LaunchPlan, tmux: &Path) -> Result<UpOutcome> {
     ensure_no_session(tmux, &plan.session)?;
+    set_active_flow(&plan.home, &plan.workspace, &plan.flow)?;
     let (first, rest) = plan
         .panes
         .split_first()
@@ -1245,7 +1281,6 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    use sb_core::FLOW_FILE;
     use tempfile::TempDir;
 
     /// `<root>/<name>/sb.module.yaml` for a python module with no
@@ -1289,32 +1324,42 @@ mod tests {
     }
 
     #[test]
-    fn up_false_is_skipped_by_plan_workspace_but_not_plan_run() {
+    fn plan_up_launches_only_the_flows_nodes_and_plan_run_refuses_the_rest() {
         let (_td, home) = sandbox_home();
         let ws = "demo";
-        let ws_dir = home.workspace_dir(ws);
-        fs::create_dir_all(&ws_dir).unwrap();
         let projects = home.root().join("projects");
         fs::create_dir_all(&projects).unwrap();
         let dev_a = write_module(&projects, "alpha");
         let dev_b = write_module(&projects, "beta");
-        let flow = format!(
-            "modules:\n  alpha: {}\n  beta:\n    path: {}\n    up: false\n",
-            yaml_path(&dev_a),
-            yaml_path(&dev_b)
-        );
-        fs::write(ws_dir.join(FLOW_FILE), flow).unwrap();
+        fs::create_dir_all(home.flows_dir(ws)).unwrap();
+        fs::write(
+            home.workspace_file(ws),
+            format!(
+                "name: {ws}\nmodules:\n  alpha: {}\n  beta: {}\n",
+                yaml_path(&dev_a),
+                yaml_path(&dev_b)
+            ),
+        )
+        .unwrap();
+        fs::write(home.flow_file(ws, DEFAULT_FLOW_NAME), "nodes: [alpha]\n").unwrap();
         let host = Host::current();
 
-        let plan = plan_workspace(&home, ws, &host).unwrap();
+        let plan = plan_up(&home, ws, None, &host).unwrap();
+        assert_eq!(plan.flow, DEFAULT_FLOW_NAME);
         let names: Vec<&str> = plan.panes.iter().map(|p| p.window.as_str()).collect();
         assert_eq!(names, ["alpha"]);
         assert!(plan.builds.is_empty(), "python modules build nothing");
 
-        let plan = plan_run(&home, ws, "beta", &[], &host).unwrap();
+        let plan = plan_run(&home, ws, "alpha", &[], &host).unwrap();
         let pane = &plan.panes[0];
-        assert_eq!(pane.module, "beta");
-        assert_eq!(pane.cwd, projects.join("beta"));
+        assert_eq!(pane.module, "alpha");
+        assert_eq!(pane.cwd, projects.join("alpha"));
         assert_eq!(pane.argv, [python_fallback(&host), "main.py"]);
+
+        let e = format!("{:#}", plan_run(&home, ws, "beta", &[], &host).unwrap_err());
+        assert!(
+            e.contains("module beta is not a node of flow default"),
+            "{e}"
+        );
     }
 }

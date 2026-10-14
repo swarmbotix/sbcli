@@ -20,9 +20,12 @@ scaffolder — sb does not run `cargo new`, `python -m venv`, or
 `flutter create`. The user already has a project that builds and runs
 on its own. `sb init` just drops two sb-managed artifacts into the
 project root (sb 0.6.0+; three before, §1.1) and registers the module
-in a workspace: in the repository `sb.flow.yaml` above it when there is
-one (sb 0.5.0+), otherwise in the active workspace's installed copy
-(see [sbcli_ws.md](sbcli_ws.md) §4, §7.2).
+in a workspace: in the repository `sb.workspace.yaml` above it when
+there is one (sb 0.8.0+; the repository `sb.flow.yaml` from 0.5.0 to
+0.7), otherwise in the active workspace's installed copy (see
+[sbcli_workspace.md](sbcli_workspace.md) §5, [sbcli_ws.md](sbcli_ws.md)
+§7.2). Registering does not make the module run: a flow lists it under
+`nodes:` for that ([sbcli_flow.md](sbcli_flow.md) §3).
 
 After `sb init`, the project's build system, dependency manager, and
 internal layout are unchanged. The only structural imposition is the
@@ -51,35 +54,50 @@ source files, `Cargo.toml`, `pyproject.toml`, `pubspec.yaml`,
 A fourth thing happens, but outside the project: the module is
 registered in a workspace. Where depends on what sits above it.
 
-**Under a repository `sb.flow.yaml`** (sb 0.5.0+): the nearest
-`sb.flow.yaml` at or above `<rootpath>` (never an installed copy under
-`<sb_home>/workspaces/`, and never one directly in `$HOME` unless the
-search starts there). The module is added with a path relative to that
-file, as one appended line so your comments and layout survive, and the
-repository is then reinstalled, which updates the installed copy and
-makes the workspace active:
+**Under a repository `sb.workspace.yaml`** (sb 0.8.0+): the nearest
+`sb.workspace.yaml` at or above `<rootpath>` (never an installed copy
+under `<sb_home>/workspaces/`, and never one directly in `$HOME` unless
+the search starts there). The module is added with a path relative to
+that file, as one appended line so your comments and layout survive,
+and the repository is then reinstalled, which updates the installed
+copy and makes the workspace active:
 
 ```yaml
-# <repo>/sb.flow.yaml
+# <repo>/sb.workspace.yaml
 modules:
   <module_name>: modules/<module_name>
 ```
 
-`sb 0.7.0+` finds only `sb.flow.yaml`: a repository root that still
-holds only the pre-0.6.0 flow file stops `sb init` with the error in
-[sbcli_ws.md](sbcli_ws.md) §8, before anything is written
-([sbcli_module.md](sbcli_module.md) §11.2).
-
-**Otherwise**: the module goes into the active workspace's installed
-copy with its absolute path, as before 0.5.0:
+`sb init` never edits a flow file. Add the module to the `nodes:` of
+each flow that should run it, then `sb install .`:
 
 ```yaml
-# <sb_home>/workspaces/<active>/sb.flow.yaml
+# <repo>/sb.flow.yaml
+nodes: [<module_name>]
+```
+
+A repository whose `sb.flow.yaml` is still in the 0.7 shape (sb 0.8.0
+reads it with a warning) must be split first
+([sbcli_workspace.md](sbcli_workspace.md) §7): `sb init` stops before
+writing anything with
+``<path> is a flow in the 0.7 shape; sb init registers modules in sb.workspace.yaml, so split it into sb.workspace.yaml and sb.flow.yaml first (see sbcli_workspace.md §Migrating)``.
+
+**Otherwise**: the module goes into the active workspace's installed
+`sb.workspace.yaml` with its absolute path, as before 0.5.0:
+
+```yaml
+# <sb_home>/workspaces/<active>/sb.workspace.yaml
 modules:
   <module_name>: <abs_path_to_rootpath>/sb.module.yaml
 ```
 
-With neither a repository `sb.flow.yaml` nor an active workspace,
+Such a module, too, runs only as a node of a flow. With no repository
+to reinstall from, its node goes into the installed default flow,
+`<sb_home>/workspaces/<active>/flows/sb.flow.yaml`; a reinstall from a
+repository would drop a module registered this way
+([sbcli_workspace.md](sbcli_workspace.md) §5).
+
+With neither a repository `sb.workspace.yaml` nor an active workspace,
 `sb init` errors before writing anything (§10).
 
 `<module_name>` is derived from `basename(rootpath)`; see §3.
@@ -89,7 +107,7 @@ With neither a repository `sb.flow.yaml` nor an active workspace,
 ## 2. Command surface
 
 ```bash
-sb init [<rootpath>] [LANGUAGE_FLAG] [--force] [--docker]
+sb init [<rootpath>] [LANGUAGE_FLAG] [--force]
 ```
 
 | Argument | Required? | Default | Effect |
@@ -97,10 +115,11 @@ sb init [<rootpath>] [LANGUAGE_FLAG] [--force] [--docker]
 | `<rootpath>` | optional | `.` (cwd) | Project root to adopt. Must already exist and be a directory. Tilde + relative paths accepted; sb canonicalizes via `Path::canonicalize`. |
 | `--rust` / `--python` / `--cpp` / `--flutter` / `--unity` | required IF no manifest exists at `<rootpath>` | (none) | Language tag written to `sb.module.yaml`. **Exactly one** allowed; clap enforces mutual exclusion via the `lang` group. |
 | `--force` | optional | refuse-overwrite | Overwrite an existing `sb.module.yaml`. Has no effect on `swarmbotix_io/`, which is always idempotent: created if missing, left alone otherwise. |
-| `--docker` | optional | off | `sb 0.6.0+`: check the module's instances in the registry's `sb.flow.yaml` before writing anything: the module must have instances, and each must carry a `docker.image`. Writes nothing extra; the bash template it used to write is gone ([sbcli_module.md](sbcli_module.md) §11.6). |
-
-The flag that wrote a launch-script stub in 0.6.0 is gone in 0.7.0
-([sbcli.md](sbcli.md) §10).
+The flag that wrote a launch-script stub in 0.6.0 is gone in 0.7.0,
+and `--docker` is gone in 0.8.0 ([sbcli.md](sbcli.md) §10): clap
+rejects either as an unexpected argument. A module that runs in a
+container calls Docker Compose from its own `scripts`
+([sbcli_module.md](sbcli_module.md) §14).
 
 The CLI exit code is **zero** on full success, **non-zero** on any
 validation or filesystem error. Either every step succeeds or none of
@@ -153,15 +172,17 @@ module: pubber
 language: rust
 io_dir: swarmbotix_io
 publishers:
-  - name: hello
+  hello:
     topic: hello
     type: ros2/std/StringStamped
     transport: zenoh
 ```
 
 `deny_unknown_fields` is on, so typos are rejected at parse time.
-`sb init` writes `module`, `language`, and `io_dir`; the lists are added
-by `sb io` (empty lists are left off the file). Everything about
+`sb init` writes `module`, `language`, and `io_dir`; the port maps and
+the service list are added by `sb io` (empty ones are left off the
+file). `sb 0.8.0+` writes the ports as maps keyed by name
+([sbcli_module.md](sbcli_module.md) §2.1). Everything about
 building and launching (`scripts`, `env`, `requires`, `platforms`, and
 `version`, `sb`, `description`) is yours to add by hand, and documented
 in [sbcli_module.md](sbcli_module.md). A module whose build and binary
@@ -173,9 +194,9 @@ follow its language's conventions needs none of it.
 | `language` | enum (`rust` / `python` / `cpp` / `flutter` / `unity`) | `sb init` (from flag) | Drives codegen template selection at L3. Cannot be re-tagged without `--force` (see §7). |
 | `root` | path, **optional** | hand-edit only | `sb 0.5.0+`: `sb init` no longer writes it. Absent: the module root is the directory holding `sb.module.yaml`, which keeps the file portable. Relative: resolved against that directory. Absolute: used as is, so files written before 0.5.0 (which always carried an absolute `root:`) keep working; delete the line to make such a file portable. |
 | `io_dir` | relative path | `sb init` (language-dependent default) | `swarmbotix_io` for Rust / Python / C++ / Flutter; `Assets/Scripts/swarmbotix_io` for Unity. User-editable post-init (e.g. to nest under `src/generated/`). |
-| `publishers` | list of `PubSpec` | `sb io add/edit/rm` | Optional; absent after `sb init`. See [sbcli_pubsub.md](sbcli_pubsub.md) §4. |
-| `subscribers` | list of `SubSpec` | `sb io add/edit/rm` | Same. |
-| `services` | list of `{ name }` | `sb io add service` / `sb io rm` | `sb 0.5.0+`. Optional. One request/response router per entry, rendered to `<io_dir>/services/<name>.<ext>`; see [sbcli_reqres.md](sbcli_reqres.md) §2. Names are unique across publishers, subscribers, and services. |
+| `publishers` | map of name to `PubSpec` (sb 0.8.0+; the 0.7 list is still read) | `sb io add/edit/rm` | Optional; absent after `sb init`. See [sbcli_pubsub.md](sbcli_pubsub.md) §4. |
+| `subscribers` | map of name to `SubSpec` (same) | `sb io add/edit/rm` | Same. |
+| `services` | list of names, such as `[calib]` (sb 0.8.0+) | `sb io add service` / `sb io rm` | `sb 0.5.0+`. Optional. One request/response router per entry, rendered to `<io_dir>/services/<name>.<ext>`; see [sbcli_reqres.md](sbcli_reqres.md) §2. Names are unique across publishers, subscribers, and services. |
 | `scripts`, `env`, `requires`, `platforms`, `version`, `sb`, `description` | see [sbcli_module.md](sbcli_module.md) §2 | hand-edit only | `sb 0.6.0+`. Never written by `sb init`; kept by every `sb io` write. |
 
 **A directory with only the pre-0.6.0 manifest** is refused
@@ -207,7 +228,7 @@ already launches with the defaults for its language
 | C++ | `cmake -S . -B build ...` then `cmake --build build ...` | `build/<module>` |
 | Python | nothing | `main.py` with the module's `.venv` interpreter, or `python3` |
 | Flutter | nothing | `flutter run -d <os>` |
-| Unity | nothing | nothing: Unity modules launch from the editor, and `sb up` skips them with a `skipped` line; `up: false` keeps them out of the plan |
+| Unity | nothing | nothing: Unity modules launch from the editor, and `sb up` skips them with a `skipped` line; leaving them out of the flow's `nodes:` keeps them out of the plan |
 
 When the project differs (a binary named otherwise, an extra build
 step, an environment variable, an OS-specific path), add a few lines
@@ -224,14 +245,19 @@ There is nothing to stop by hand either: `sb stop` closes the module's
 windows itself, and `scripts.stop` exists only for extra teardown
 ([sbcli_launch.md](sbcli_launch.md) §4.2).
 
+`sb up` launches the module once it is a node of the flow being
+launched: add its name to `nodes:` in `sb.flow.yaml` and run
+`sb install .` ([sbcli_flow.md](sbcli_flow.md) §3).
+
 ---
 
 ## 6. Behavior matrix
 
 `sb init --<lang> <rootpath>` against these starting conditions
-(sb 0.7.0+):
+(sb 0.8.0+; the last column is the registry, the repository or
+installed `sb.workspace.yaml`):
 
-| Starting state | sb.module.yaml | swarmbotix_io/ | sb.flow.yaml | Notes |
+| Starting state | sb.module.yaml | swarmbotix_io/ | sb.workspace.yaml | Notes |
 |---|---|---|---|---|
 | Empty dir | written | created | appended | The default new-project case. |
 | Existing `sb.module.yaml`, no flag | (preserved) | (preserved) | appended (idempotent) | Re-init. No artifacts written; just registers the module (§1.2). Used by tests that want a deterministic re-init. |
@@ -245,9 +271,9 @@ Idempotency invariants:
 
 - Re-running `sb init <same_rootpath>` with no `--force` and a matching
   `--<lang>` flag is a no-op for the project artifacts and a
-  no-op-or-overwrite for the `sb.flow.yaml` entry (the value is
+  no-op-or-overwrite for the `sb.workspace.yaml` entry (the value is
   rewritten only if the path differs).
-- The `sb.flow.yaml` append uses `BTreeMap::insert`, so duplicate keys
+- The `sb.workspace.yaml` append uses `BTreeMap::insert`, so duplicate keys
   collapse to one entry: there is no scenario where the file
   accumulates multiple lines for the same module name.
 
@@ -263,12 +289,13 @@ Idempotency invariants:
    `Path::canonicalize`. Errors if the path doesn't exist or isn't a
    directory.
 4. Picks the registry (sb 0.5.0+): the nearest repository
-   `sb.flow.yaml` at or above `<rootpath>` (§1.2). It must load and its
-   workspace name must be valid and not held by another live
-   repository, or `sb init` fails here, before anything is written.
-   Without one, the active workspace; with neither, it errors with:
+   `sb.workspace.yaml` (sb 0.8.0+) at or above `<rootpath>` (§1.2). It
+   must load and its workspace name must be valid and not held by
+   another live repository, or `sb init` fails here, before anything is
+   written. Without one, the active workspace; with neither, it errors
+   with:
    ```
-   no active workspace and no sb.flow.yaml above <rootpath>; run `sb ws create <name> && sb ws set <name>` first, or add a sb.flow.yaml at the repository root
+   no active workspace and no sb.workspace.yaml above <rootpath>; run `sb ws create <name>` at the repository root first, or `sb ws set <name>` to pick an installed workspace
    ```
 5. Derives `<module_name> = basename(canonical_rootpath)`, validates
    it against the identifier rule (§3). Errors with
@@ -285,15 +312,13 @@ Idempotency invariants:
    - File absent + no flag: error
      `"no module manifest (sb.module.yaml) at <path> and no --rust|--python|--cpp|--flutter|--unity flag"`.
 8. Resolves `io_dir`: from the existing file if present, otherwise
-   `Language::default_io_dir()`. With `--docker` (sb 0.6.0+), it then
-   checks the module's instances in the registry's `sb.flow.yaml`: the
-   module must have some, and each needs a `docker.image`. A failure
-   stops here, before anything is written.
+   `Language::default_io_dir()`. (Removed in 0.8.0: the `--docker`
+   instance check that 0.6.0 and 0.7 ran here.)
 9. Writes `sb.module.yaml` if (a) no manifest existed OR (b) `--force`
    was passed. The body is `module`, `language`, and `io_dir` (kept
    from the prior file when there was one), with no `root:`
    (sb 0.5.0+). Under `--force` everything else, including the
-   `publishers` / `subscribers` / `services` lists and any `scripts`,
+   `publishers` / `subscribers` / `services` entries and any `scripts`,
    `env`, `requires`, `platforms`, is **not** carried over: the file is
    rewritten without them (§9.4).
 10. (Removed in 0.7.0: the optional launch-script stub that 0.6.0 wrote
@@ -301,16 +326,19 @@ Idempotency invariants:
 11. Creates `<rootpath>/<io_dir>/` if missing. Never deletes or
     rewrites an existing IO dir.
 12. Registers the module in the registry picked at step 4:
-    - **Repository `sb.flow.yaml`** (sb 0.5.0+): adds
-      `<module_name>: <path relative to sb.flow.yaml>` as one line under
-      `modules:` (skipped if an entry already points at this module),
-      then reinstalls the repository so the installed copy and the
-      active marker follow. A same-named entry that points at another
-      existing module is an error; one that points at a module that no
-      longer exists is repointed, keeping its `up:`.
+    - **Repository `sb.workspace.yaml`** (sb 0.8.0+): adds
+      `<module_name>: <path relative to sb.workspace.yaml>` as one line
+      under `modules:` (skipped if an entry already points at this
+      module), then reinstalls the repository so the installed copy and
+      the active marker follow. A same-named entry that points at
+      another existing module is an error; one that points at a module
+      that no longer exists is repointed.
     - **Active workspace**: inserts `<module_name> → <rootpath>/sb.module.yaml`
-      into its installed `sb.flow.yaml` and writes it back. The write is
-      skipped if the entry already exists with that exact path.
+      into its installed `sb.workspace.yaml` and writes it back. The
+      write is skipped if the entry already exists with that exact path.
+
+    No flow file is written: the module runs once a flow lists it under
+    `nodes:` ([sbcli_flow.md](sbcli_flow.md) §3).
 
 The CLI's stdout reflects which artifacts changed:
 
@@ -328,19 +356,19 @@ adopted module pubber (language: rust, root: /home/el/projects/pubber)
   (already registered in workspace demo)
 ```
 
-Under a repository `sb.flow.yaml` (sb 0.5.0+) the registration line
-names that file, and the reinstall adds a line:
+Under a repository `sb.workspace.yaml` (sb 0.8.0+) the registration
+line names that file, and the reinstall adds a line:
 
 ```
 adopted module ips_track (language: python, root: /home/el/ws_ips/modules/ips_track)
   wrote sb.module.yaml
   created IO directory
-  registered in /home/el/ws_ips/sb.flow.yaml
+  registered in /home/el/ws_ips/sb.workspace.yaml
   installed workspace ws_ips (active)
 ```
 
 (`(already registered in <path>)` on a re-run.) Without a repository
-flow the line names the active workspace instead:
+workspace file the line names the active workspace instead:
 `registered in workspace <name>` (sb 0.6.0+).
 
 ---
@@ -356,10 +384,9 @@ Common partial-failure scenarios:
 | What fails | What's left on disk |
 |---|---|
 | Identifier validation (step 5) | Nothing — fails before any write. |
-| `--docker` instance check (step 8) | Nothing: fails before any write. |
 | `sb.module.yaml` write (step 9) | The file may exist as a 0-byte or partial-write. |
 | `io_dir` mkdir (step 11) | `sb.module.yaml` already written; IO dir missing. Re-run; step 11 is idempotent. |
-| `sb.flow.yaml` write or reinstall (step 12) | Module fully adopted in the project tree; not registered, or registered in the repository `sb.flow.yaml` but not yet installed. Re-run `sb init <same_path>`: it skips the project artifacts (they exist) and finishes the registration and the install. |
+| `sb.workspace.yaml` write or reinstall (step 12) | Module fully adopted in the project tree; not registered, or registered in the repository `sb.workspace.yaml` but not yet installed. Re-run `sb init <same_path>`: it skips the project artifacts (they exist) and finishes the registration and the install. |
 
 The most common causes of step-12 failure are a stale active marker
 (workspace deleted out from under the CLI; see [sbcli_ws.md](sbcli_ws.md) §9.1)
@@ -391,9 +418,23 @@ my_rust_crate/
 └─ swarmbotix_io/         # NEW (empty until `sb io add`)
 ```
 
-`sb up` can launch it straight away: it runs `cargo build --release`
-and starts `target/release/my_rust_crate`, provided the crate's binary
-carries the module's name ([sbcli_module.md](sbcli_module.md) §3.2).
+`sb up` can launch it once it is a node of the flow (sb 0.8.0+). The
+crate is outside the folder `sb ws create` ran in, so it is registered
+in the installed copy only, and its node goes into the installed
+default flow ([sbcli_workspace.md](sbcli_workspace.md) §5):
+
+```bash
+$ cat > ~/.swarmbotix/workspaces/demo/flows/sb.flow.yaml <<'EOT'
+nodes: [my_rust_crate]
+EOT
+$ sb up
+```
+
+`sb up` then runs `cargo build --release` and starts
+`target/release/my_rust_crate`, provided the crate's binary carries the
+module's name ([sbcli_module.md](sbcli_module.md) §3.2). A module
+inside the repository that holds `sb.workspace.yaml` is added to the
+repository's `sb.flow.yaml` instead, followed by `sb install .`.
 
 ### 9.2 Adopt a Unity project
 
@@ -422,8 +463,8 @@ The reason: Unity only compiles C# scripts located under
 `Assets/`. Putting `swarmbotix_io/` at the project root would mean
 Unity ignores everything `sb io add` emits. A Unity module has no
 start command (it launches from the editor): `sb up` skips it with a
-`skipped` line, and `up: false` in `sb.flow.yaml` keeps it out of the
-plan altogether.
+`skipped` line, and leaving it out of every flow's `nodes:` keeps it
+out of the plan altogether.
 
 ### 9.3 Re-init to add a forgotten artifact
 
@@ -473,8 +514,8 @@ directory name changes. The two are independent.
 
 | Code path | Message |
 |---|---|
-| no repository `sb.flow.yaml` and no active workspace (sb 0.5.0+) | ``no active workspace and no sb.flow.yaml above <rootpath>; run `sb ws create <name> && sb ws set <name>` first, or add a sb.flow.yaml at the repository root`` |
-| duplicate module name in a repository `sb.flow.yaml` (sb 0.5.0+) | `module "<n>" is already registered in <sb.flow.yaml> for <other manifest>; module names must be unique within a workspace` |
+| no repository `sb.workspace.yaml` and no active workspace (sb 0.5.0+; file name sb 0.8.0+) | ``no active workspace and no sb.workspace.yaml above <rootpath>; run `sb ws create <name>` at the repository root first, or `sb ws set <name>` to pick an installed workspace`` |
+| duplicate module name in a repository `sb.workspace.yaml` (sb 0.5.0+) | `module "<n>" is already registered in <sb.workspace.yaml> for <other manifest>; module names must be unique within a workspace` |
 | missing rootpath | `rootpath <path> does not exist` |
 | not a directory | `rootpath <path> is not a directory` |
 | bad basename | `rootpath <path> has no usable basename` |
@@ -483,7 +524,8 @@ directory name changes. The two are independent.
 | no flag, no file | `no module manifest (sb.module.yaml) at <path> and no --rust\|--python\|--cpp\|--flutter\|--unity flag` |
 | multiple flags | `pick at most one of --rust / --python / --cpp / --flutter / --unity` (clap-level) |
 | existing manifest + no `--force` (rare: happens only when the existing file is partially parseable but conflicts) | passed through from `serde_yaml::from_str` |
-| `--docker`: no instances, or an instance without `docker.image` (sb 0.6.0+) | names the module or the offending instance; nothing is written |
+| `--docker` (removed in 0.8.0) | clap's own unexpected-argument error; nothing is written |
+| a 0.7-shape `sb.flow.yaml` above `<rootpath>` (sb 0.8.0) | ``<path> is a flow in the 0.7 shape; sb init registers modules in sb.workspace.yaml, so split it into sb.workspace.yaml and sb.flow.yaml first (see sbcli_workspace.md §Migrating)`` |
 | only the pre-0.6.0 manifest at `<rootpath>` (sb 0.7.0+) | `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` |
 
 Stable wordings — integration tests in `crates/sb-cli/tests`
@@ -511,11 +553,11 @@ end up there (e.g. via a broken script).
 ### 11.3 Network filesystems
 
 NFS / SMB are supported. `sb 0.5.0+` writes no `root:` into the
-manifest and a repository `sb.flow.yaml` holds relative paths, so the
+manifest and a repository `sb.workspace.yaml` holds relative paths, so the
 repository itself survives a different mount point; only the installed
 copy holds absolute paths, and `sb install .` on each host rewrites it.
 A pre-0.5.0 manifest with an absolute `root:`, or a workspace with
-no repository flow, records the mount path and breaks on a host
+no repository, records the mount path and breaks on a host
 that mounts the volume elsewhere: delete the `root:` line, or re-`sb init`
 on each host.
 
@@ -543,11 +585,11 @@ $ cd /new/path/my_app
 $ sb init --rust       # re-registers with the new path
 ```
 
-Without a repository `sb.flow.yaml`, the previous entry (pointing at
-`/old/path/my_app/sb.module.yaml`) gets overwritten with the new path
-because the module name is the same. Under a repository `sb.flow.yaml`,
-an entry whose old target no longer exists is repointed the same way,
-keeping its `up:`. A pre-0.5.0 manifest still carries the old
+Without a repository `sb.workspace.yaml`, the previous entry (pointing
+at `/old/path/my_app/sb.module.yaml`) gets overwritten with the new
+path because the module name is the same. Under a repository
+`sb.workspace.yaml`, an entry whose old target no longer exists is
+repointed the same way. A pre-0.5.0 manifest still carries the old
 absolute `root:`; delete that line (or re-init with `--force`, which
 also drops the pub/sub lists, §9.4).
 
@@ -555,12 +597,13 @@ also drops the pub/sub lists, §9.4).
 
 ```bash
 $ sb init --rust /path/A/camera           # registers `camera → /path/A/camera/sb.module.yaml`
-$ sb init --rust /path/B/camera           # **silently overwrites** that entry (no repository sb.flow.yaml)
+$ sb init --rust /path/B/camera           # **silently overwrites** that entry (no repository sb.workspace.yaml)
 ```
 
-`sb.flow.yaml`'s `modules:` is a map: one slot per name. In the active
-workspace's installed copy the second insert wins silently. Under a
-repository `sb.flow.yaml` (sb 0.5.0+) the second `sb init` is refused
+`sb.workspace.yaml`'s `modules:` is a map: one slot per name. In the
+active workspace's installed copy the second insert wins silently.
+Under a repository `sb.workspace.yaml` (sb 0.5.0+) the second `sb init`
+is refused
 instead, because both modules still exist (§10). Rename one of the
 directories to disambiguate.
 

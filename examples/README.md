@@ -33,8 +33,8 @@ examples/
 ```
 
 Each module folder holds its own sources, an `sb.module.yaml` (the module
-manifest, sb 0.6.0+), and the generated `swarmbotix_io/`. There are no
-launch scripts. The Python modules declare nothing about launching: their
+manifest, sb 0.6.0+; ports as maps keyed by name, sb 0.8.0+), and the
+generated `swarmbotix_io/`. There are no launch scripts. The Python modules declare nothing about launching: their
 entry point is `main.py`, which the Python default (`{python} main.py
 {args}`) already starts. Each Rust module declares one line, because its
 binary is not named after the module:
@@ -46,12 +46,15 @@ scripts:
 
 Each example's `run.sh` is self-contained: it points `SB_CONFIG` at a
 tempdir, runs `sb ws create` / `sb init` / `sb io add pub` / `sb io add sub`
-inside that tempdir (the workspace's `sb.flow.yaml` is written there, not
-here), then runs the two ends and asserts they exchanged the expected
-payload. `level5_hello_world/run.sh` launches both ends with `sb up`,
-which builds each module with `cargo build --release` and starts the
-binary named in its manifest, then reads the subber's tmux window back
-with `tmux capture-pane`.
+inside that tempdir (the workspace's `sb.workspace.yaml` and
+`sb.flow.yaml` are written there, not here), then runs the two ends and
+asserts they exchanged the expected payload. `level5_hello_world/run.sh`
+launches both ends with `sb up`: since `sb init` registers a module
+without adding it to a flow (sb 0.8.0+), the script first writes the
+installed default flow with both modules as nodes, then `sb up` builds
+each module with `cargo build --release`, starts the binary named in its
+manifest, and the script reads the subber's tmux window back with
+`tmux capture-pane`.
 
 ## Prerequisites
 
@@ -85,12 +88,18 @@ cargo build --bin sb
 ```
 
 To launch an example's modules by hand instead, adopt them into a workspace
-and use the launch verbs; nothing in the module folders needs editing:
+and use the launch verbs; nothing in the module folders needs editing. The
+modules sit outside `/tmp/demo`, so `sb init` registers them in the installed
+workspace only, and their nodes go into the installed default flow
+(`documents/sbcli_workspace.md` §5):
 
 ```bash
-cd /tmp/demo && sb ws create demo
+mkdir -p /tmp/demo && cd /tmp/demo && sb ws create demo
 sb init --rust ~/path/to/sbcli/examples/level5_hello_world/pubber
 sb init --rust ~/path/to/sbcli/examples/level5_hello_world/subber
+cat > ~/.swarmbotix/workspaces/demo/flows/sb.flow.yaml <<'EOF'
+nodes: [pubber, subber]
+EOF
 sb up            # builds both, one tmux window each
 sb attach
 sb down

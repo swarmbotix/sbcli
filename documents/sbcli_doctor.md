@@ -32,10 +32,10 @@ a hard-coded checklist:
    workspace's modules that still use the pre-0.5.0 `topic: /...`
    spelling.
 6. **Workspace** (sb 0.5.0+): the `sb ws check` validation rows for the
-   active workspace (module files, message types, instance ids,
-   encodings per wire key, generated io files, staleness, and, sb
-   0.6.0+, required tools, platform support, wires, and leftover
-   pre-0.6.0 files, which sb 0.7.0+ ignores).
+   active workspace (module files, message types, encodings per wire
+   key, generated io files, staleness, and, sb 0.6.0+, required tools,
+   platform support, leftover pre-0.6.0 files, which sb 0.7.0+ ignores,
+   and, sb 0.8.0+, each flow's nodes, instances, and wires).
 
 No state is written. No network calls. No build / compile happens.
 Doctor is safe to run at any time, including during ongoing pub/sub
@@ -77,8 +77,8 @@ list. Each entry corresponds to one dependency.
 | 8 | `unity targets` | Scans each style's `message_targets/` that sits inside a Unity project and counts generated `.cs` files a current `sb` would not have written. **Warns, never fails** — the breakage is in the host project, not in `sb`. | `messages_root:` |
 | 9 | `config keys` | Reports `message_style` / `message_definitions` / `message_targets` if still present. They parse but do nothing, which is the combination that silently misleads. | any stale `sb.config.yml` |
 | 10 | `std vault` | Walks `<messages_root>/ros2/message_definitions/std/` and confirms the expected forge files are present. Always the ros2 style — that is where `std/` lives. | `messages_root:` |
-| 11 | `topics` | Scans the modules registered in the active workspace for publisher / subscriber entries still written as `topic: /<wire key>` (sb 0.5.0+). One `[WARN]` per offending module. **Warns, never fails**: such an entry is read as `key:` and works unchanged. `[SKIP]` with no active workspace. Details in §4.10. | the active workspace's `sb.flow.yaml` and its modules' manifests |
-| 12 | `workspace`, `ws *`, `deprecated` | The `sb ws check` rows for the active workspace (sb 0.5.0+): `workspace` (summary), `ws modules`, `ws types`, `ws instances`, `ws encoding` (each `[FAIL]` per problem), `ws io files` (`[WARN]`), then (sb 0.6.0+) `ws requires` (`[FAIL]`), `ws platforms` (`[WARN]`), `ws wires` (`[FAIL]`), `deprecated` (`[WARN]`), and last `ws source` (`[WARN]`). A `[FAIL]` here **fails doctor**: it breaks `sb up` or codegen. `[SKIP] workspace` with no active workspace. Details in §4.11. | the active workspace's installed `sb.flow.yaml` (and through its `source:` the repo copy), its modules' `sb.module.yaml`, the configured vault, `PATH` |
+| 11 | `topics` | Scans the modules registered in the active workspace for publisher / subscriber entries still written as `topic: /<wire key>` (sb 0.5.0+). One `[WARN]` per offending module. **Warns, never fails**: such an entry is read as `key:` and works unchanged. `[SKIP]` with no active workspace. Details in §4.10. | the active workspace's installed `sb.workspace.yaml` and its modules' manifests |
+| 12 | `workspace`, `ws *`, `deprecated` | The `sb ws check` rows for the active workspace (sb 0.5.0+): `workspace` (summary), `ws modules`, `ws types`, `ws encoding` (each `[FAIL]` per problem), `ws io files` (`[WARN]`), then (sb 0.6.0+) `ws requires` (`[FAIL]`), `ws platforms` (`[WARN]`), (sb 0.8.0+) `ws flows` (`[FAIL]`), `deprecated` (`[WARN]`), and last `ws source` (`[WARN]`). A `[FAIL]` here **fails doctor**: it breaks `sb up` or codegen. `[SKIP] workspace` with no active workspace. Details in §4.11. | the active workspace's installed `sb.workspace.yaml` and flows (and through its `source:` the repository files), its modules' `sb.module.yaml`, the configured vault, `PATH` |
 | 13 | `app` | One line per installed app package (`sb 0.2.1+`): its kind, whether its folder still exists, and whether each binary in its `requires` list is on `PATH`. **Warns, never fails**, and prints nothing when no apps are installed. Details in [sbcli_app.md](sbcli_app.md) §9. | `<sb_home>/apps.yml` |
 
 Checks 1, 2, 4, 5 and 6 share the same structure (`CheckResult` from
@@ -144,20 +144,20 @@ sb <version>
 ```
 
 `sb 0.5.0+` follows the `topics` row with the workspace rows (§4.11);
-the four rows between `ws io files` and `ws source` are `sb 0.6.0+`:
+`ws requires`, `ws platforms`, and `deprecated` are `sb 0.6.0+`, and
+`ws flows`, one line per flow, is `sb 0.8.0+`:
 
 ```
 [OK]   workspace    ws_ips: 2 module(s), installed from https://github.com/acme/ws_ips.git
 [OK]   ws modules   2 module(s), every module manifest parses
 [OK]   ws types     3 typed entries resolve in the vault
-[OK]   ws instances 0 instance(s), ids unique per module
 [OK]   ws encoding  3 wire key(s), encodings agree
 [OK]   ws io files  4 generated file(s) present
 [OK]   ws requires  all required tools present
 [OK]   ws platforms all modules support this host
-[OK]   ws wires     no wires
+[OK]   ws flows     default: 2 node(s), 0 instance(s), 1 wire(s) resolve
 [OK]   deprecated   nothing deprecated in use
-[OK]   ws source    installed copy is current with /home/el/ws_ips/sb.flow.yaml
+[OK]   ws source    installed copy is current with /home/el/ws_ips/sb.workspace.yaml
 ```
 
 Three rows carry versions, and they are three different facts. `transports`
@@ -197,9 +197,10 @@ Field widths:
 - Column 2: check name, padded to 12 chars (`protoc`, `flatc`,
   `transports`, `libzenohc`, `libiceoryx2`, `tmux`, `message styles`,
   `unity targets`, `config keys`, `std vault`, `topics`, and sb 0.5.0+
-  `workspace`, `ws modules`, `ws types`, `ws instances`, `ws encoding`,
-  `ws io files`, `ws source`, and sb 0.6.0+ `ws requires`,
-  `ws platforms`, `ws wires`, `deprecated`). Two names overflow that pad and push
+  `workspace`, `ws modules`, `ws types`, `ws encoding`, `ws io files`,
+  `ws source`, sb 0.6.0+ `ws requires`, `ws platforms`, `deprecated`,
+  and sb 0.8.0+ `ws flows`, which replaces the `ws instances` and
+  `ws wires` rows of earlier releases). Two names overflow that pad and push
   column 3 to the right — `message styles` (14) and `unity targets`
   (13). Do not align a parser on a fixed column offset.
 - Column 3: free-form `<path> (<details>)` or `<reason>`. Continuation
@@ -548,7 +549,7 @@ release procedure and the two `lib*` rows will not be version-checked.
 [SKIP] topics       no active workspace
 ```
 
-Scans the modules registered in the active workspace's `sb.flow.yaml` for
+Scans the modules registered in the active workspace's `sb.workspace.yaml` for
 publisher and subscriber entries still written in the pre-0.5.0 form
 `topic: /<wire key>`. Since 0.5.0 the canonical topic has no leading
 `/`, and an entry carries either `topic: <bare>` or `key: <wire key>`.
@@ -593,17 +594,16 @@ the active workspace:
 
 | Row | `[OK]` shows | Problem tag | Reports |
 |---|---|---|---|
-| `workspace` | name, module count, source (URL or repo `sb.flow.yaml`, or `no source`) | `[FAIL]` | the installed copy, or the vault root, cannot be read |
+| `workspace` | name, module count, source (URL or repo `sb.workspace.yaml`, or `no source`) | `[FAIL]` | the installed copy, or the vault root, cannot be read |
 | `ws modules` | every module manifest parses | `[FAIL]` per module | ``no module manifest at <path> (run `sb init` in the module)``, an empty file, a parse error, or (sb 0.7.0+) `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` |
 | `ws types` | how many typed entries resolve | `[FAIL]` per entry | a proto / fb `type:` that is not in the configured vault nor an `iox2_variants` name |
-| `ws instances` | instance count | `[FAIL]` per duplicate | an instance id declared twice for one module |
 | `ws encoding` | how many wire keys agree | `[FAIL]` per wire key | entries on one key, across modules, that disagree on `encoding:` |
 | `ws io files` | how many generated files exist | `[WARN]` per module | generated files missing under the io dir, with ``run `sb io update <module>` `` |
 | `ws requires` (sb 0.6.0+) | `all required tools present` | `[FAIL]` | `<module>: missing <bin>[, <bin>]` per module, joined by `; ` |
 | `ws platforms` (sb 0.6.0+) | `all modules support this host` | `[WARN]` | `<module>: not supported on <os>-<arch> (declares: linux, windows)` |
-| `ws wires` (sb 0.6.0+) | `<n> wire(s) resolve`, or `no wires` | `[FAIL]` | `<lhs>: <reason>`, reasons below |
-| `deprecated` (sb 0.6.0+) | `nothing deprecated in use` | `[WARN]` | one leftover pre-0.6.0 file per line, below |
-| `ws source` | the installed copy is current | `[WARN]`; `[SKIP]` with no `source:` | the repo `sb.flow.yaml` is newer than the installed copy (``run sb install``) |
+| `ws flows` (sb 0.8.0+) | one line per flow: `<flow>: <n> node(s), <i> instance(s), <w> wire(s) resolve` | `[FAIL]` | one line per problem, `<flow>: <wire or item>: <reason>`, reasons below |
+| `deprecated` (sb 0.6.0+) | `nothing deprecated in use` | `[WARN]` | one leftover legacy file per line, below |
+| `ws source` | the installed copy is current | `[WARN]`; `[SKIP]` with no `source:` | the repository files are newer than the installed copy (``run sb install``) |
 
 A module that fails `ws modules` is left out of the rows below it.
 
@@ -626,25 +626,48 @@ it does not target.
 [WARN] ws platforms ips_cam_gcam_pub: not supported on windows-x86_64 (declares: linux)
 ```
 
-**`ws wires`** checks each `wires:` line of the flow
-([sbcli_ws.md](sbcli_ws.md) §4.7) against the modules' manifests and
-instances. `<lhs>` is the wire's key, `<module>.<entry>`; `<reason>` is
-one of:
+**`ws flows`** (sb 0.8.0+) replaces the `ws instances` and `ws wires`
+rows of earlier releases. It checks every installed flow
+([sbcli_flow.md](sbcli_flow.md)) against the workspace's modules and
+their manifests, and prints one line per flow, the default flow first:
+
+```
+[OK]   ws flows     default: 4 node(s), 8 instance(s), 3 wire(s) resolve
+                    calib: 4 node(s), 8 instance(s), 2 wire(s) resolve
+```
+
+`<i> instance(s)` counts the instance ids the flow declares; a
+singleton node adds none. A workspace without any flow gets
+``[WARN] ws flows     no flows installed; `sb up` needs one (add sb.flow.yaml beside sb.workspace.yaml)``.
+A problem replaces the `[OK]` row with one `[FAIL] ws flows` row per
+problem, `<flow>: <wire or item>: <reason>`. A node that is not a
+module of the workspace has the item `nodes`. For a wire,
+a problem at the publisher end names the wire by its key, such as
+`ips_detect[*].markers`, and a problem at one of its subscribers names
+it as `<key> -> <module>.<entry>`, such as
+`ips_detect[*].markers -> ips_calib.markers`. The reason is one of:
 
 | Reason | Meaning |
 |---|---|
-| `unknown subscriber module` | the key's module is not in the workspace |
-| `no subscriber <entry> in <module>` | that module has no subscriber of that name |
-| `unknown publisher module` | the value's module is not in the workspace |
-| `no publisher <entry> in <module>` | that module has no publisher of that name |
+| `unknown node <n>` | a node of the flow is not a module of `sb.workspace.yaml` |
+| `no publisher <entry> in <module>` | the wire's key names a publisher entry the module does not have |
+| `no subscriber <entry> in <module>` | the wire names a subscriber entry the module does not have |
 | `[*] on iceoryx2 is not supported` | fan-in from every instance needs Zenoh |
-| `{id} but <module> has no instances` | `[{id}]` names a publisher without instances |
-| `transport mismatch (<a> vs <b>)` | subscriber and publisher entries use different transports |
-| `type mismatch (<a> vs <b>)` | subscriber and publisher entries use different message types |
+| `{id} but <module> has no instances` | `[{id}]` on a wire where that node has no instances in this flow |
+| `no instance <id> in <module>` | `[<id>]`, or an id `[{id}]` pairs, names no instance of the publisher |
+| `transport mismatch (<a> vs <b>)` | publisher and subscriber entries use different transports |
+| `type mismatch (<a> vs <b>)` | publisher and subscriber entries use different message types |
 
 ```
-[FAIL] ws wires     ips_track.markers: [*] on iceoryx2 is not supported
+[FAIL] ws flows     calib: ips_detect[*].debug_image: [*] on iceoryx2 is not supported
+[FAIL] ws flows     calib: ips_detect[*].markers -> ips_calib.markers: no subscriber markers in ips_calib
+[FAIL] ws flows     calib: nodes: unknown node ips_calibrate
 ```
+
+Structural rules (unique nodes, instance ids, a selector on the
+publisher side only) are checked whenever a flow is read
+([sbcli_flow.md](sbcli_flow.md) §8.1), so a flow that breaks one fails
+`sb install` before it can reach this row.
 
 **`deprecated`** (sb 0.7.0+) lists every file from before 0.6.0 that
 the workspace still holds, one per line. `sb 0.7.0+` reads or runs none
@@ -657,19 +680,24 @@ of them, so each line ends `is ignored since 0.7.0 (see sbcli_module.md §Migrat
 ```
 
 The items it reports are `sb.dev.yml at <path>`, `flow.yaml at <path>`,
-`runscript.bash at <path>`, and `stopscript.bash at <path>`. The row
-warns, never fails: an ignored file breaks nothing by itself, and
-deleting it (or translating it, [sbcli_module.md](sbcli_module.md) §11)
-clears the line. What does fail is a module whose **only** manifest is
-still the pre-0.6.0 one: `ws modules` reports it with the rename error
-in the table above. A top-level `instances:` map is no longer an item
-here either: a flow that has one does not load at all
-([sbcli_ws.md](sbcli_ws.md) §8).
+`runscript.bash at <path>`, and `stopscript.bash at <path>`. `sb 0.8.0`
+adds one more, the repository's `sb.flow.yaml` while it is still in the
+0.7 shape ([sbcli_workspace.md](sbcli_workspace.md) §7):
+
+```
+[WARN] deprecated   sb.flow.yaml at <path> is in the 0.7 shape, which 0.8.1 no longer reads (split it into sb.workspace.yaml and sb.flow.yaml; see sbcli_workspace.md §Migrating)
+```
+ The row warns, never
+fails: an ignored file breaks nothing by itself, a 0.7-shape file is
+still read in 0.8.0, and deleting or translating the file
+([sbcli_module.md](sbcli_module.md) §11) clears the line. What does
+fail is a module whose **only** manifest is still the pre-0.6.0 one:
+`ws modules` reports it with the rename error in the table above.
 
 Unlike `topics`, a **`[FAIL]` here fails doctor**: a missing module, an
-unknown type, a duplicate instance id, an encoding disagreement, a
-missing build tool, or a wire that resolves to nothing breaks `sb up`
-or codegen, so it counts toward the exit code. Missing generated files
+unknown type, an encoding disagreement, a missing build tool, or a flow
+whose nodes or wires resolve to nothing breaks `sb up` or codegen, so
+it counts toward the exit code. Missing generated files
 and a stale installed copy are fixed by one command each
 (`sb io update`, `sb install`), and an unsupported host or an ignored
 leftover file breaks nothing, so those only warn. Types are checked
@@ -814,11 +842,9 @@ sb doctor
 ### 6.5 CI gating
 
 ```yaml
-- name: Validate host
-  run: sb doctor
-
-- name: Build
-  run: cargo build --release
+steps:
+  - run: sb doctor              # validate the host
+  - run: cargo build --release  # then build
 ```
 
 Doctor's non-zero exit fails CI early with a clear list of what's

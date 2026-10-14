@@ -40,14 +40,14 @@ fn bare_init_preserves_existing_files_but_registers() {
         "#!/usr/bin/env bash\necho user-script\n"
     );
 
-    let flow = s
+    let installed = s
         .sb_home()
         .join("workspaces")
         .join("demo")
-        .join(sb_core::FLOW_FILE);
-    let flow_body = std::fs::read_to_string(&flow).unwrap();
+        .join(sb_core::WORKSPACE_FILE);
+    let ws_body = std::fs::read_to_string(&installed).unwrap();
     assert!(
-        flow_body.contains("pubber"),
-        "installed flow missing pubber: {flow_body}"
+        ws_body.contains("pubber"),
+        "installed workspace missing pubber: {ws_body}"
     );
 }

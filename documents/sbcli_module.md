@@ -12,15 +12,24 @@ repository**, a maintainer document that is not part of your install;
 when it and this page disagree, it wins.
 
 Related: [sbcli_launch.md](sbcli_launch.md) (what `sb up`, `sb run`
-and `sb stop` do with the manifest), [sbcli_ws.md](sbcli_ws.md)
-(`sb.flow.yaml`: modules, instances, wires), [sbcli_init.md](sbcli_init.md)
-(which writes the first manifest), [sbcli_pubsub.md](sbcli_pubsub.md)
-(the publisher, subscriber, and service entries).
+and `sb stop` do with the manifest),
+[sbcli_workspace.md](sbcli_workspace.md) (`sb.workspace.yaml`: the
+modules of a workspace), [sbcli_flow.md](sbcli_flow.md) (flows: nodes,
+instances, wires), [sbcli_init.md](sbcli_init.md) (which writes the
+first manifest), [sbcli_pubsub.md](sbcli_pubsub.md) (the publisher,
+subscriber, and service entries).
 
 **Added in sb 0.6.0.** `sb.module.yaml` replaces the pre-0.6.0 module
 file, and its `scripts:` block replaces the per-module launch and stop
 scripts. `sb 0.7.0+` reads only `sb.module.yaml` and runs no such
 script; §11 is the migration guide, required since 0.7.0.
+
+**`sb 0.8.0+`**: `publishers` and `subscribers` are maps keyed by the
+port name, and `services` is a list of names (§2.1). `sb` writes that
+form; the 0.7 list forms are still read, without a warning (§11.10).
+Instances and wires live in the flow files
+([sbcli_flow.md](sbcli_flow.md)), and a module that runs in a container
+calls `docker compose` from its own scripts (§14).
 
 ---
 
@@ -50,7 +59,8 @@ no path that is true on only one machine (§6.3).
 
 `<module root>/sb.module.yaml`. The module root is the directory that
 holds the file, unless `root:` says otherwise (§2). A workspace's
-`sb.flow.yaml` names the module directory, and `sb` looks for
+`sb.workspace.yaml` names the module directory
+([sbcli_workspace.md](sbcli_workspace.md) §2.1), and `sb` looks for
 `sb.module.yaml` in it. `sb 0.7.0+` looks for no other name (§11.1).
 
 ### 1.2 What `sb` does with it
@@ -60,7 +70,7 @@ holds the file, unless `root:` says otherwise (§2). A workspace's
 | `sb up`, `sb run` | `scripts.build` (run inline, before any window opens), then `scripts.start` (one window per instance), with `env:` applied ([sbcli_launch.md](sbcli_launch.md) §1) |
 | `sb run --fg` | the same build and start, in your terminal instead of tmux |
 | `sb stop` | closes the module's windows, then runs `scripts.stop` if declared |
-| `sb doctor`, `sb ws check` | `requires:` (`ws requires`), `platforms:` (`ws platforms`), the entries for `ws wires` ([sbcli_doctor.md](sbcli_doctor.md) §4.11) |
+| `sb doctor`, `sb ws check` | `requires:` (`ws requires`), `platforms:` (`ws platforms`), the ports the flows' wires name (`ws flows`, sb 0.8.0+) ([sbcli_doctor.md](sbcli_doctor.md) §4.11) |
 | `sb io`, `sb install`, `sb gopro` | `io_dir`, `publishers`, `subscribers`, `services`, as before ([sbcli_pubsub.md](sbcli_pubsub.md)) |
 
 ---
@@ -68,43 +78,62 @@ holds the file, unless `root:` says otherwise (§2). A workspace's
 ## 2. Schema
 
 ```yaml
-module: ips_detect                 # required
-language: rust                     # required: rust | python | cpp | flutter | unity
-version: 0.3.0                     # optional, for sharing
-sb: ">=0.6"                        # optional, the sb version it needs (not enforced in 0.6.0)
-description: ArUco detector        # optional
-
-scripts:                           # optional; every key has a language default (§3.2)
-  build: cargo build --release     # a string is one command; a list is several, run in order
-  start: "{bin} {args}"            # exactly one command; sb appends --id <id> per instance
-  stop:  []                        # extra teardown only; sb closes the windows itself
-  test:  cargo test
-env:                               # applied to every script
+module: ips_detect
+language: rust
+version: 0.3.0                      # optional
+sb: ">=0.8"                         # optional
+description: ...                    # optional
+scripts:                            # optional, language defaults
+  build: cargo build --release
+  start: "{bin} {args}"
+  test: cargo test
+  stop: [echo stopping, rm -f /tmp/x.lock]
+env:
   RUST_LOG: info
-requires: [cargo]                  # executables sb doctor must find on PATH
-
-platforms:                         # key present = supported; no block = every platform
+requires: [cargo]
+platforms:
   linux:
-    env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}" }
-  linux-aarch64: {}                # more specific key, merged after `linux`
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}
+    requires: [cmake]
   windows:
-    env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}" }
-  macos: {}
-
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}
 io_dir: swarmbotix_io
-publishers:                        # `topic:` is optional; it defaults to `name`
-  - { name: markers, type: ros2/custom/MarkerDetections, transport: zenoh }
+publishers:                         # map keyed by port name
+  markers:
+    type: ros2/custom/MarkerDetections
+    transport: zenoh
+  status:
+    topic: health                   # optional, defaults to the key
+    type: ros2/std/StringStamped
+    transport: zenoh
+    encoding: raw
+    mime: text/plain
 subscribers:
-  - { name: image, type: ros2/sensor_msgs/Image1280x1024, transport: iceoryx2 }
-services: []
+  image:
+    type: ros2/sensor_msgs/Image1280x1024
+    transport: iceoryx2
+  commands:
+    key: dev01/ops/console/zenoh/cmd
+    type: ros2/std/StringStamped
+    transport: zenoh
+services: [cam_param]               # list of names; a map keyed by name is also read
 ```
+
+In this example `scripts.build` is one command; a list is several, run
+in order. `scripts.start` is exactly one command, and `sb` appends
+`--id <id>` to it per instance. `scripts.stop` is extra teardown only,
+since `sb` closes the windows itself. `platforms` lists the supported
+hosts: a key present means supported, and no block means every
+platform.
 
 | Field | Required | Type | Meaning |
 |---|---|---|---|
 | `module` | yes | identifier | Module name, `[A-Za-z_][A-Za-z0-9_]*`. The `<module>` segment of every owned wire key, and the base of every window name. |
 | `language` | yes | `rust` / `python` / `cpp` / `flutter` / `unity` | Selects the codegen templates and the defaults in §3.2. |
 | `version` | no | string | The module's own version, for sharing. Free text; `sb` does not read it. |
-| `sb` | no | string | The `sb` version the module needs, such as `">=0.6"`. Free text; not enforced in 0.6.0. |
+| `sb` | no | string | The `sb` version the module needs, such as `">=0.8"`. Free text; not enforced. |
 | `description` | no | string | One line for people and tools. |
 | `scripts` | no | map | `build`, `start`, `stop`, `test` (§4). Each is a string (one command) or a list of strings (several commands, run in order). `start` must be exactly one command. A key left out takes the language default (§3.2). |
 | `env` | no | map | Environment variables for every script. Values are expanded (§5). |
@@ -112,19 +141,45 @@ services: []
 | `platforms` | no | map | Per-host overlays of `scripts`, `env`, `requires`, and the list of supported hosts (§6). |
 | `root` | no | path | Module root. Absent: the directory holding the file. Relative: resolved against that directory. Absolute: used as is. |
 | `io_dir` | no | relative path | Where generated files go. Default `swarmbotix_io`; `sb init` writes `Assets/Scripts/swarmbotix_io` for Unity. |
-| `publishers`, `subscribers` | no | lists | Pub/sub entries ([sbcli_pubsub.md](sbcli_pubsub.md) §4). `sb 0.6.0+`: `topic:` is optional; an entry with neither `topic:` nor `key:` uses its `name` as the topic. |
-| `services` | no | list of `{ name }` | Request/response routers ([sbcli_reqres.md](sbcli_reqres.md) §2). |
+| `publishers`, `subscribers` | no | maps keyed by port name (sb 0.8.0+) | Pub/sub entries ([sbcli_pubsub.md](sbcli_pubsub.md) §4). The key is the entry's name (§2.1). `topic:` is optional (sb 0.6.0+); an entry with neither `topic:` nor `key:` uses its name as the topic. |
+| `services` | no | list of names (sb 0.8.0+) | Request/response routers ([sbcli_reqres.md](sbcli_reqres.md) §2), such as `[cam_param]`. |
 
 Load rules:
 
-- `deny_unknown_fields` applies to the file, to `scripts`, and to every
-  `platforms` overlay, so a typo such as `scirpts:` or `enviroment:` is
-  reported by name rather than ignored.
+- `deny_unknown_fields` applies to the file, to `scripts`, to every
+  `platforms` overlay, and to every port entry, so a typo such as
+  `scirpts:` or `enviroment:` is reported by name rather than ignored.
 - An `sb` older than 0.6.0 does not look for `sb.module.yaml` at all,
   and rejects the new keys if you rename the file back. A repository on
-  this schema needs `sb 0.6.0+` on every host.
+  this schema needs `sb 0.6.0+` on every host, and `sb 0.8.0+` once a
+  manifest uses the map form of §2.1.
 - `sb io add`, `edit`, and `rm` write the file back from its parsed
-  form (§13.1).
+  form, always in the map form (§13.1).
+
+### 2.1 Ports: the map form (sb 0.8.0+)
+
+`publishers:` and `subscribers:` are maps: the key is the port's name,
+and the value holds the rest of the entry (`topic` or `key`, `type`,
+`transport`, `encoding`, `mime`; [sbcli_pubsub.md](sbcli_pubsub.md)
+§4). `services:` is a list of service names.
+
+- The key is the name. An inner `name:` is accepted only when it equals
+  the key (otherwise `publishers.<key>: name <x> does not match the key`,
+  and likewise for `subscribers.` and `services.`); it adds nothing, so
+  leave it out.
+- A name listed twice under one map is refused as
+  `<path>: duplicate entry with key "<k>"`. Publishers, subscribers,
+  and services still share one name space per module
+  ([sbcli_pubsub.md](sbcli_pubsub.md) §4.1).
+- A load error names the entry by its key: `publishers.markers: ...`.
+- `services:` also accepts a map keyed by name, where the only key
+  allowed under a name is that same `name:` (any other key is an
+  unknown field; a service has no options), and the 0.7 list of
+  single-key maps. `sb` writes a plain list of names.
+- The 0.7 dash-list form of `publishers:` and `subscribers:` is still
+  read, without a warning, and its load errors keep the index form
+  `publishers[0]: ...`. The next `sb io` write turns the file into the
+  map form (§11.10).
 
 ---
 
@@ -155,7 +210,7 @@ no pipe, and no `$(...)`. Their replacements:
 | Shell construct | In the manifest |
 |---|---|
 | `a && b` | a list: `build: [a, b]`. Each step must exit 0 before the next runs. |
-| `export VAR=value` | `env: { VAR: value }` |
+| `export VAR=value` | `env:` with `VAR: value` under it |
 | `cd <dir>` | nothing: every command runs in the module root |
 | `"$@"` | `{args}` (§5) |
 | `$HOME`, `${VAR:-x}` | `${HOME}`, `${VAR:-x}`, expanded by `sb` (§5) |
@@ -187,9 +242,9 @@ Reading the table:
 - **unity** has no start command: Unity modules launch from the editor.
   `sb up` skips one with
   `skipped <module>: unity modules have no start command (launch them from their editor)`,
-  and `sb run` refuses it. Mark a Unity module `up: false` in
-  `sb.flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.4) to keep it out of the
-  plan altogether.
+  and `sb run` refuses it. Leave a Unity module out of every flow's
+  `nodes:` ([sbcli_flow.md](sbcli_flow.md) §3) to keep it out of the
+  plan altogether (sb 0.8.0+).
 - **`{python}`** is `.venv/bin/python` when that file exists under the
   module root (`.venv/Scripts/python.exe` on Windows), else `python3` on
   Linux and macOS and `python` on Windows. A module with a project venv
@@ -263,8 +318,8 @@ path in one left-to-right pass.
 | `{root}` | the absolute module root, with forward slashes on every OS |
 | `{bin}` | the language's binary path (§3.2), absolute |
 | `{exe}` | `.exe` on Windows, empty elsewhere |
-| `{id}` | the instance id; an error for a module without instances |
-| `{args}` | the instance's `args` from the flow, then the passthrough args of `sb run` (§9) |
+| `{id}` | the instance id; an error for a node without instances in the flow |
+| `{args}` | the instance's `args` from the flow's `instance_settings`, then the passthrough args of `sb run` (§9) |
 | `{ws}` | the workspace name |
 | `{os}` | `linux`, `windows`, or `macos` |
 | `{python}` | the module's Python interpreter (§3.2) |
@@ -283,9 +338,10 @@ Rules:
   `{args}` inside an `env:` value is an error too.
 - An unknown name is an error (`unknown placeholder {nmae}`), not
   literal text, so a typo cannot reach the started process silently.
-- `{id}` in a module without instances is an error
-  (`{id} used but this module has no instances`). `scripts.stop` runs
-  once per module, not per instance, so it has no `{id}` either.
+- `{id}` in a module that runs without instances (a singleton node of
+  the flow) is an error (`{id} used but this module has no instances`).
+  `scripts.stop` runs once per module, not per instance, so it has no
+  `{id}` either.
 - The pass is single: `${LIBCLANG_PATH:-/usr/lib}` is read as one
   environment reference, and a variable whose value happens to contain
   `{root}` is passed through as is, never expanded a second time.
@@ -345,8 +401,12 @@ reference, and let a box that differs set one variable:
 
 ```yaml
 platforms:
-  linux:   { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}" } }
-  windows: { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}" } }
+  linux:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}
+  windows:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}
 ```
 
 A host with LLVM elsewhere runs `export LIBCLANG_PATH=/opt/llvm/lib`
@@ -386,7 +446,7 @@ For one module on one host, lowest priority first:
 2. the top-level `scripts`, `env`, `requires`
 3. `platforms.<os>`
 4. `platforms.<os>-<arch>`
-5. the instance's `env` and `args`, from `sb.flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.6)
+5. the instance's `env` and `args`, from the flow's `instance_settings` ([sbcli_flow.md](sbcli_flow.md) §5)
 
 How each key merges:
 
@@ -402,17 +462,26 @@ Example, on a Linux aarch64 host:
 ```yaml
 module: cam
 language: cpp
-env: { LOG: info, MODE: sim }
+env:
+  LOG: info
+  MODE: sim
 platforms:
-  linux:         { env: { MODE: hw }, requires: [v4l2-ctl] }
-  linux-aarch64: { scripts: { build: [cmake -S . -B build -DJETSON=ON, cmake --build build] } }
-  windows:       {}
+  linux:
+    env:
+      MODE: hw
+    requires: [v4l2-ctl]
+  linux-aarch64:
+    scripts:
+      build: [cmake -S . -B build -DJETSON=ON, cmake --build build]
+  windows:
+    requires: [cmake]
 ```
 
 resolves to the C++ default `start` (`{bin} {args}`, with `{bin}` =
 `build/cam`), the Jetson `build` list, `env` `LOG=info` and `MODE=hw`,
 and `requires` `[v4l2-ctl]`. On Windows the same file resolves to the
-C++ default build and `MODE=sim`; on macOS the module is unsupported.
+C++ default build, `MODE=sim`, and `requires` `[cmake]`; on macOS the
+module is unsupported.
 
 ---
 
@@ -432,10 +501,10 @@ For each instance, `sb` starts the expanded `start` command:
 | `SB_WORKSPACE` | the workspace name | always |
 | `SB_MODULE` | the manifest's `module:` | always |
 | `SB_MODULE_ROOT` | the absolute module root | always |
-| `SB_INSTANCE_ID` | the instance id | the module has instances |
+| `SB_INSTANCE_ID` | the instance id | the node has instances in the flow |
 
-So a module declared with `instances: [sb00, sb01]` and the default
-Rust start runs `target/release/<module> --id sb00` in window
+So a node with `instances: [sb00, sb01]` in the flow
+([sbcli_flow.md](sbcli_flow.md) §4) and the default Rust start runs `target/release/<module> --id sb00` in window
 `<module>-sb00` and `target/release/<module> --id sb01` in window
 `<module>-sb01`, each with `SB_INSTANCE_ID` set. A program can take its
 identity from either: parsing `--id` keeps working exactly as before,
@@ -456,16 +525,20 @@ they come from your shell. Declare what the program depends on in
 Four cameras, four ArUco detectors, a tracker, a visualiser, and a
 one-shot calibrator. Before 0.6.0 every module carried a 60-line launch
 script and a stop script of which one to three lines were specific to
-the module, and the camera list was repeated in six places. After:
+the module, and the camera list was repeated in six places. After, in
+the `sb 0.8.0+` form:
 
 ```yaml
 # modules/ips_cam_gcam_pub/sb.module.yaml
 module: ips_cam_gcam_pub
 language: rust
 platforms:
-  linux: {}
+  linux:
+    requires: [cargo]
 publishers:
-  - { name: image, type: ros2/sensor_msgs/Image1280x1024, transport: iceoryx2 }
+  image:
+    type: ros2/sensor_msgs/Image1280x1024
+    transport: iceoryx2
 ```
 
 ```yaml
@@ -473,13 +546,23 @@ publishers:
 module: ips_detect
 language: rust
 platforms:
-  linux:   { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}" } }
-  windows: { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}" } }
+  linux:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}
+  windows:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}
 publishers:
-  - { name: markers,     type: ros2/custom/MarkerDetections,        transport: zenoh }
-  - { name: debug_image, type: ros2/sensor_msgs/Image1280x1024Color, transport: iceoryx2 }
+  markers:
+    type: ros2/custom/MarkerDetections
+    transport: zenoh
+  debug_image:
+    type: ros2/sensor_msgs/Image1280x1024Color
+    transport: iceoryx2
 subscribers:
-  - { name: image,       type: ros2/sensor_msgs/Image1280x1024,      transport: iceoryx2 }
+  image:
+    type: ros2/sensor_msgs/Image1280x1024
+    transport: iceoryx2
 ```
 
 ```yaml
@@ -487,11 +570,14 @@ subscribers:
 module: ips_track
 language: rust
 publishers:
-  - { name: cube_poses, type: ros2/custom/CubePoses, transport: zenoh }
+  cube_poses:
+    type: ros2/custom/CubePoses
+    transport: zenoh
 subscribers:
-  - { name: markers,    type: ros2/custom/MarkerDetections, transport: zenoh }
-services:
-  - { name: cam_param }
+  markers:
+    type: ros2/custom/MarkerDetections
+    transport: zenoh
+services: [cam_param]
 ```
 
 ```yaml
@@ -499,8 +585,12 @@ services:
 module: ips_viz
 language: rust
 subscribers:
-  - { name: cube_poses,  type: ros2/custom/CubePoses,                 transport: zenoh }
-  - { name: debug_image, type: ros2/sensor_msgs/Image1280x1024Color,  transport: iceoryx2 }
+  cube_poses:
+    type: ros2/custom/CubePoses
+    transport: zenoh
+  debug_image:
+    type: ros2/sensor_msgs/Image1280x1024Color
+    transport: iceoryx2
 ```
 
 ```yaml
@@ -508,32 +598,56 @@ subscribers:
 module: ips_calib
 language: rust
 subscribers:
-  - { name: markers, type: ros2/custom/MarkerDetections, transport: zenoh }
+  markers:
+    type: ros2/custom/MarkerDetections
+    transport: zenoh
 ```
 
 ```yaml
-# sb.flow.yaml
+# sb.workspace.yaml
 name: ws_ips
 modules:
-  ips_cam_gcam_pub: { path: modules/ips_cam_gcam_pub, instances: [sb00, sb01, sb02, sb03] }
-  ips_detect:       { path: modules/ips_detect,       instances: [sb00, sb01, sb02, sb03] }
-  ips_track:        modules/ips_track
-  ips_viz:          modules/ips_viz
-  ips_calib:        { path: modules/ips_calib, up: false }
+  ips_cam_gcam_pub: modules/ips_cam_gcam_pub
+  ips_detect: modules/ips_detect
+  ips_track: modules/ips_track
+  ips_viz: modules/ips_viz
+  ips_calib: modules/ips_calib
 messages:
-  - { style: ros2, path: messages/custom, backends: [proto, iox2] }
+  custom:
+    style: ros2
+    path: messages/custom
+    backends: [proto, iox2]
+```
+
+```yaml
+# sb.flow.yaml, the default flow
+nodes: [ips_cam_gcam_pub, ips_detect, ips_track, ips_viz]
+instances:
+  ips_cam_gcam_pub: [sb00, sb01, sb02, sb03]
+  ips_detect: [sb00, sb01, sb02, sb03]
 wires:
-  ips_detect.image:    "ips_cam_gcam_pub[{id}].image"
-  ips_track.markers:   "ips_detect[*].markers"
-  ips_calib.markers:   "ips_detect[*].markers"
-  ips_viz.cube_poses:  ips_track.cube_poses
-  # ips_viz.debug_image is iceoryx2, which has no wildcard: main() opens one
-  # subscriber per camera itself, so it is not wired.
+  ips_cam_gcam_pub[{id}].image: ips_detect.image
+  ips_detect[*].markers: ips_track.markers
+  ips_track.cube_poses: ips_viz.cube_poses
+  # ips_detect.debug_image is iceoryx2, which has no wildcard: ips_viz's
+  # main() opens one subscriber per camera itself, so it is not wired.
+```
+
+```yaml
+# calib.flow.yaml, started with `sb up calib`
+nodes: [ips_cam_gcam_pub, ips_detect, ips_track, ips_calib]
+instances:
+  ips_cam_gcam_pub: [sb00, sb01, sb02, sb03]
+  ips_detect: [sb00, sb01, sb02, sb03]
+wires:
+  ips_cam_gcam_pub[{id}].image: ips_detect.image
+  ips_detect[*].markers: [ips_track.markers, ips_calib.markers]
 ```
 
 No module declares `scripts:`: every binary is named after its module,
-so the Rust defaults apply. The camera list exists once, in
-`sb.flow.yaml`. Deleted: every per-module launch and stop script, and
+so the Rust defaults apply. The camera module lists only `linux` under
+`platforms`, which restricts it to Linux (§6.2). The camera list exists
+once per flow. Deleted: every per-module launch and stop script, and
 the pre-0.6.0 flow and module files (§11).
 
 What `sb install .` then `sb up` does on Linux:
@@ -544,7 +658,7 @@ building ips_cam_gcam_pub: cargo build --release
 building ips_detect: cargo build --release
 building ips_track: cargo build --release
 building ips_viz: cargo build --release
-launched 10 window(s) in tmux session "sb-ws_ips"
+flow default: launched 10 window(s) in tmux session "sb-ws_ips"
   - ips_cam_gcam_pub-sb00
   - ips_cam_gcam_pub-sb01
   - ips_cam_gcam_pub-sb02
@@ -559,9 +673,10 @@ attach with: tmux attach -t sb-ws_ips
 ```
 
 (Cargo's own output appears between the `building` lines.) `ips_calib`
-is neither built nor started, because of `up: false`;
-`sb run ips_calib` starts it when needed. On Windows the camera module
-is not supported, so `sb up` prints
+is neither built nor started, because it is not a node of the default
+flow; `sb down && sb up calib` runs the calibration flow instead
+([sbcli_flow.md](sbcli_flow.md) §9). On Windows the camera module is
+not supported, so `sb up` prints
 `skipped ips_cam_gcam_pub: not supported on windows-x86_64 (declares: linux)`
 and launches the other six windows.
 
@@ -573,9 +688,9 @@ sb run ips_detect:sb00        # rebuilds, then starts only that instance
 sb run --fg ips_viz           # rebuilds, then runs the visualiser in this terminal
 ```
 
-About `wires:`: in 0.6.0 `sb ws check` parses and validates them
-(`ws wires`, [sbcli_ws.md](sbcli_ws.md) §4.7), but code generation does
-not read them yet. Until a later release generates subscriber keys from
+About `wires:`: `sb ws check` parses and validates them (`ws flows`,
+[sbcli_flow.md](sbcli_flow.md) §8), but code generation does not read
+them yet. Until a later release generates subscriber keys from
 `wires:`, the modules still pair the way they did before 0.6.0: through
 `key:` entries ([sbcli_pubsub.md](sbcli_pubsub.md) §13.7) or the
 `TopicOverrides` a module's `main()` builds from its `--id`
@@ -583,15 +698,19 @@ not read them yet. Until a later release generates subscriber keys from
 
 ---
 
-## 11. Migrating from 0.5 (required since 0.7.0)
+## 11. Migrating from 0.5 (required since 0.7.0), and module ports from 0.7
 
-Every item below was deprecated in 0.6.0 and is removed in 0.7.0
-([sbcli.md](sbcli.md) §10 holds the table). `sb 0.7.0+` refuses the old
-file names and the top-level `instances:` map with an error that ends
-`(see sbcli_module.md §Migrating)`, which is this section, and ignores
-the old launch and stop scripts. There is no migration command: each
-change is a rename or a few lines of YAML, made by hand, and none of it
-needs an older `sb`.
+§11.1 to §11.9 cover 0.5: every item there was deprecated in 0.6.0 and
+is removed in 0.7.0 ([sbcli.md](sbcli.md) §10 holds the table).
+`sb 0.7.0+` refuses the old file names and the top-level `instances:`
+map with an error that ends `(see sbcli_module.md §Migrating)`, which
+is this section, and ignores the old launch and stop scripts. §11.10
+covers the 0.7 list form of ports, which `sb 0.8.0+` still reads and
+which needs no action. The 0.7 workspace file, split in 0.8.0 into
+`sb.workspace.yaml` and flow files, has its own guide:
+[sbcli_workspace.md](sbcli_workspace.md) §7. There is no migration
+command: each change is a rename or a few lines of YAML, made by hand,
+and none of it needs an older `sb`.
 
 ### 11.1 `sb.dev.yml` becomes `sb.module.yaml`
 
@@ -632,9 +751,14 @@ sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename
 ```
 
 The same applies to an installed copy written before 0.6.0 under
-`<sb_home>/workspaces/<name>/`: rename it there too, or reinstall the
-repository, which writes `sb.flow.yaml`. A leftover `flow.yaml` beside an
-`sb.flow.yaml` is ignored; delete it.
+`<sb_home>/workspaces/<name>/`: reinstall the repository. A leftover
+`flow.yaml` beside an `sb.flow.yaml` is ignored; delete it.
+
+`sb 0.8.0+`: the renamed file holds the 0.7 shape, which 0.8.0 still
+reads with a warning and 0.8.1 will not. Split it into
+`sb.workspace.yaml` and `sb.flow.yaml` as
+[sbcli_workspace.md](sbcli_workspace.md) §7 describes; that guide
+starts from the same contents.
 
 ### 11.3 `runscript.bash` becomes `scripts:`
 
@@ -656,8 +780,12 @@ After, in `sb.module.yaml`:
 module: ips_detect
 language: rust
 platforms:
-  linux:   { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}" } }
-  windows: { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}" } }
+  linux:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}
+  windows:
+    env:
+      LIBCLANG_PATH: ${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}
 ```
 
 then `git rm runscript.bash`. Line by line:
@@ -667,7 +795,7 @@ then `git rm runscript.bash`. Line by line:
 | `cd "$(dirname ...)"` | nothing: commands run in the module root |
 | the tmux re-exec and session naming | nothing: `sb` owns the windows, named `<module>-<id>` |
 | parsing `--id` in bash | nothing: `sb` appends `--id <id>` and sets `SB_INSTANCE_ID` |
-| `export VAR=value` | `env: { VAR: value }`, or `platforms.<os>.env` when it differs per OS |
+| `export VAR=value` | `env:` with `VAR: value` under it, or `platforms.<os>.env` when it differs per OS |
 | `cargo build --release`, `cmake ...` | nothing when it matches §3.2; else `scripts.build` |
 | `exec ./target/release/<module> "$@"` | nothing when it matches §3.2; else `scripts.start: "<path> {args}"` |
 | `"$@"` | `{args}` |
@@ -692,89 +820,69 @@ outside them (a container, a mount, a lock file) becomes `scripts.stop`:
 
 ```yaml
 scripts:
-  stop: docker rm -f cam_gige_ht-left cam_gige_ht-right
+  stop: rm -f /tmp/cam_gige_ht.lock
 ```
 
-The difference in timing: the old script ran inside the module's tmux
+A container started from the module's scripts is torn down the same
+way, with `docker compose down` (§14). The difference in timing: the old script ran inside the module's tmux
 window after `sb` had killed the process in it; `scripts.stop` runs in
 your terminal after the windows are closed. Both are teardown, not a
 graceful signal ([sbcli_launch.md](sbcli_launch.md) §4.1). `sb 0.7.0+`
 never runs `stopscript.bash`, so cleanup it still performs must move to
 `scripts.stop` before the upgrade.
 
-### 11.5 Top-level `instances:` moves under the module entry
+### 11.5 Top-level `instances:` moves to the flow
 
-Before:
+Before (0.5):
 
 ```yaml
 modules:
   ips_detect: modules/ips_detect
 instances:
-  ips_detect: [{ id: sb00 }, { id: sb01 }]
+  ips_detect:
+    - id: sb00
+    - id: sb01
 ```
 
-After:
+After (`sb 0.8.0+`), the module in the inventory and its ids in the
+flow:
 
 ```yaml
+# sb.workspace.yaml
 modules:
-  ips_detect: { path: modules/ips_detect, instances: [sb00, sb01] }
-```
-
-An instance is a bare id, or a map `{ id, label, args, env, docker }`
-([sbcli_ws.md](sbcli_ws.md) §4.6). `sb 0.7.0+` refuses a flow that still
-has a top-level `instances:` map, before anything else in it is read:
-
-```
-top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)
-```
-
-An installed copy written by 0.6.0 from such a flow carries the map
-too, so move the lists in the repository's `sb.flow.yaml`, then
-`sb install .`.
-
-### 11.6 `sb init --docker` no longer writes a bash template
-
-`sb init --docker` still checks the module's instances (each needs a
-`docker.image`) before writing anything, but writes only the manifest.
-An instance's `docker:` block stays valid and is validated, but `sb`
-does not start a container from it yet, and rather than run the host
-binary in its place, `sb up` **skips** a module whose instances declare
-`docker:` (`sb run` refuses it). The docker launch script that releases
-before 0.6.0 generated is not run either (sb 0.7.0+), so until native
-container launch lands there is one way forward: **move the container
-into `scripts.start`** and drop the `docker:` blocks, carrying the
-per-instance differences as instance `args`:
-
-```yaml
-# modules/cam_gige_ht/sb.module.yaml
-module: cam_gige_ht
-language: cpp
-scripts:
-  build: []
-  start: "docker run --rm --init {args} cam_gige_ht:latest"
-requires: [docker]
+  ips_detect: modules/ips_detect
 ```
 
 ```yaml
 # sb.flow.yaml
-modules:
-  cam_gige_ht:
-    path: camera_publishers/cam_gige_ht
-    instances:
-      - { id: left,  args: [--device, /dev/video0, -e, CAM_SERIAL=A123] }
-      - { id: right, args: [--device, /dev/video1, -e, CAM_SERIAL=B456] }
+nodes: [ips_detect]
+instances:
+  ips_detect: [sb00, sb01]
 ```
 
-`{args}` places the instance's flags among the `docker run` options, and
-the `--id left` that `sb` appends lands after the image name, where the
-container's entry point receives it as its own `--id`. `build: []`
-replaces the C++ default build, since the image is built elsewhere.
+An instance is an id; what else it needs (`label`, `args`, `env`) goes
+under `instance_settings` ([sbcli_flow.md](sbcli_flow.md) §4, §5).
+`sb 0.7.0` refused the 0.5 map with
+`top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)`.
+In `sb 0.8.0+` a top-level `instances:` is the flow file's own key, so
+a 0.5 file is neither a valid 0.7 nor a valid 0.8 file: migrate it
+straight to the split above ([sbcli_workspace.md](sbcli_workspace.md)
+§7), then `sb install .`.
 
-Closing the window ends the `docker run` client. Whether the container
-ends with it depends on how its process handles the signal `docker`
-forwards; `--init` gives it a process that passes signals on. If a
-container outlives its window, add a `scripts.stop` that removes it
-(§11.4).
+### 11.6 `sb init --docker` and instance `docker:` (removed in 0.8.0)
+
+0.6.0 removed the bash template `sb init --docker` used to write, and
+until 0.8.0 `sb up` skipped a module whose instances declared
+`docker:`. `sb 0.8.0` removes the rest: the `--docker` flag is unknown
+to `sb init`, and an instance has no `docker:` block (a 0.7 workspace
+file that still carries one has it dropped when it is read,
+[sbcli_workspace.md](sbcli_workspace.md) §7.7).
+
+A module that runs in a container now says so in its own manifest: its
+`scripts` call `docker compose` from the module root, and the compose
+file reads `${SB_INSTANCE_ID}` and the instance's `env`. The pattern is
+§14; the field-by-field mapping from a 0.7 `docker:` block is
+[sbcli_workspace.md](sbcli_workspace.md) §7.6.
 
 ### 11.7 `SB_NO_TMUX=1` becomes `sb run --fg`
 
@@ -817,7 +925,9 @@ nothing regenerates it. Details in [sbcli_pubsub.md](sbcli_pubsub.md)
 
 ### 11.9 Confirming you are done
 
-`sb 0.7.0+` prints no deprecation warnings. What remains is the
+Nothing in §11.1 to §11.8 prints a deprecation warning since 0.7.0;
+`sb 0.8.0` warns only about a workspace file still in the 0.7 shape
+([sbcli_workspace.md](sbcli_workspace.md) §7). What remains is the
 `deprecated` row of `sb ws check` and `sb doctor`, which lists every
 leftover pre-0.6.0 file it finds, one per line:
 
@@ -832,13 +942,54 @@ or `sb doctor`; the row reads `nothing deprecated in use`
 The whole migration, for one repository:
 
 1. `git mv` each module's `sb.dev.yml` to `sb.module.yaml` (§11.1).
-2. `git mv flow.yaml sb.flow.yaml` (§11.2).
-3. Move any top-level `instances:` under their module entries (§11.5).
+2. Replace `flow.yaml` with `sb.workspace.yaml` and `sb.flow.yaml`
+   (§11.2, [sbcli_workspace.md](sbcli_workspace.md) §7).
+3. Move any top-level `instances:` into the flow (§11.5).
 4. Translate each launch script into `scripts:`, or delete it when the
    defaults fit; delete each stop script, or turn it into
    `scripts.stop` (§11.3, §11.4).
-5. `sb install .`, then `sb ws check` until `ws modules` passes and
-   the `deprecated` row reads `nothing deprecated in use`.
+5. `sb install .`, then `sb ws check` until `ws modules` and
+   `ws flows` pass and the `deprecated` row reads
+   `nothing deprecated in use`.
+
+### 11.10 Ports and services: the 0.7 list form becomes the map form (optional)
+
+`sb 0.8.0+` writes `publishers:` and `subscribers:` as maps keyed by
+the port name and `services:` as a list of names (§2.1). The 0.7 forms
+are still read, with no warning and no removal planned, so nothing
+breaks; the change is cosmetic until you want it.
+
+Before (0.7, as `sb io` wrote it):
+
+```yaml
+publishers:
+- name: hello
+  topic: hello
+  type: ros2/std/StringStamped
+  transport: zenoh
+services:
+- name: calib
+```
+
+After (`sb 0.8.0+`):
+
+```yaml
+publishers:
+  hello:
+    topic: hello
+    type: ros2/std/StringStamped
+    transport: zenoh
+services: [calib]
+```
+
+Each `- name: <n>` item becomes the key `<n>:`, with the rest of the
+item indented under it; `topic:` may go when it equals the name, though
+`sb` writes it back. Any `sb io add`, `edit`, or `rm` performs the
+conversion for you, since it writes the whole file back in the new
+form, with `services:` as a block list (§13.1). The one visible
+difference before converting: a load error in a list-form file names
+the entry by index (`publishers[0]: ...`), in a map-form file by name
+(`publishers.hello: ...`).
 
 ---
 
@@ -870,8 +1021,13 @@ usually behind the module or file they concern.
 `sb io add`, `edit`, and `rm` write `sb.module.yaml` back from its
 parsed form. Every key survives,
 `scripts:` included, but YAML comments and your own key order do not,
-and `topic:` is written out even where you omitted it. Keep notes about
-the module in a README rather than in comments.
+and `topic:` is written out even where you omitted it, also when it
+equals the key. `sb 0.8.0+` writes the ports in the map form and
+`services:` as a list of names, whichever form the file was read in
+(§2.1), so the first write converts a 0.7 list-form file. `sb` writes
+lists in block style (`services:` followed by `- calib`); the inline
+`[calib]` you may write by hand reads the same. Keep notes about the module in a README rather
+than in comments.
 
 ### 13.2 A start command without `{args}` drops passthrough args
 
@@ -913,3 +1069,98 @@ close it.
 `requires` finds executables on `PATH`. Shared libraries and SDKs (a
 libclang for bindgen, an iceoryx2 install) are located through `env:`,
 with a `${VAR:-default}` default per OS (§6.3).
+
+---
+
+## 14. Containers via compose (sb 0.8.0+)
+
+`sb` does not start containers itself; it starts commands. A module
+that runs in a container calls Docker Compose from its own `scripts`,
+in the module root next to its `compose.yaml`, and the compose file
+takes what differs per instance from the environment `sb` gives each
+instance's window. This replaces the per-instance docker block of the
+0.7 workspace file, removed in 0.8.0 (§11.6).
+
+```yaml
+# modules/cam_gige_ht/sb.module.yaml
+module: cam_gige_ht
+language: cpp
+scripts:
+  build: docker compose build
+  start: docker compose run --rm cam
+  stop: docker compose down --remove-orphans
+requires: [docker]
+```
+
+```yaml
+# modules/cam_gige_ht/compose.yaml
+services:
+  cam:
+    build: .
+    image: cam_gige_ht:latest
+    entrypoint: [/app/cam_gige_ht]
+    init: true
+    network_mode: host
+    devices: ["${CAM_DEVICE}:${CAM_DEVICE}"]
+    environment:
+      SB_INSTANCE_ID: ${SB_INSTANCE_ID}
+      CAM_SERIAL: ${CAM_SERIAL}
+```
+
+```yaml
+# sb.flow.yaml
+nodes: [cam_gige_ht]
+instances:
+  cam_gige_ht: [left, right]
+instance_settings:
+  cam_gige_ht:
+    left:
+      env:
+        CAM_DEVICE: /dev/video0
+        CAM_SERIAL: A123
+    right:
+      env:
+        CAM_DEVICE: /dev/video1
+        CAM_SERIAL: B456
+```
+
+How the pieces meet:
+
+- **Build.** `scripts.build` runs once, inline, before any window
+  opens (§4). `docker compose build` builds the image and replaces the
+  C++ default build, since the code is compiled inside the image.
+- **Start.** `scripts.start` runs once per instance, in its own window,
+  with `SB_INSTANCE_ID`, `SB_MODULE`, `SB_WORKSPACE`, `SB_MODULE_ROOT`,
+  and the instance's `env` in its environment (§9). Compose substitutes
+  `${SB_INSTANCE_ID}`, `${CAM_DEVICE}`, and `${CAM_SERIAL}` in
+  `compose.yaml` from that environment, so one compose file serves
+  every instance.
+- **The appended `--id`.** `sb` appends `--id <id>` to the start
+  command (§4). With `docker compose run <service>`, everything after
+  the service name replaces the service's `command:`, so the
+  `entrypoint:` receives `--id left` as its own argument. Give the
+  service an `entrypoint:` that accepts `--id`; a `command:` would be
+  replaced. `docker compose up` does not accept `--id`, so it suits
+  only a module that runs without instances.
+- **What the container sees.** Only what `environment:` lists:
+  `SB_INSTANCE_ID` reaches the process inside because the compose file
+  passes it on. Zenoh peers on the host are reachable most simply with
+  `network_mode: host`. iceoryx2 shares memory with processes on the
+  host, which a container joins only when it shares the host's IPC
+  namespace and iceoryx2's runtime files; follow the iceoryx2
+  documentation for the version you run.
+- **Stop.** `scripts.stop` runs once per module, after the windows are
+  closed, with the module's `env` and no instance id (§4).
+  Closing a window ends the `docker compose run` client; whether its
+  container ends with it depends on how the container's process handles
+  the hang-up (`init: true` gives the container an init process that
+  forwards signals).
+  `docker compose down --remove-orphans` then stops and removes the
+  project's containers.
+  Run `docker ps` after the first `sb stop` to confirm nothing is left.
+- **`sb down`** runs no `scripts.stop` ([sbcli_launch.md](sbcli_launch.md)
+  §5). After `sb down`, run `sb stop cam_gige_ht` (it still runs
+  `scripts.stop` with no windows open) or `docker compose down` in the
+  module root.
+- **`requires: [docker]`** makes `sb doctor` check that `docker` is on
+  `PATH` (§7).

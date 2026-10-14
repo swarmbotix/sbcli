@@ -43,7 +43,7 @@ use sb_core::{
 };
 use sb_vault::{MessageName, Vault};
 use sb_workspace::{
-    MODULE_FILE, SbHome, active_workspace, find_module_file, new_module_file, read_flow,
+    MODULE_FILE, SbHome, active_workspace, find_module_file, new_module_file, read_workspace,
     refuse_removed_module_file,
 };
 
@@ -79,7 +79,8 @@ impl ModuleHandle {
 ///
 /// Order (highest priority first), per level3.html §"Module resolution":
 ///   1. `explicit = Some(name)` AND `./<name>/` holds a manifest in `cwd`.
-///   2. `explicit = Some(name)` AND the active workspace's flow has it.
+///   2. `explicit = Some(name)` AND the active workspace's
+///      `sb.workspace.yaml` registers it.
 ///   3. `explicit = None` AND `./` holds a manifest.
 ///
 /// Errors with all paths searched if every rule misses.
@@ -92,13 +93,12 @@ pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Resu
                 return load_handle(&found);
             }
             let mut tried: Vec<PathBuf> = vec![new_module_file(&child)];
-            // Rule 2 — active workspace's flow. An installed copy written
-            // before 0.7.0 may record `.../sb.dev.yml`; that stands for
-            // the `sb.module.yaml` beside it.
+            // Rule 2 — active workspace's inventory. A path recording
+            // `.../sb.dev.yml` stands for the `sb.module.yaml` beside it.
             if let Some(ws) = active_workspace(home)? {
-                let flow = read_flow(home, &ws)?;
-                if let Some(m) = flow.modules.get(name) {
-                    let manifest = current_manifest_path(&m.path);
+                let workspace = read_workspace(home, &ws)?;
+                if let Some(path) = workspace.modules.get(name) {
+                    let manifest = current_manifest_path(path);
                     tried.push(manifest.clone());
                     if manifest.is_file() {
                         return load_handle(&manifest);
@@ -107,7 +107,7 @@ pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Resu
                         refuse_removed_module_file(dir)?;
                     }
                 } else {
-                    tried.push(home.flow_path(&ws));
+                    tried.push(home.workspace_file(&ws));
                 }
             }
             refuse_removed_module_file(&child)?;

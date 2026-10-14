@@ -13,14 +13,16 @@ fn workspace_lifecycle_round_trip() {
     let workspaces = s.sb_home().join("workspaces");
     let active = s.sb_home().join("active");
 
-    // `sb ws create` writes ./sb.flow.yaml, so each workspace gets its own folder.
+    // `sb ws create` writes ./sb.workspace.yaml and ./sb.flow.yaml, so each
+    // workspace gets its own folder.
     let repo = |name: &str| {
         let dir = s.tempdir().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     };
 
-    // create ws1: writes the repo sb.flow.yaml, installs it, and activates it
+    // create ws1: writes the repo sb.workspace.yaml and sb.flow.yaml,
+    // installs them, and activates the workspace
     let ws1_repo = repo("ws1_repo");
     let out = s
         .cmd()
@@ -29,12 +31,33 @@ fn workspace_lifecycle_round_trip() {
         .output()
         .unwrap();
     assert!(out.status.success(), "ws create ws1 failed: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .starts_with("wrote sb.workspace.yaml and sb.flow.yaml\n"),
+        "{out:?}"
+    );
     assert_eq!(
-        std::fs::read_to_string(ws1_repo.join(sb_core::FLOW_FILE)).unwrap(),
-        "name: ws1\nmodules: {}\n"
+        std::fs::read_to_string(ws1_repo.join(sb_core::WORKSPACE_FILE)).unwrap(),
+        "name: ws1\nmodules:\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws1_repo.join(sb_core::DEFAULT_FLOW_FILE)).unwrap(),
+        "nodes: []\n"
     );
     assert!(workspaces.join("ws1").is_dir());
-    assert!(workspaces.join("ws1").join(sb_core::FLOW_FILE).exists());
+    assert!(
+        workspaces
+            .join("ws1")
+            .join(sb_core::WORKSPACE_FILE)
+            .exists()
+    );
+    assert!(
+        workspaces
+            .join("ws1")
+            .join("flows")
+            .join(sb_core::DEFAULT_FLOW_FILE)
+            .exists()
+    );
 
     // A second create in the same folder is refused.
     let out = s
@@ -45,7 +68,7 @@ fn workspace_lifecycle_round_trip() {
         .unwrap();
     assert!(
         !out.status.success(),
-        "create over an existing flow must fail"
+        "create over an existing workspace must fail"
     );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("already exists"),

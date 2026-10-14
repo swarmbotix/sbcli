@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sb_core::{
-    Encoding, Host, Language, ModuleDevConfig, SbCliConfig, TopicRef, Transport, Wire,
-    WireSelector, WorkspaceFlow,
+    Encoding, Flow, Host, Language, ModuleDevConfig, SbCliConfig, TopicRef, Transport, Wire,
+    WireEnd, WireSelector, WireSource, Workspace,
 };
 
 /// The zenoh crate compiled into this binary, from `Cargo.lock` at build time
@@ -487,15 +487,23 @@ pub fn check_module_topics<'a>(
 pub struct WorkspaceView<'a> {
     /// Workspace name; the `<ws>` segment of every owned wire key.
     pub name: &'a str,
-    /// The installed copy (`<sb_home>/workspaces/<name>/sb.flow.yaml`).
-    pub flow: &'a WorkspaceFlow,
+    /// The installed inventory
+    /// (`<sb_home>/workspaces/<name>/sb.workspace.yaml`).
+    pub workspace: &'a Workspace,
+    /// Every installed flow that read and validated, as `(flow name,
+    /// flow)`, `default` first.
+    pub flows: &'a [(String, Flow)],
+    /// Installed flows that did not read, as `(flow name, error)`; each is
+    /// a `ws flows` `[FAIL]`.
+    pub flow_errors: &'a [(String, String)],
     /// Root of the vault `type:` names resolve in (the configured
     /// `messages_root`, the one `sb install` imports into).
     pub vault_root: &'a Path,
-    /// The repo flow file when it was modified after the installed copy
-    /// was written (`sb_workspace::is_stale`); `None` when current or when
-    /// the workspace has no source.
-    pub stale_repo_flow: Option<&'a Path>,
+    /// The newest repository file (the workspace's package file or a flow
+    /// beside it) when it was modified after the installed copy was
+    /// written (`sb_workspace::is_stale`); `None` when current or when the
+    /// workspace has no source.
+    pub stale_repo: Option<&'a Path>,
     /// The host the workspace is checked for: decides `platforms:` support
     /// and which overlays merge into `requires`.
     pub host: Host,
@@ -542,11 +550,11 @@ fn entries_of(dev: &ModuleDevConfig) -> Vec<EntryRef<'_>> {
 /// Validate one installed workspace. Rows, in order:
 ///
 /// - `workspace`: the name, module count, and where it was installed from.
-/// - `ws modules`: `[FAIL]` per module whose module manifest is missing,
-///   does not parse, or fails validation; one `[OK]` otherwise.
+/// - `ws modules`: `[FAIL]` per module of the workspace whose module
+///   manifest is missing, does not parse, or fails validation; one `[OK]`
+///   otherwise.
 /// - `ws types`: `[FAIL]` per proto/fb entry whose `type:` is not a vault
 ///   message (nor an `iox2_variants` variant); raw entries carry no type.
-/// - `ws instances`: `[FAIL]` per instance id listed twice for one module.
 /// - `ws encoding`: `[FAIL]` per wire key whose entries, across every
 ///   module, disagree on `encoding:`.
 /// - `ws io files`: `[WARN]` per module with generated files missing under
@@ -556,30 +564,32 @@ fn entries_of(dev: &ModuleDevConfig) -> Vec<EntryRef<'_>> {
 ///   skipped.
 /// - `ws platforms`: `[WARN]` per module whose `platforms:` block does not
 ///   list this host.
-/// - `ws wires`: `[FAIL]` per problem with a `wires:` entry, checked against
-///   the module manifests and instance lists.
-/// - `deprecated`: one `[WARN]` listing every pre-0.6 file the workspace
-///   still holds and sb ignores since 0.7.0, one per line.
-/// - `ws source`: `[WARN]` when the repo flow file is newer than the
+/// - `ws flows`: one `[OK]` with a line per flow, `<flow>: <n> node(s),
+///   <i> instance(s), <w> wire(s) resolve`; or a `[FAIL]` per problem,
+///   `<flow>: <wire or item>: <reason>`: a node that is no module of the
+///   workspace, a wire end that is not a publisher (source) or subscriber
+///   (sink), a selector the instances do not satisfy, a transport or type
+///   mismatch. A flow that did not read is one `[FAIL]` with its error.
+/// - `deprecated`: one `[WARN]` listing every deprecated or ignored file
+///   the workspace still holds, one per line: the pre-0.6 files sb ignores
+///   since 0.7.0, and a repository `sb.flow.yaml` in the 0.7 shape.
+/// - `ws source`: `[WARN]` when a repository file is newer than the
 ///   installed copy; `[SKIP]` for a workspace with no `source:`.
 ///
 /// Rows for modules that failed `ws modules` are not repeated further down.
 pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckResult> {
     let manifests: Vec<(String, PathBuf)> = ws
-        .flow
-        .module_paths()
-        .into_iter()
-        .map(|(name, path)| {
-            let manifest = manifest_path(&path);
-            (name, manifest)
-        })
+        .workspace
+        .modules
+        .iter()
+        .map(|(name, path)| (name.clone(), manifest_path(path)))
         .collect();
-    let origin = match &ws.flow.source {
+    let origin = match &ws.workspace.source {
         Some(src) => match &src.url {
             Some(url) => format!("installed from {url}"),
-            None => format!("installed from {}", src.repo_flow.display()),
+            None => format!("installed from {}", src.repo_workspace.display()),
         },
-        None => "no source (not installed from a repo flow.yaml)".to_owned(),
+        None => "no source (not installed from a repository)".to_owned(),
     };
     let mut out = vec![ok(
         "workspace",
@@ -607,15 +617,14 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
     out.extend(module_fails);
 
     out.extend(check_ws_types(cfg, ws.vault_root, &loaded));
-    out.extend(check_ws_instances(ws.flow));
     out.extend(check_ws_encoding(cfg, ws.name, &loaded));
     out.extend(check_ws_io_files(&loaded));
     out.push(check_ws_requires(&ws.host, &loaded));
     out.extend(check_ws_platforms(&ws.host, &loaded));
-    out.extend(check_ws_wires(ws.flow, &loaded));
+    out.extend(check_ws_flows(ws, &loaded));
     out.push(check_ws_deprecated(ws, &manifests, &loaded));
-    out.push(match (&ws.flow.source, ws.stale_repo_flow) {
-        (None, _) => skip("ws source", "no repo flow.yaml to compare with"),
+    out.push(match (&ws.workspace.source, ws.stale_repo) {
+        (None, _) => skip("ws source", "no repository to compare with"),
         (Some(_), Some(repo)) => warn(
             "ws source",
             format!(
@@ -625,7 +634,10 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
         ),
         (Some(src), None) => ok(
             "ws source",
-            format!("installed copy is current with {}", src.repo_flow.display()),
+            format!(
+                "installed copy is current with {}",
+                src.repo_workspace.display()
+            ),
         ),
     });
     out
@@ -727,35 +739,6 @@ fn is_iox2_variant(cfg: &SbCliConfig, name: &sb_vault::MessageName) -> bool {
                 .is_some_and(|ns| ns == name.namespace && vs.contains_key(&name.leaf))
         })
     })
-}
-
-fn check_ws_instances(flow: &WorkspaceFlow) -> Vec<CheckResult> {
-    let mut out = Vec::new();
-    let mut total = 0usize;
-    // `instances_for` is the list under the module entry, which is what
-    // launch fans out.
-    for module in flow.modules.keys() {
-        let mut seen = std::collections::BTreeSet::new();
-        for inst in flow.instances_for(module) {
-            total += 1;
-            if !seen.insert(inst.id.as_str()) {
-                out.push(fail(
-                    "ws instances",
-                    format!(
-                        "{module}: instance id {:?} is declared more than once",
-                        inst.id
-                    ),
-                ));
-            }
-        }
-    }
-    if out.is_empty() {
-        out.push(ok(
-            "ws instances",
-            format!("{total} instance(s), ids unique per module"),
-        ));
-    }
-    out
 }
 
 fn check_ws_encoding(
@@ -965,137 +948,223 @@ fn check_ws_platforms(host: &Host, modules: &[LoadedModule<'_>]) -> Vec<CheckRes
     out
 }
 
-/// `ws wires`: `[FAIL]` per problem, as `<lhs>: <reason>`, for every
-/// `wires:` entry. Grammar errors come from [`WorkspaceFlow::wires`];
-/// existence, instance, transport and type checks run against the loaded
-/// manifests and the flow's instance lists. A wire with an end in a module
-/// whose manifest did not load is skipped (`ws modules` already failed it).
-fn check_ws_wires(flow: &WorkspaceFlow, modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
-    let wires = match flow.wires() {
-        Ok(wires) => wires,
-        Err(e) => return vec![fail("ws wires", e.to_string())],
-    };
-    if wires.is_empty() {
-        return vec![ok("ws wires", "no wires")];
-    }
-    let mut out = Vec::new();
-    let mut resolved = 0usize;
-    for wire in &wires {
-        let Some(problems) = wire_problems(flow, modules, wire) else {
-            continue;
-        };
+/// `ws flows`: when every flow resolves, one `[OK]` with a line per flow,
+/// `<flow>: <n> node(s), <i> instance(s), <w> wire(s) resolve`, `default`
+/// first. Otherwise one `[FAIL]` per problem, `<flow>: <wire or item>:
+/// <reason>`, and one per flow that did not read, `<flow>: <error>`. Node
+/// membership is checked against the workspace's modules; wires against
+/// the loaded manifests and the flow's instance lists. A wire with an end
+/// in a module whose manifest did not load is skipped (`ws modules`
+/// already failed it) and not counted.
+fn check_ws_flows(ws: &WorkspaceView<'_>, modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
+    let mut resolved_lines: Vec<String> = Vec::new();
+    let mut fails: Vec<CheckResult> = Vec::new();
+    for (name, flow) in ws.flows {
+        let (problems, resolved) = flow_problems(ws.workspace, flow, modules);
         if problems.is_empty() {
-            resolved += 1;
-            continue;
+            let instances: usize = flow
+                .nodes
+                .iter()
+                .map(|node| flow.instances_for(node).len())
+                .sum();
+            resolved_lines.push(format!(
+                "{name}: {} node(s), {instances} instance(s), {resolved} wire(s) resolve",
+                flow.nodes.len()
+            ));
+        } else {
+            fails.extend(
+                problems
+                    .into_iter()
+                    .map(|(item, reason)| fail("ws flows", format!("{name}: {item}: {reason}"))),
+            );
         }
-        let lhs = format!("{}.{}", wire.sub.module, wire.sub.entry);
-        out.extend(
-            problems
-                .into_iter()
-                .map(|reason| fail("ws wires", format!("{lhs}: {reason}"))),
-        );
     }
-    if out.is_empty() {
-        out.push(ok("ws wires", format!("{resolved} wire(s) resolve")));
+    for (name, error) in ws.flow_errors {
+        fails.push(fail("ws flows", format!("{name}: {error}")));
     }
-    out
+    if !fails.is_empty() {
+        return fails;
+    }
+    if resolved_lines.is_empty() {
+        return vec![warn(
+            "ws flows",
+            "no flows installed; `sb up` needs one (add sb.flow.yaml beside sb.workspace.yaml)",
+        )];
+    }
+    vec![ok("ws flows", resolved_lines.join(&format!("\n{MSG_COL}")))]
 }
 
-/// Every reason `wire` does not resolve; empty when it does. `None` when an
-/// end names a module that is in the flow but whose manifest failed to
-/// load, so it is not misreported as unknown.
+/// Every `(item, reason)` that keeps `flow` from resolving, and the number
+/// of its wires that resolve.
+fn flow_problems(
+    workspace: &Workspace,
+    flow: &Flow,
+    modules: &[LoadedModule<'_>],
+) -> (Vec<(String, String)>, usize) {
+    let mut problems: Vec<(String, String)> = flow
+        .nodes
+        .iter()
+        .filter(|node| !workspace.modules.contains_key(node.as_str()))
+        .map(|node| ("nodes".to_owned(), format!("unknown node {node}")))
+        .collect();
+    let mut resolved = 0usize;
+    for wire in &flow.wires {
+        match wire_problems(flow, modules, wire) {
+            None => {}
+            Some(list) if list.is_empty() => resolved += 1,
+            Some(list) => problems.extend(list),
+        }
+    }
+    (problems, resolved)
+}
+
+/// `<module>[<selector>].<entry>`, as the wire's key spells it.
+fn wire_source_label(source: &WireSource) -> String {
+    format!("{}{}.{}", source.module, source.selector, source.entry)
+}
+
+/// `<source> -> <module>.<entry>`: the item a sink's problem is reported
+/// under.
+fn wire_sink_label(source: &str, sink: &WireEnd) -> String {
+    format!("{source} -> {}.{}", sink.module, sink.entry)
+}
+
+/// Every `(item, reason)` that keeps `wire` from resolving; empty when it
+/// resolves. `None` when an end names a module that is not loaded: one
+/// that is no module of the workspace (reported under `nodes`) or whose
+/// manifest failed (reported under `ws modules`).
 ///
-/// A missing module or entry stops the check at that point. Past it, the
-/// selector, transport and type checks are independent and all reported.
+/// The source must be a publisher of its module and each sink a
+/// subscriber of its own; their transport and type must match. `[*]` is
+/// zenoh only; `[{id}]` needs instances on the source and on each sink,
+/// with every sink id present on the source; `[<id>]` needs that instance
+/// on the source. A missing entry stops the check of that end; past it,
+/// the checks are independent and all reported.
 fn wire_problems(
-    flow: &WorkspaceFlow,
+    flow: &Flow,
     modules: &[LoadedModule<'_>],
     wire: &Wire,
-) -> Option<Vec<String>> {
-    let (sub_end, pub_end) = (&wire.sub, &wire.pub_);
-
-    let Some(sub_module) = find_loaded(modules, &sub_end.module) else {
-        return (!flow.modules.contains_key(&sub_end.module))
-            .then(|| vec!["unknown subscriber module".to_owned()]);
-    };
-    let Some(sub) = sub_module
-        .dev
-        .subscribers
+) -> Option<Vec<(String, String)>> {
+    let source = &wire.source;
+    let lhs = wire_source_label(source);
+    let ends: Vec<&str> = std::iter::once(source.module.as_str())
+        .chain(wire.sinks.iter().map(|s| s.module.as_str()))
+        .collect();
+    let mut problems: Vec<(String, String)> = ends
         .iter()
-        .find(|s| s.name == sub_end.entry)
-    else {
-        return Some(vec![format!(
-            "no subscriber {} in {}",
-            sub_end.entry, sub_end.module
-        )]);
-    };
-    let Some(pub_module) = find_loaded(modules, &pub_end.module) else {
-        return (!flow.modules.contains_key(&pub_end.module))
-            .then(|| vec!["unknown publisher module".to_owned()]);
-    };
+        .filter(|module| !flow.is_node(module))
+        .map(|module| (lhs.clone(), format!("unknown node {module}")))
+        .collect();
+    if !problems.is_empty() {
+        return Some(problems);
+    }
+    if ends.iter().any(|m| find_loaded(modules, m).is_none()) {
+        // Unknown to the workspace (`nodes` says so) or not loaded (`ws
+        // modules` says so); either way there is nothing to check against.
+        return None;
+    }
+
+    let pub_module = find_loaded(modules, &source.module)?;
     let Some(publ) = pub_module
         .dev
         .publishers
         .iter()
-        .find(|p| p.name == pub_end.entry)
+        .find(|p| p.name == source.entry)
     else {
-        return Some(vec![format!(
-            "no publisher {} in {}",
-            pub_end.entry, pub_end.module
+        return Some(vec![(
+            lhs,
+            format!("no publisher {} in {}", source.entry, source.module),
         )]);
     };
 
-    let mut problems = Vec::new();
-    let pub_ids = flow.instances_for(&pub_end.module);
-    match &pub_end.selector {
+    let pub_ids = flow.instances_for(&source.module);
+    let same_id = matches!(source.selector, WireSelector::SameId);
+    match &source.selector {
         WireSelector::None => {}
         WireSelector::All => {
-            if sub.transport == Transport::Iceoryx2 || publ.transport == Transport::Iceoryx2 {
-                problems.push("[*] on iceoryx2 is not supported".to_owned());
+            if publ.transport == Transport::Iceoryx2 {
+                problems.push((lhs.clone(), "[*] on iceoryx2 is not supported".to_owned()));
             }
         }
         WireSelector::SameId => {
-            let sub_ids = flow.instances_for(&sub_end.module);
-            if sub_ids.is_empty() {
-                problems.push(format!("{{id}} but {} has no instances", sub_end.module));
-            }
             if pub_ids.is_empty() {
-                problems.push(format!("{{id}} but {} has no instances", pub_end.module));
-            } else {
-                // Each subscriber instance reads the publisher instance with
-                // its own id, so every one of them needs a counterpart.
-                for inst in sub_ids {
-                    if !pub_ids.iter().any(|p| p.id == inst.id) {
-                        problems.push(format!("no instance {} in {}", inst.id, pub_end.module));
+                problems.push((
+                    lhs.clone(),
+                    format!("{{id}} but {} has no instances", source.module),
+                ));
+            }
+        }
+        WireSelector::Id(id) => {
+            if !pub_ids.iter().any(|p| p == id) {
+                problems.push((
+                    lhs.clone(),
+                    format!("no instance {id} in {}", source.module),
+                ));
+            }
+        }
+    }
+
+    for sink in &wire.sinks {
+        let item = wire_sink_label(&lhs, sink);
+        let sink_module = find_loaded(modules, &sink.module)?;
+        let Some(sub) = sink_module
+            .dev
+            .subscribers
+            .iter()
+            .find(|s| s.name == sink.entry)
+        else {
+            problems.push((
+                item,
+                format!("no subscriber {} in {}", sink.entry, sink.module),
+            ));
+            continue;
+        };
+        if same_id {
+            let sink_ids = flow.instances_for(&sink.module);
+            if sink_ids.is_empty() {
+                problems.push((
+                    item.clone(),
+                    format!("{{id}} but {} has no instances", sink.module),
+                ));
+            } else if !pub_ids.is_empty() {
+                // Each sink instance reads the source instance with its own
+                // id, so every one of them needs a counterpart.
+                for id in sink_ids {
+                    if !pub_ids.contains(id) {
+                        problems.push((
+                            item.clone(),
+                            format!("no instance {id} in {}", source.module),
+                        ));
                     }
                 }
             }
         }
-        WireSelector::Id(id) => {
-            if !pub_ids.iter().any(|p| p.id == *id) {
-                problems.push(format!("no instance {id} in {}", pub_end.module));
-            }
+        if sub.transport != publ.transport {
+            problems.push((
+                item.clone(),
+                format!(
+                    "transport mismatch ({} vs {})",
+                    publ.transport.as_str(),
+                    sub.transport.as_str()
+                ),
+            ));
         }
-    }
-    if sub.transport != publ.transport {
-        problems.push(format!(
-            "transport mismatch ({} vs {})",
-            sub.transport.as_str(),
-            publ.transport.as_str()
-        ));
-    }
-    if sub.msg_type != publ.msg_type {
-        // `type:` is absent only on raw entries.
-        problems.push(format!(
-            "type mismatch ({} vs {})",
-            sub.msg_type.as_deref().unwrap_or("raw"),
-            publ.msg_type.as_deref().unwrap_or("raw")
-        ));
+        if sub.msg_type != publ.msg_type {
+            // `type:` is absent only on raw entries.
+            problems.push((
+                item,
+                format!(
+                    "type mismatch ({} vs {})",
+                    publ.msg_type.as_deref().unwrap_or("raw"),
+                    sub.msg_type.as_deref().unwrap_or("raw")
+                ),
+            ));
+        }
     }
     Some(problems)
 }
 
-/// The loaded module the flow calls `name`, if its manifest loaded.
+/// The loaded module the workspace calls `name`, if its manifest loaded.
 fn find_loaded<'m, 'a>(
     modules: &'m [LoadedModule<'a>],
     name: &str,
@@ -1103,13 +1172,19 @@ fn find_loaded<'m, 'a>(
     modules.iter().find(|m| m.name == name)
 }
 
-/// `deprecated`: one `[WARN]` listing every pre-0.6 file the workspace
-/// still holds, one per line, each pointing at the migration guide. sb
-/// ignores all of them since 0.7.0: `sb.dev.yml` and `runscript.bash` /
-/// `stopscript.bash` in a module directory (`manifests`, every registered
-/// module, loaded or not), and `flow.yaml` beside the repo flow. Scripts
-/// are looked for at the module root of a loaded manifest, else in the
-/// manifest's directory.
+/// `deprecated`: one `[WARN]` listing every deprecated or ignored file the
+/// workspace still holds, one per line, each pointing at its migration
+/// guide:
+///
+/// - a repository `sb.flow.yaml` in the 0.7 shape (modules and wiring in
+///   one file), which 0.8.0 still installs and 0.8.1 will not read;
+/// - the pre-0.6 files sb ignores since 0.7.0: `sb.dev.yml` and
+///   `runscript.bash` / `stopscript.bash` in a module directory
+///   (`manifests`, every registered module, loaded or not), and
+///   `flow.yaml` beside the repository's package file.
+///
+/// Scripts are looked for at the module root of a loaded manifest, else
+/// in the manifest's directory.
 fn check_ws_deprecated(
     ws: &WorkspaceView<'_>,
     manifests: &[(String, PathBuf)],
@@ -1121,18 +1196,34 @@ fn check_ws_deprecated(
             None => manifest.parent().map(Path::to_path_buf),
         }
     };
+    let repo_dir = ws
+        .workspace
+        .source
+        .as_ref()
+        .and_then(|src| src.repo_workspace.parent());
+
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(dir) = repo_dir {
+        let flow = dir.join(sb_core::DEFAULT_FLOW_FILE);
+        let legacy = std::fs::read_to_string(&flow)
+            .is_ok_and(|text| sb_core::probe_legacy_flow_shape(&text));
+        if legacy {
+            lines.push(format!(
+                "{} at {} is in the 0.7 shape, which 0.8.1 no longer reads (split it into \
+                 sb.workspace.yaml and sb.flow.yaml; see sbcli_workspace.md §Migrating)",
+                sb_core::DEFAULT_FLOW_FILE,
+                flow.display()
+            ));
+        }
+    }
+
     let mut found: Vec<PathBuf> = Vec::new();
     for (_, manifest) in manifests {
         if let Some(dir) = manifest.parent() {
             found.push(dir.join(sb_core::REMOVED_MODULE_FILE));
         }
     }
-    if let Some(dir) = ws
-        .flow
-        .source
-        .as_ref()
-        .and_then(|src| src.repo_flow.parent())
-    {
+    if let Some(dir) = repo_dir {
         found.push(dir.join(sb_core::REMOVED_FLOW_FILE));
     }
     for script in ["runscript.bash", "stopscript.bash"] {
@@ -1142,18 +1233,19 @@ fn check_ws_deprecated(
             }
         }
     }
-    let lines: Vec<String> = found
-        .iter()
-        .filter(|path| path.is_file())
-        .filter_map(|path| {
-            let file = path.file_name()?.to_string_lossy();
-            Some(format!(
-                "{file} at {} is ignored since 0.7.0 ({})",
-                path.display(),
-                sb_core::MIGRATING_HINT
-            ))
-        })
-        .collect();
+    lines.extend(
+        found
+            .iter()
+            .filter(|path| path.is_file())
+            .filter_map(|path| {
+                let file = path.file_name()?.to_string_lossy();
+                Some(format!(
+                    "{file} at {} is ignored since 0.7.0 ({})",
+                    path.display(),
+                    sb_core::MIGRATING_HINT
+                ))
+            }),
+    );
     if lines.is_empty() {
         return ok("deprecated", "nothing deprecated in use");
     }

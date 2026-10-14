@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 
 use sb_core::{Language, ModuleDevConfig, ModulePrdConfig, current_manifest_path};
-use sb_workspace::{SbHome, read_flow, refuse_removed_module_file};
+use sb_workspace::{SbHome, read_workspace, refuse_removed_module_file};
 
 // ─────────────────────────────────────────────────────────────────────
 // Pure transform — ModuleDevConfig → ModulePrdConfig
@@ -334,16 +334,16 @@ pub struct ModuleResult {
     pub result: Result<GoproOutcome>,
 }
 
-/// `sb gopro --all` — run [`gopro_module`] on every module in the
-/// active workspace's flow. Errors per-module are collected, not
-/// propagated, so a single broken module manifest doesn't stop the rest
-/// from freezing.
+/// `sb gopro --all` — run [`gopro_module`] on every module the active
+/// workspace's `sb.workspace.yaml` registers. Errors per-module are
+/// collected, not propagated, so a single broken module manifest doesn't
+/// stop the rest from freezing.
 pub fn gopro_all(home: &SbHome, workspace: &str) -> Result<Vec<ModuleResult>> {
-    let flow = read_flow(home, workspace)
-        .with_context(|| format!("reading the flow of workspace {workspace:?}"))?;
-    let modules = flow.module_paths();
+    let modules = read_workspace(home, workspace)
+        .with_context(|| format!("reading the installed workspace {workspace:?}"))?
+        .modules;
     if modules.is_empty() {
-        bail!("workspace {workspace:?} has no modules in its flow — run `sb init` first");
+        bail!("workspace {workspace:?} has no modules — run `sb init` first");
     }
     let mut out = Vec::with_capacity(modules.len());
     for (module, dev_yml) in modules {

@@ -58,8 +58,10 @@ messages_root: /home/user/.swarmbotix/messages
 # One schema, many fixed-size iox2 types (see sbcli_messages.md §6.4).
 iox2_variants:
   swarmbotix.images.Image:
-    Image480pMono8: { data: 307200 }   # 640 x 480 x 1
-    Image1080pRgb8: { data: 6220800 }  # 1920 x 1080 x 3
+    Image480pMono8:                    # 640 x 480 x 1
+      data: 307200
+    Image1080pRgb8:                    # 1920 x 1080 x 3
+      data: 6220800
 
 # Per-field capacity for `repeated <scalar>`.
 vec_caps:
@@ -467,7 +469,7 @@ pth.write_text("\n".join([
 
 (The per-module `swarmbotix_io/` paths come from each adopted
 module's `sb.module.yaml` — iterate over the active workspace's
-`sb.flow.yaml` to gather them.)
+installed `sb.workspace.yaml` to gather them.)
 
 If `.pth` isn't viable — common reasons:
 
@@ -547,7 +549,7 @@ for p in [str(targets / "iox2"), str(targets / "proto")]:
     if p not in extra:
         extra.append(p)
 # Each adopted module's swarmbotix_io/ also belongs here — iterate
-# the active workspace's sb.flow.yaml for those.
+# the active workspace's installed sb.workspace.yaml for those.
 
 settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 ```
@@ -739,16 +741,16 @@ or "where does this filename come from?".
 | `sb message edit` | `messages_root`, `protoc` / `flatc` (post-edit auto-compile) |
 | `sb message compile` | `messages_root`, `protoc`, `flatc`, `string_array_cap`, `string_array_caps`, all cap CLI flags |
 | `sb ws *` | `sb_home_dir` (resolves `<sb_home>`) |
-| `sb install` / `sb ws install` / `sb ws update` (workspace, sb 0.5.0+) | `sb_home_dir` (the installed copy, the active marker, the default clone location `<sb_home>/repos/<name>/`); `messages_root` (where `messages:` are imported: always the configured vault, never one discovered from cwd); `protoc` / `flatc` (compiling them); then `device` and `iox2_variants` for the io step, as `sb io update`. The repository's `sb.flow.yaml` itself is not config |
+| `sb install` / `sb ws install` / `sb ws update` (workspace, sb 0.5.0+) | `sb_home_dir` (the installed copy, the active marker, the default clone location `<sb_home>/repos/<name>/`); `messages_root` (where `messages:` are imported: always the configured vault, never one discovered from cwd); `protoc` / `flatc` (compiling them); then `device` and `iox2_variants` for the io step, as `sb io update`. The repository's `sb.workspace.yaml` and flow files are not config |
 | `sb ws check` (sb 0.5.0+), and the workspace rows of `sb doctor` | `sb_home_dir` (the workspace's installed copy, and through its `source:` the repo copy for staleness); `messages_root` (whether each `type:` is in the configured vault); `iox2_variants` (variant names count as known types); `device` (to expand owned topics into wire keys for the `ws encoding` row) |
 | `sb io add` / `edit` / `rm` / `list` (sb 0.5.0+) | `sb_home_dir`, `messages_root` (vault lookup; the `--fb` check looks for the type's compiled FlatBuffers output), `device`, `iox2_variants` (variant type names), and `transport_on_device` (the transport of a `proto` entry added without `--zenoh` / `--iox2`) |
-| `sb io update` (sb 0.5.0+) | `sb_home_dir` (the active workspace, required: its name is the `<workspace>` key segment, and for `--all` its installed `sb.flow.yaml` lists the modules to regenerate); `messages_root` (vault lookup, and the `message_targets` paths iceoryx2 files bake in); `device`; `iox2_variants` |
+| `sb io update` (sb 0.5.0+) | `sb_home_dir` (the active workspace, required: its name is the `<workspace>` key segment, and for `--all` its installed `sb.workspace.yaml` lists the modules to regenerate); `messages_root` (vault lookup, and the `message_targets` paths iceoryx2 files bake in); `device`; `iox2_variants` |
 | `sb init` | `sb_home_dir` (workspace lookup) |
-| `sb topic list` | Nothing for discovery itself. sb 0.4.1+: when a Zenoh row carries neither a Header type nor an encoding schema, `sb_home_dir`, to read the active workspace's `sb.flow.yaml` and the `sb.module.yaml` of the module the row's key names, for that row's type. Any miss (no active workspace, a module not registered in it, no matching entry) leaves the type blank |
+| `sb topic list` | Nothing for discovery itself. sb 0.4.1+: when a Zenoh row carries neither a Header type nor an encoding schema, `sb_home_dir`, to read the active workspace's installed `sb.workspace.yaml` and the `sb.module.yaml` of the module the row's key names, for that row's type. Any miss (no active workspace, a module not registered in it, no matching entry) leaves the type blank |
 | `sb topic pub` | `sb_home_dir`, `device`: needed only to expand a **bare** topic against cwd's module + the active workspace. A fully-qualified topic (any argument containing `/`; a leading `/` is accepted and dropped, sb 0.5.0+) short-circuits before the config is even loaded |
-| `sb topic listen` | `sb_home_dir`, `device` for a bare topic, as above. sb 0.4.1+: for a fully-qualified topic, `sb_home_dir` too, to read the active workspace's `sb.flow.yaml` and the `sb.module.yaml` of the module the path names, for the `"config"` type source ([sbcli_messages.md](sbcli_messages.md) §1.1); a bare topic takes that type from cwd's `sb.module.yaml`. Always `messages_root` (or a `messages/` tree found from cwd) and `protoc`: every vault style is compiled so payloads decode. When the transport is iceoryx2 (sb 0.4.0+), whether from `-t` or inferred from the topic, also the iox2 flatten settings `string_array_cap`, `string_array_caps`, `bytes_caps`, `vec_caps`, `iox2_variants`, to rebuild the structs it decodes against |
+| `sb topic listen` | `sb_home_dir`, `device` for a bare topic, as above. sb 0.4.1+: for a fully-qualified topic, `sb_home_dir` too, to read the active workspace's installed `sb.workspace.yaml` and the `sb.module.yaml` of the module the path names, for the `"config"` type source ([sbcli_messages.md](sbcli_messages.md) §1.1); a bare topic takes that type from cwd's `sb.module.yaml`. Always `messages_root` (or a `messages/` tree found from cwd) and `protoc`: every vault style is compiled so payloads decode. When the transport is iceoryx2 (sb 0.4.0+), whether from `-t` or inferred from the topic, also the iox2 flatten settings `string_array_cap`, `string_array_caps`, `bytes_caps`, `vec_caps`, `iox2_variants`, to rebuild the structs it decodes against |
 | `sb topic prune` | nothing from `sb.config.yml` — it walks iceoryx2's own global node registry |
-| `sb up` / `run` / `stop` / `down` / `attach` | `sb_home_dir` (to find the active workspace's `sb.flow.yaml`) and `tmux` (falls back to `tmux` on `PATH` when unset). Module paths come from `sb.flow.yaml`, never from config |
+| `sb up` / `run` / `stop` / `down` / `attach` | `sb_home_dir` (to find the active workspace's installed `sb.workspace.yaml`, its flows, and its active flow) and `tmux` (falls back to `tmux` on `PATH` when unset). Module paths come from `sb.workspace.yaml`, never from config |
 | `sb gopro` | `sb_home_dir`, `messages_root`, `device` (module resolution, same chain as `sb io`) |
 | `sb config open` / `set` | only the path resolver (writes to global) |
 | `sb config show` / `get` | every field — full merge over env / workspace / global / built-in |

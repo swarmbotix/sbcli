@@ -2,7 +2,6 @@
 //! modules' windows alone, then runs `scripts.stop` inline.
 
 mod common;
-use common::l5_sandbox::yaml_path;
 use common::{L5Sandbox, list_windows, tmux_launch_supported};
 
 #[test]
@@ -29,11 +28,7 @@ fn level5_native_stop_closes_instances_and_runs_stop_script() {
         "keep",
         "module: keep\nlanguage: python\nscripts:\n  start: sleep 30\n",
     );
-    sb.write_installed_flow(&format!(
-        "modules:\n  m:\n    path: {}\n    instances: [a, b]\n  keep: {}\n",
-        yaml_path(&m.manifest()),
-        yaml_path(&keep.manifest())
-    ));
+    sb.write_installed(&[&m, &keep], "nodes: [m, keep]\ninstances:\n  m: [a, b]\n");
 
     let session = format!("sb-{}", sb.workspace);
     let out = sb.cmd().arg("up").output().unwrap();
