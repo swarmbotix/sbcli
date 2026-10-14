@@ -11,9 +11,11 @@
 # -D warnings`, `cargo test --workspace`) or add a cheaper push-triggered
 # workflow if that becomes a problem.
 #
-# `check` gates `build`, which gates `release`: nothing is packaged unless fmt,
-# clippy and the tests pass, and nothing is published unless it packaged. A tag
-# that fails its own gates produces no Release at all.
+# `check` and `build` run side by side; `release` needs both. The full test
+# suite runs locally before a tag (it is platform-neutral); CI keeps only the
+# gates a maintainer's box cannot give: fmt and clippy on Linux, and the unit
+# tests of the three crates that carry Windows-specific code, on Windows. A
+# tag that fails either job produces no Release at all.
 #
 # The packaging is not reimplemented here. Each platform's script under
 # platforms/<os>/dist-tooling/ is the same one a maintainer runs by hand, so
@@ -29,10 +31,12 @@ on:
 
 jobs:
   # ────────────────────────────────────────────────────────────────
-  # Gate. Same three commands rust-toolchain.toml tells a maintainer to
-  # run before bumping the pin, on both shipped platforms — Windows
-  # because parts of the tree are cfg'd for it and a Linux-only lint run
-  # cannot see them.
+  # Gate. Linux: fmt + clippy (platform-neutral, run once). Windows: the
+  # unit tests of sb-apps, sb-update and sb-core, the crates with cfg'd
+  # Windows paths (Git Bash lookup, .exe suffix, installer, Host). The
+  # rest of the suite is identical on both OSes and runs locally before
+  # the tag; the Windows package build below still compiles every crate
+  # on Windows, so a cfg'd compile break cannot reach a Release.
   # ────────────────────────────────────────────────────────────────
   check:
     name: check (${{ matrix.os }})
@@ -45,11 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Free disk space
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL
+      # No disk-space step here: with no workspace-wide test build this job
+      # stays far below the image's free space.
 
       # rustup honors rust-toolchain.toml, so the version lives in that file
       # and not here. rustfmt and clippy come with it via `components`.
@@ -90,23 +91,23 @@ jobs:
           }
 
       - name: rustfmt
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo fmt --all --check
 
       - name: clippy
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Everything needing protoc, a live transport or shared memory is
-      # already #[ignore]'d in-tree, so a bare runner is the right
-      # environment for this and nothing has to be installed to make it
-      # pass. Run the ignored ones by hand, per their doc comments.
-      - name: tests
+      # Only the crates whose behaviour differs on Windows. Unit tests only:
+      # no sb binary is built here, which is what keeps this job short.
+      - name: windows-specific tests
+        if: runner.os == 'Windows'
         shell: bash
-        run: cargo test --workspace
+        run: cargo test -p sb-apps -p sb-update -p sb-core
 
   build:
-    needs: check
     name: ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -249,7 +250,7 @@ jobs:
   # leaves the artifacts on the run, so a rehearsal costs the same minutes but
   # cannot create a Release by accident.
   release:
-    needs: build
+    needs: [check, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
