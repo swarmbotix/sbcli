@@ -29,7 +29,7 @@ fn assert_artifacts_present(project: &Path, io_subpath: &str) {
     assert!(project.join(manifest).exists(), "{manifest} missing");
     assert!(
         !project.join("runscript.bash").exists(),
-        "runscript written without --runscript"
+        "sb init wrote runscript.bash"
     );
     assert!(project.join(io_subpath).is_dir(), "{io_subpath} missing");
 }

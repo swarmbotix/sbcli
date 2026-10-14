@@ -14,13 +14,14 @@ pub mod transport;
 
 pub use config::{
     Argv, BUNDLED_MESSAGE_STYLES, Deprecation, DockerSpec, Encoding, EntryKind, FLOW_FILE,
-    FlowSource, FlowValidationError, LEGACY_FLOW_FILE, LEGACY_MODULE_FILE, Language, LegacyTopic,
-    MODULE_FILE, ManifestError, MessageSource, ModuleDevConfig, ModuleInstance, ModulePrdConfig,
-    ModuleRef, ModuleRefRaw, Overlay, Platforms, PubSpec, Resolved, STYLE_ROS2, STYLE_SWARMBOTIX,
-    SbCliConfig, Script, ScriptError, Scripts, ServiceSpec, SubSpec, TopicRef, TopicRefError, Wire,
-    WireEnd, WireSelector, WireSource, WorkspaceFlow, flow_file_candidates, is_legacy_flow_file,
-    is_legacy_module_file, is_valid_message_style, language_defaults, legacy_topics_in,
-    module_file_candidates, parse_wire, python_fallback, python_venv_relpath,
+    FlowSource, FlowValidationError, Language, LegacyTopic, MIGRATING_HINT, MODULE_FILE,
+    ManifestError, MessageSource, ModuleDevConfig, ModuleInstance, ModulePrdConfig, ModuleRef,
+    ModuleRefRaw, Overlay, Platforms, PubSpec, REMOVED_FLOW_FILE, REMOVED_MODULE_FILE, Resolved,
+    STYLE_ROS2, STYLE_SWARMBOTIX, SbCliConfig, Script, ScriptError, Scripts, ServiceSpec, SubSpec,
+    TopicRef, TopicRefError, Wire, WireEnd, WireSelector, WireSource, WorkspaceFlow,
+    current_manifest_path, flow_file_candidates, is_valid_message_style, language_defaults,
+    legacy_topics_in, module_file_candidates, parse_wire, probe_legacy_flow_keys, python_fallback,
+    python_venv_relpath, removed_flow_file_message, removed_module_file_message,
 };
 pub use expand::{ExpandCtx, ExpandError, expand_argv, expand_str};
 pub use host::{Host, KNOWN_ARCH, KNOWN_OS};

@@ -65,7 +65,7 @@ mod swarmbotix_io_root;
 }
 
 /// `mod.rs` enumerating every `*.rs` file in `dir` (one `pub mod <stem>;`
-/// per file). Rerun after every `sb pub/sub add` so cargo picks up the
+/// per file). Rerun after every `sb io add pub|sub` so cargo picks up the
 /// new files.
 fn refresh_mod_rs(dir: &std::path::Path) {
     let mut names: Vec<String> = Vec::new();
@@ -106,8 +106,9 @@ fn generated_zenoh_publisher_compiles() {
     let out = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/StringStamped",
             "hello",
@@ -115,7 +116,7 @@ fn generated_zenoh_publisher_compiles() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "sb pub add failed: {out:?}");
+    assert!(out.status.success(), "sb io add pub failed: {out:?}");
 
     refresh_mod_rs(&s.io_dir().join("publishers"));
     refresh_mod_rs(&s.io_dir().join("subscribers"));
@@ -164,8 +165,9 @@ fn generated_iceoryx_publisher_compiles() {
     let out = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/ImageStamped",
             "image_raw",
@@ -173,7 +175,7 @@ fn generated_iceoryx_publisher_compiles() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "sb pub add failed: {out:?}");
+    assert!(out.status.success(), "sb io add pub failed: {out:?}");
 
     refresh_mod_rs(&s.io_dir().join("publishers"));
     refresh_mod_rs(&s.io_dir().join("subscribers"));

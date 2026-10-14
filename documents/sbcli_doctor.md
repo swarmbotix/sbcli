@@ -34,8 +34,8 @@ a hard-coded checklist:
 6. **Workspace** (sb 0.5.0+): the `sb ws check` validation rows for the
    active workspace (module files, message types, instance ids,
    encodings per wire key, generated io files, staleness, and, sb
-   0.6.0+, required tools, platform support, wires, and deprecated
-   files still in use).
+   0.6.0+, required tools, platform support, wires, and leftover
+   pre-0.6.0 files, which sb 0.7.0+ ignores).
 
 No state is written. No network calls. No build / compile happens.
 Doctor is safe to run at any time, including during ongoing pub/sub
@@ -231,10 +231,10 @@ from the crate `sb` links (§4.3, §4.4), and (sb 0.5.0+) legacy
 `topic: /...` entries in the active workspace (§4.10), missing
 generated io files or a stale installed copy in the active workspace,
 and (sb 0.6.0+) a module that does not support this host or a
-deprecated file still in use (§4.11). The first two
+leftover pre-0.6.0 file, ignored since 0.7.0 (§4.11). The first two
 break a *host* project rather than `sb`; the third breaks nothing, since
-`sb` reads such an entry as `key:`, but flags a file the next `sb pub` /
-`sb sub` write will rewrite. Failing there would block every unrelated `sb doctor`
+`sb` reads such an entry as `key:`, but flags a file the next `sb io`
+write will rewrite. Failing there would block every unrelated `sb doctor`
 on the box until someone fixed a tree `sb` does not own; staying silent
 is what let the breakage accumulate in the first place. If you want
 warnings to be fatal in CI, grep for the tag:
@@ -476,7 +476,7 @@ states:
 | `no definitions` | the style directory exists but holds no `.proto` |
 
 The only failure is a root with **no styles at all** — the one state
-that makes `sb message` and `sb pub` unusable:
+that makes `sb message` and `sb io` unusable:
 
 ```
 [FAIL] message styles no styles found under /home/el/.swarmbotix/messages
@@ -560,20 +560,22 @@ entry. See [sbcli_pubsub.md](sbcli_pubsub.md) §13.9.
 Each module that holds legacy entries gets one `[WARN] topics` row
 naming the module and its manifest, then a continuation line per
 entry with its role, name, the legacy `topic:` form, and its `key:`
-equivalent, and finally the command that rewrites the file:
+equivalent, and finally the command that rewrites the file
+(sb 0.7.0+: `sb io edit` on the first legacy entry):
 
 ```
 [WARN] topics       subber: 1 legacy `topic: /...` entry in /path/to/subber/sb.module.yaml (sb 0.5.0 reads it as `key:`; same wire key)
                     sub "hello": topic: /dev01/demo/pubber/zenoh/hello -> key: dev01/demo/pubber/zenoh/hello
-                    rewrite: `sb sub edit dev01/demo/pubber/zenoh/hello --module subber` (publishers: `sb pub edit <name> --key <key>`)
+                    rewrite: `sb io edit hello --module subber`
 ```
 
-A module whose legacy entries are all publishers is pointed at
-`sb pub edit <name> --key <key> --module <module>` instead. Any `sb pub`
-/ `sb sub` / `sb io` command that writes the module's manifest rewrites every
-legacy entry in it as `key:` and prints
-`  rewrote N legacy topic entry|entries as key: in <path>`; `sb sub edit`
-writes the file for exactly this reason when it holds legacy entries.
+`sb io edit <name>` with no flags regenerates that one entry's file and,
+because the manifest holds legacy entries, writes it back with every
+one of them stored as `key:`, printing
+`  rewrote N legacy topic entry|entries as key: in <path>`. Any other
+`sb io` command that writes the manifest does the same, and
+`sb io update <module>` reports it on its module line
+(`; rewrote N legacy topic entr(y/ies) as key:`).
 
 Like `unity targets`, the row **warns, never fails**: the exit code is
 untouched. With no active workspace there is nothing to scan, and the
@@ -592,7 +594,7 @@ the active workspace:
 | Row | `[OK]` shows | Problem tag | Reports |
 |---|---|---|---|
 | `workspace` | name, module count, source (URL or repo `sb.flow.yaml`, or `no source`) | `[FAIL]` | the installed copy, or the vault root, cannot be read |
-| `ws modules` | every module manifest parses | `[FAIL]` per module | ``no module manifest at <path> (run `sb init` in the module)``, an empty file, or a parse error |
+| `ws modules` | every module manifest parses | `[FAIL]` per module | ``no module manifest at <path> (run `sb init` in the module)``, an empty file, a parse error, or (sb 0.7.0+) `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` |
 | `ws types` | how many typed entries resolve | `[FAIL]` per entry | a proto / fb `type:` that is not in the configured vault nor an `iox2_variants` name |
 | `ws instances` | instance count | `[FAIL]` per duplicate | an instance id declared twice for one module |
 | `ws encoding` | how many wire keys agree | `[FAIL]` per wire key | entries on one key, across modules, that disagree on `encoding:` |
@@ -600,7 +602,7 @@ the active workspace:
 | `ws requires` (sb 0.6.0+) | `all required tools present` | `[FAIL]` | `<module>: missing <bin>[, <bin>]` per module, joined by `; ` |
 | `ws platforms` (sb 0.6.0+) | `all modules support this host` | `[WARN]` | `<module>: not supported on <os>-<arch> (declares: linux, windows)` |
 | `ws wires` (sb 0.6.0+) | `<n> wire(s) resolve`, or `no wires` | `[FAIL]` | `<lhs>: <reason>`, reasons below |
-| `deprecated` (sb 0.6.0+) | `nothing deprecated in use` | `[WARN]` | one deprecated item per line, below |
+| `deprecated` (sb 0.6.0+) | `nothing deprecated in use` | `[WARN]` | one leftover pre-0.6.0 file per line, below |
 | `ws source` | the installed copy is current | `[WARN]`; `[SKIP]` with no `source:` | the repo `sb.flow.yaml` is newer than the installed copy (``run sb install``) |
 
 A module that fails `ws modules` is left out of the rows below it.
@@ -644,28 +646,33 @@ one of:
 [FAIL] ws wires     ips_track.markers: [*] on iceoryx2 is not supported
 ```
 
-**`deprecated`** lists every deprecated file or form the workspace still
-uses, one per line, each line ending `-> see sbcli_module.md §Migrating`:
+**`deprecated`** (sb 0.7.0+) lists every file from before 0.6.0 that
+the workspace still holds, one per line. `sb 0.7.0+` reads or runs none
+of them, so each line ends `is ignored since 0.7.0 (see sbcli_module.md §Migrating)`:
 
 ```
-[WARN] deprecated   sb.dev.yml at /home/el/ws_ips/modules/ips_track/sb.dev.yml -> see sbcli_module.md §Migrating
-                    runscript.bash at /home/el/ws_ips/modules/ips_track/runscript.bash -> see sbcli_module.md §Migrating
-                    flow.yaml at /home/el/ws_ips/flow.yaml -> see sbcli_module.md §Migrating
+[WARN] deprecated   sb.dev.yml at /home/el/ws_ips/modules/ips_track/sb.dev.yml is ignored since 0.7.0 (see sbcli_module.md §Migrating)
+                    runscript.bash at /home/el/ws_ips/modules/ips_track/runscript.bash is ignored since 0.7.0 (see sbcli_module.md §Migrating)
+                    flow.yaml at /home/el/ws_ips/flow.yaml is ignored since 0.7.0 (see sbcli_module.md §Migrating)
 ```
 
 The items it reports are `sb.dev.yml at <path>`, `flow.yaml at <path>`,
-`runscript.bash at <path>`, `stopscript.bash at <path>`, and
-`top-level instances: in <flow>`. The row warns, never fails: every one
-of them still works until 0.7.0 ([sbcli_module.md](sbcli_module.md)
-§11).
+`runscript.bash at <path>`, and `stopscript.bash at <path>`. The row
+warns, never fails: an ignored file breaks nothing by itself, and
+deleting it (or translating it, [sbcli_module.md](sbcli_module.md) §11)
+clears the line. What does fail is a module whose **only** manifest is
+still the pre-0.6.0 one: `ws modules` reports it with the rename error
+in the table above. A top-level `instances:` map is no longer an item
+here either: a flow that has one does not load at all
+([sbcli_ws.md](sbcli_ws.md) §8).
 
 Unlike `topics`, a **`[FAIL]` here fails doctor**: a missing module, an
 unknown type, a duplicate instance id, an encoding disagreement, a
 missing build tool, or a wire that resolves to nothing breaks `sb up`
 or codegen, so it counts toward the exit code. Missing generated files
 and a stale installed copy are fixed by one command each
-(`sb io update`, `sb install`), and an unsupported host or a deprecated
-file still works, so those only warn. Types are checked
+(`sb io update`, `sb install`), and an unsupported host or an ignored
+leftover file breaks nothing, so those only warn. Types are checked
 against the configured vault (`messages_root`), the one `sb install`
 imports into, even when doctor's `message styles` row describes a vault
 discovered from the current directory.

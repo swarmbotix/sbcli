@@ -1,5 +1,5 @@
-//! L3 TDD #1 (partial) + #7 — `sb pub add` mutates `sb.dev.yml` and
-//! drops the language file under `<io_dir>/publishers/`.
+//! L3 TDD #1 (partial) + #7 — `sb io add pub` mutates `sb.module.yaml`
+//! and drops the language file under `<io_dir>/publishers/`.
 //!
 //! Golden file matching is split into [level3_codegen_rust.rs](./level3_codegen_rust.rs)
 //! per language. This file proves the mutation+emit pipeline end-to-end.
@@ -14,8 +14,9 @@ fn pub_add_appends_to_dev_yml_and_emits_file() {
     let out = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/StringStamped",
             "hello",
@@ -25,12 +26,12 @@ fn pub_add_appends_to_dev_yml_and_emits_file() {
         .unwrap();
     assert!(
         out.status.success(),
-        "pub add failed: stdout={} stderr={}",
+        "io add pub failed: stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // 1. sb.dev.yml has the publisher.
+    // 1. The module manifest has the publisher.
     let dev_body = std::fs::read_to_string(s.dev_yml()).unwrap();
     assert!(dev_body.contains("name: hello"), "dev_yml: {dev_body}");
     assert!(dev_body.contains("topic: hello"), "dev_yml: {dev_body}");
@@ -71,8 +72,9 @@ fn pub_add_rejects_slashed_topic_positional() {
     let out = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/StringStamped",
             "/dev01/demo/pubber/zenoh/hello",
@@ -99,7 +101,7 @@ fn pub_add_rejects_slashed_topic_positional() {
     let dev_after = std::fs::read_to_string(s.dev_yml()).unwrap();
     assert_eq!(
         dev_before, dev_after,
-        "rejected add must not touch sb.dev.yml"
+        "rejected add must not touch the module manifest"
     );
     assert!(
         !s.io_dir().join("publishers").join("hello.rs").exists(),
@@ -107,7 +109,7 @@ fn pub_add_rejects_slashed_topic_positional() {
     );
 }
 
-/// A 0.4.x `sb.dev.yml` spelled foreign topics as `topic: /<wire key>`.
+/// A 0.4.x manifest spelled foreign topics as `topic: /<wire key>`.
 /// 0.5.0 reads that as `key:` with the identical wire key, `sb doctor`
 /// flags it, and the next write rewrites it to `key:`. The regenerated
 /// file must match what a fresh `--key` add produces, byte for byte.
@@ -127,21 +129,22 @@ fn legacy_slashed_topic_keeps_wire_key_and_is_rewritten_on_edit() {
         "doctor should warn about the legacy entry in subber:\n{doctor}"
     );
 
-    // 2. Edit by the slashed spelling (leading `/` ignored on match).
+    // 2. Regenerate the subscriber by name (`sb io edit` with no flags);
+    //    the write rewrites the legacy spelling.
     let out = s
         .cmd_in_module()
-        .args(["sub", "edit", "/dev01/demo/pubber/zenoh/hello"])
+        .args(["io", "edit", "hello"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "sub edit failed: stdout={stdout} stderr={}",
+        "io edit failed: stdout={stdout} stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
         stdout.contains("rewrote 1 legacy topic entry"),
-        "sub edit should report the rewrite: {stdout}"
+        "io edit should report the rewrite: {stdout}"
     );
 
     // 3. The wire key is unchanged and used verbatim.
@@ -174,8 +177,9 @@ fn legacy_slashed_topic_keeps_wire_key_and_is_rewritten_on_edit() {
     let out = fresh
         .cmd_in_module()
         .args([
-            "sub",
+            "io",
             "add",
+            "sub",
             "-m",
             "ros2/std/StringStamped",
             "--key",
@@ -187,7 +191,7 @@ fn legacy_slashed_topic_keeps_wire_key_and_is_rewritten_on_edit() {
         .unwrap();
     assert!(
         out.status.success(),
-        "fresh sub add --key failed: stdout={} stderr={}",
+        "fresh io add sub --key failed: stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -199,7 +203,7 @@ fn legacy_slashed_topic_keeps_wire_key_and_is_rewritten_on_edit() {
     );
 }
 
-/// Overwrite `sb.dev.yml` with the shape a 0.4.x user file had: one Zenoh
+/// Overwrite the manifest with the shape a 0.4.x user file had: one Zenoh
 /// subscriber whose foreign topic is spelled with a leading `/`. `sb init`
 /// writes no `root:` line (the yaml's directory is the module root), so the
 /// legacy body carries none either.

@@ -34,8 +34,8 @@ Concretely, it does seven things:
    directory into it. It never scaffolds the project itself; you bring
    your own.
 4. Generates **pub/sub stubs** per language and transport against the
-   vault's types (`sb io`, sb 0.5.0+; `sb pub` / `sb sub` before), with
-   a protobuf, FlatBuffers, or raw payload encoding on Zenoh.
+   vault's types (`sb io`, sb 0.5.0+), with a protobuf, FlatBuffers, or
+   raw payload encoding on Zenoh.
 5. **Builds and launches** every module in a workspace under tmux, one
    window per instance, from each module's `sb.module.yaml`
    (sb 0.6.0+): no launch scripts, the same file on Linux and Windows,
@@ -44,8 +44,8 @@ Concretely, it does seven things:
    one-shot publish, prune dead iceoryx2 registrations — across both
    transports.
 7. Drops **request/response routers** into a module (`services:`
-   entries via `sb io add service`, sb 0.5.0+; `sb service init` before)
-   for REST-style calls over Zenoh queryables, independent of pub/sub.
+   entries via `sb io add service`, sb 0.5.0+) for REST-style calls over
+   Zenoh queryables, independent of pub/sub.
 
 It does **not** mock, wrap, or hide either transport. Generated code
 calls `zenoh::Session::open` and `iceoryx2::node::NodeBuilder`
@@ -102,7 +102,9 @@ Knowing which root holds which file is the fastest way to navigate.
 ```
 
 `sb 0.6.0+` names the two committed files `sb.flow.yaml` and
-`sb.module.yaml`; the pre-0.6.0 names still work until 0.7.0 (§10).
+`sb.module.yaml`. `sb 0.7.0+` reads no other name: a folder that still
+holds only a pre-0.6.0 file is refused with an error that names the
+rename (§10).
 
 The vault (root 2) is global to the host. A workspace is defined by the
 `sb.flow.yaml` in its repository (root 3) and installed into root 1's
@@ -136,8 +138,8 @@ Generated code embeds the fully-qualified form so two modules in the
 same workspace can find each other without the user typing the
 prefix once.
 
-`--key <wire key>` on `sb io add` (or `sb pub add` / `sb sub add`) bypasses the prefix
-and addresses the wire key verbatim: the way to subscribe to another
+`--key <wire key>` on `sb io add` bypasses the prefix and addresses
+the wire key verbatim: the way to subscribe to another
 module's publisher, and useful for cross-workspace traffic or legacy
 ROS2 topics (sb 0.5.0+; a positional topic may not contain `/`). See
 [sbcli_pubsub.md](sbcli_pubsub.md) §13.7.
@@ -151,7 +153,7 @@ or without a leading `/`, so a listed row pastes in unchanged.
 
 ## 4. Command groups
 
-The `sb` binary exposes **thirteen** verb groups today. The table below is
+The `sb` binary exposes **eleven** verb groups today. The table below is
 the index; detailed behavior, flag-by-flag semantics, error catalogue,
 and edge cases live in the per-group reference. The last row (`sb ui`,
 L6) is a roadmap entry and is **not** in `sb --help` yet — `sb --help`
@@ -164,15 +166,17 @@ is always the authority on what this build actually accepts.
 | `sb message *` | Manage the vault: list, create, edit, remove `.proto` files; compile to per-language bindings. | [sbcli_messages.md](sbcli_messages.md) | L1 |
 | `sb ws *` | Workspace lifecycle. `sb 0.5.0+`: a workspace is a repository flow file (`sb.flow.yaml` since 0.6.0, with instances and wires per module). `create` writes `./sb.flow.yaml` and installs it; `install` installs a repository (the workspace-only form of `sb install`); `check [<name>]` validates a workspace (default: the active one); `update` runs `git pull --ff-only` and reinstalls; `uninstall [--clean]` removes the installed copy (and, with `--clean`, each module's io dir and the clone `sb` made). `set` / `list` / `delete` as before; `list` shows each workspace's source and a stale marker. The active workspace's installed `sb.flow.yaml` is the module registry every other verb reads. | [sbcli_ws.md](sbcli_ws.md) | L2; `sb 0.5.0+` (repository flow) |
 | `sb init` | Adopt an existing user project as a swarmbotix module. Drops `sb.module.yaml` (sb 0.6.0+; no launch script, no `root:`) and an empty `swarmbotix_io/`; registers the module in the repository `sb.flow.yaml` above it and reinstalls (sb 0.5.0+), or else in the active workspace. What else the manifest can hold: [sbcli_module.md](sbcli_module.md). | [sbcli_init.md](sbcli_init.md) | L2 |
-| `sb io *` | The codegen surface (sb 0.5.0+). `add pub` / `add sub` / `add service`, `edit`, `rm`, `list` mutate `sb.module.yaml` and regenerate the matching file under `swarmbotix_io/{publishers,subscribers,services}/`; `--proto` / `--fb` / `--raw [<mime>]` pick the Zenoh payload encoding; `update [<module>] [--services]` regenerates without changing the YAML. Publishers, subscribers, and services share one name space per module. | [sbcli_pubsub.md](sbcli_pubsub.md) §14 | `sb 0.5.0+` |
-| `sb pub *` / `sb sub *` / `sb list` | Deprecated in favour of `sb io` (sb 0.5.0+; a warning on every use since 0.6.0, removed in 0.7.0, §10); unchanged, no new features. The codegen surface. Each `add` / `edit` / `rm` mutates `sb.module.yaml` AND regenerates the file under `swarmbotix_io/{publishers,subscribers}/`. Generated classes expose a `TopicOverrides` API for runtime per-segment override (swarm instances, see consuming-doc §3). | [sbcli_pubsub.md](sbcli_pubsub.md) (codegen reference) · [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md) (consumer guide: main, build glue, swarm pattern) | L3 |
-| `sb service *` | Deprecated in favour of `sb io add service` (sb 0.5.0+; a warning on every use since 0.6.0, removed in 0.7.0); unchanged. REST-style request/response over Zenoh queryables, JSON payloads, independent of pub/sub. `init` drops a self-contained router (`service.py` / `service.rs`) into the module's io dir with its namespace baked in; you write the routes. Rust and Python only. | [sbcli_reqres.md](sbcli_reqres.md) | L4 |
+| `sb io *` | The codegen surface (sb 0.5.0+). `add pub` / `add sub` / `add service`, `edit`, `rm`, `list` mutate `sb.module.yaml` and regenerate the matching file under `swarmbotix_io/{publishers,subscribers,services}/`; `--proto` / `--fb` / `--raw [<mime>]` pick the Zenoh payload encoding; `update [<module>] [--services]` regenerates without changing the YAML. Publishers, subscribers, and services share one name space per module. Generated pub/sub classes expose a `TopicOverrides` API for runtime per-segment override (swarm instances). A service is a REST-style request/response router over Zenoh queryables with JSON payloads, independent of pub/sub (Rust and Python); you write its routes. | [sbcli_pubsub.md](sbcli_pubsub.md) §14 (codegen reference) · [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md) (consumer guide: main, build glue, swarm pattern) · [sbcli_reqres.md](sbcli_reqres.md) (services) | L3, L4; `sb io` `sb 0.5.0+` |
 | `sb topic *` | Introspect the live swarm. `list` enumerates active topics on either transport; `listen` decodes frames as JSON lines; `pub` does a one-shot raw publish; `prune` clears iceoryx2 registrations left behind by dead publishers (the `(dead)` rows in `list`). `listen` and `pub` read the transport from the topic path's `zenoh` / `iox2` segment, so `-t zenoh` or `-t iox2` is needed only for a path without one (sb 0.4.1+). | (ref TBD — see `requirements.md` §"Topic Introspection") | L4 |
 | `sb up` / `sb run` / `sb stop` / `sb down` / `sb attach` | Build and launch every module in the active workspace under tmux, one window per instance (`<module>-<id>`), or a single module or instance (`sb run <module>[:<id>]`, `--fg` for the current terminal), or kill the session. `sb 0.6.0+`: driven by each module's `sb.module.yaml`, with no launch scripts; `stop` closes the module's windows and runs its optional `scripts.stop`. | [sbcli_launch.md](sbcli_launch.md) · [sbcli_module.md](sbcli_module.md) | L5; native launch `sb 0.6.0+` |
-| `sb install` / `sb app *` | Install app packages from a git URL or a local folder and run them as `sb <name> [args...]`, with no `PATH` change. `app init` makes any folder a package by writing `sb.app.yml`; `list` / `info` / `update` / `remove` manage what is installed. Global to the host, independent of workspaces. `sb 0.5.0+`: `sb install` on a source whose root holds `sb.flow.yaml` (or the pre-0.6.0 `flow.yaml`) instead of `sb.app.yml` installs a workspace (clone, install the flow, import and compile `messages:`, regenerate every module's io). | [sbcli_app.md](sbcli_app.md) · [sbcli_ws.md](sbcli_ws.md) §5.2 | `sb 0.2.1+`; workspaces `sb 0.5.0+` |
+| `sb install` / `sb app *` | Install app packages from a git URL or a local folder and run them as `sb <name> [args...]`, with no `PATH` change. `app init` makes any folder a package by writing `sb.app.yml`; `list` / `info` / `update` / `remove` manage what is installed. Global to the host, independent of workspaces. `sb 0.5.0+`: `sb install` on a source whose root holds `sb.flow.yaml` instead of `sb.app.yml` installs a workspace (clone, install the flow, import and compile `messages:`, regenerate every module's io). | [sbcli_app.md](sbcli_app.md) · [sbcli_ws.md](sbcli_ws.md) §5.2 | `sb 0.2.1+`; workspaces `sb 0.5.0+` |
 | `sb update` / `sb --version` | Self-update from the GitHub release page: `--version` adds an `update available` line (cached 24 h, silent offline, `SB_NO_UPDATE_CHECK=1` to skip); `update --check` compares and exits 10 when newer exists; `update` downloads, verifies the checksum and runs the package installer in place. | [sbcli_update.md](sbcli_update.md) | `sb 0.2.1+` |
 | `sb gopro` | Freeze a module for production. Reads `sb.module.yaml` + `swarmbotix_io/` and writes a sanitized, language-agnostic `sb.prd.yml` that ships with the binary. | (ref TBD — see `requirements.md` §"Production") | L5 |
 | `sb ui` *(not shipped)* | Start `swarmctl` (REST + MCP server + visual flow editor) in a tmux pane and open the browser. | (ref TBD — `requirements.md` §"Web UI" + `plan/level6.html`, both in the source repo) | L6 |
+
+`sb 0.7.0+`: the four older codegen verbs that `sb io` replaced are no
+longer part of the binary; §10 names them, and `sb --help` no longer
+lists them.
 
 ---
 
@@ -320,7 +324,7 @@ second thin wrapper around the same core, exposing REST + MCP.
 | "What goes in a repository's `sb.flow.yaml`, and what does the installed copy hold?" | [sbcli_ws.md](sbcli_ws.md) §4 |
 | "What can a module's `sb.module.yaml` declare, and what are the defaults?" | [sbcli_module.md](sbcli_module.md) §2 + §3.2 |
 | "How do I run four instances of one module?" | [sbcli_ws.md](sbcli_ws.md) §4.6 + [sbcli_launch.md](sbcli_launch.md) §1.1 |
-| "How do I move a 0.5 workspace to the 0.6 file names?" | [sbcli_module.md](sbcli_module.md) §11 |
+| "How do I move a 0.5 workspace to the current file names (required since 0.7.0)?" | [sbcli_module.md](sbcli_module.md) §11 |
 | "How do I add Python message bindings to `sys.path` / VS Code?" | [sbcli_config.md](sbcli_config.md) §4.5.1 + §4.5.2 |
 | "Why is `sb doctor` saying `[SKIP] flatc`?" | [sbcli_doctor.md](sbcli_doctor.md) §3 + §4 |
 | "How do I expose a REST-style call instead of a topic?" | [sbcli_reqres.md](sbcli_reqres.md) §2 + §6 |
@@ -350,32 +354,56 @@ second thin wrapper around the same core, exposing REST + MCP.
 
 ---
 
-## 10. Deprecations (sb 0.6.0+)
+## 10. Deprecations and removals (sb 0.7.0+)
 
-Everything below still works in 0.6.0 and prints a warning when used;
-it is removed in the release named in the table. The migration, item by
+`sb 0.7.0+` has no active deprecations. Every item below was deprecated
+in 0.6.0 (the four verbs already in 0.5.0) and is **removed** in the
+release named in the table: a removed verb is unknown to the binary,
+and a removed file or form is no longer read. The migration, item by
 item, is [sbcli_module.md](sbcli_module.md) §11.
 
-| item | since | removed | replacement |
+| item | deprecated since | removed in | replacement |
 |---|---|---|---|
 | `sb pub`, `sb sub`, `sb list`, `sb service` | 0.5.0 (help only), 0.6.0 (warning) | 0.7.0 | `sb io` |
 | `sb.dev.yml` | 0.6.0 | 0.7.0 | `sb.module.yaml` |
 | `flow.yaml` | 0.6.0 | 0.7.0 | `sb.flow.yaml` |
-| `runscript.bash` | 0.6.0 | 0.7.0 | `scripts:` in `sb.module.yaml` |
+| `runscript.bash` | 0.6.0 | 0.7.0 | `scripts:` in `sb.module.yaml`, or nothing when the language defaults fit |
 | `stopscript.bash` | 0.6.0 | 0.7.0 | `scripts.stop`, or nothing |
+| `sb init --runscript` | 0.6.0 | 0.7.0 | none: `sb init` writes no launch script |
 | top-level `instances:` in the flow | 0.6.0 | 0.7.0 | `instances` under the module entry |
-| `sb init --docker` bash template | 0.6.0 | 0.6.0 | `instances[].docker`, launched natively in a later release; until then `sb up` skips a native module whose instances declare `docker:`, so keep the module's existing launch script, or start the container from `scripts.start` ([sbcli_module.md](sbcli_module.md) §11.6) |
+| `sb init --docker` bash template | 0.6.0 | 0.6.0 | `instances[].docker`, launched natively in a later release. Until then `sb up` skips and `sb run` refuses a module whose instances declare `docker:`; drop the `docker:` blocks and start the container from `scripts.start` ([sbcli_module.md](sbcli_module.md) §11.6). `sb init --docker` itself remains, as a check of the instances |
 | `SB_NO_TMUX=1` | 0.6.0 | 0.7.0 | `sb run --fg` |
 
-Warning format, on stderr, once per item per process:
+What `sb 0.7.0+` does when it meets a removed item:
+
+- **A removed verb** (the first row): it is no longer a built-in
+  command, so `sb` looks it up as an installed app
+  ([sbcli_app.md](sbcli_app.md)) and, finding none, exits 1 with
+  ``error: `<verb>` is not an sb command or an installed app.``
+  followed by a `Did you mean ...?` guess when one is close, the list of
+  installed apps, and how to install one. The guess is by spelling, not a
+  pointer to `sb io`; there is no alias.
+- **`sb.dev.yml` without `sb.module.yaml`** beside it: `sb install`,
+  `sb init`, `sb io`, and `sb doctor` stop with
+  `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`.
+- **`flow.yaml` without `sb.flow.yaml`** beside it (a repository root,
+  or an installed copy written before 0.6.0):
+  `sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`.
+- **A top-level `instances:` map** fails the flow before anything else
+  is read:
+  `top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)`.
+- **`runscript.bash` or `stopscript.bash`** at a module root: no error.
+  The module launches natively from its `sb.module.yaml` (language
+  defaults included) and the script is never run. `sb ws check` and
+  `sb doctor` list each leftover file in their `deprecated` row
+  ([sbcli_doctor.md](sbcli_doctor.md) §4.11) so it can be deleted or
+  translated.
+- **`SB_NO_TMUX=1`**: nothing reads it.
+
+The deprecation warning machinery stays in place for future
+deprecations; no item uses it in 0.7.0. Its format, on stderr, once per
+item per process, never on stdout:
 
 ```
-warning: <item> is deprecated since 0.6.0 and will be removed in 0.7.0; <hint>
+warning: <item> is deprecated since <release> and will be removed in <release>; <hint>
 ```
-
-Warnings never change stdout, so scripts that parse `sb` output are
-unaffected. `sb ws check` and `sb doctor` list the deprecated files a
-workspace still uses in their `deprecated` row
-([sbcli_doctor.md](sbcli_doctor.md) §4.11). From 0.7.0 the old names
-are no longer read, and for one minor version the error names the
-replacement.

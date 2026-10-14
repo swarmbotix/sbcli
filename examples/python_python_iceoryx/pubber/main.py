@@ -3,7 +3,7 @@ payload a few times so the subscriber has a chance to attach.
 
 Post-`<T>` API: the generated module re-exports the iox2-flat
 `ImageStamped` class loaded from the absolute path baked in by
-`sb pub add`. No shared payload module is needed.
+`sb io add pub`. No shared payload module is needed.
 """
 import os
 import sys

@@ -487,7 +487,6 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | `sb ws uninstall <name> [--clean]` | Remove the installed copy; `--clean` also deletes each module's io dir and the clone `sb` made |
 | `sb ws <set\|list\|delete>` | Switch, list (with source and a stale marker), delete installed workspaces under `~/.swarmbotix/workspaces/` |
 | `sb init [path] [--rust\|--python\|--cpp\|--flutter\|--unity] [--docker] [--force]` | Adopt an existing project as a module (writes `sb.module.yaml`); registers it in the repository `sb.flow.yaml` above it |
-| `sb list` | List publishers and subscribers on the resolved module (deprecated: `sb io list`) |
 | `sb gopro [--all \| --module <name>]` | Freeze a module for production (`sb.prd.yml`) |
 
 ### Pub/sub codegen
@@ -499,13 +498,16 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | `sb io add service <name>` | Add a REST-style request/response router over Zenoh queryables |
 | `sb io <edit\|rm\|list>` | Change (or, with no flags, regenerate), remove, or list entries by name |
 | `sb io update [<module> \| --all] [--services]` | Regenerate `swarmbotix_io/` from `sb.module.yaml` without changing it |
-| `sb pub <list\|add\|edit\|rm>` | Deprecated: manage publishers |
-| `sb sub <list\|add\|edit\|rm>` | Deprecated: manage subscribers |
-| `sb service init` | Deprecated: scaffold the module's default service router |
 
-With no `--zenoh` / `--iox2` flag, a protobuf entry from `sb io add` (or the
-deprecated `sb pub add` / `sb sub add`) uses `transport_on_device`, iceoryx2
-unless configured; `--fb` and `--raw` entries are Zenoh only. `sb topic listen` and `sb topic pub` have no default: they take
+`sb 0.7.0+` removed the older `sb pub`, `sb sub`, `sb list`, and
+`sb service` verbs, together with the pre-0.6.0 file names and per-module
+launch scripts; [documents/sbcli.md](documents/sbcli.md) §10 lists each
+removal and its replacement, and
+[documents/sbcli_module.md](documents/sbcli_module.md) §11 is the
+migration guide.
+
+With no `--zenoh` / `--iox2` flag, a protobuf entry from `sb io add` uses
+`transport_on_device`, iceoryx2 unless configured; `--fb` and `--raw` entries are Zenoh only. `sb topic listen` and `sb topic pub` have no default: they take
 the transport from the topic path's `zenoh` / `iox2` segment, or for a bare
 topic from its entry in the cwd module's `sb.module.yaml`. Any other path needs
 `-t zenoh` or `-t iox2`.
@@ -586,7 +588,7 @@ Rust source is not split per OS.
 | [sb-doctor](crates/sb-doctor) | Environment validation behind `sb doctor` |
 | [sb-workspace](crates/sb-workspace) | Workspace lifecycle, repository `sb.flow.yaml` install / update / uninstall, module adoption |
 | [sb-codegen](crates/sb-codegen) | Per-language pub/sub codegen (minijinja templates) |
-| [sb-pubsub](crates/sb-pubsub) | `sb io` (and `sb pub` / `sb sub`) mutation, `sb io update`, and codegen invocation |
+| [sb-pubsub](crates/sb-pubsub) | `sb io` mutation, `sb io update`, and codegen invocation |
 | [sb-discover](crates/sb-discover) | Snapshot topic discovery (Zenoh enumeration, iceoryx2 service list) |
 | [sb-listen](crates/sb-listen) | Per-transport frame iterators and one-shot raw publishers |
 | [sb-launch](crates/sb-launch) | Native build and tmux launch from `sb.module.yaml` (`sb up` / `run` / `stop` / `down` / `attach`) |
@@ -609,8 +611,7 @@ Top-level directories:
 
 ## Language Support
 
-What `sb io add` (and the deprecated `sb pub add` / `sb sub add`) can generate,
-per language and transport:
+What `sb io add` can generate, per language and transport:
 
 | | Zenoh | iceoryx2 |
 |---|---|---|
@@ -680,13 +681,13 @@ release. Start with [sbcli.md](documents/sbcli.md).
 | [sbcli_config.md](documents/sbcli_config.md) | `sb config`: file locations, layering chain, key reference |
 | [sbcli_doctor.md](documents/sbcli_doctor.md) | `sb doctor`: every check, OK / FAIL / SKIP semantics |
 | [sbcli_init.md](documents/sbcli_init.md) | `sb init`: adopting a project in each supported language |
-| [sbcli_module.md](documents/sbcli_module.md) | `sb.module.yaml`: build, start, stop, env, requires, platforms, language defaults, migrating from 0.5 |
+| [sbcli_module.md](documents/sbcli_module.md) | `sb.module.yaml`: build, start, stop, env, requires, platforms, language defaults, migrating from 0.5 (required since 0.7.0) |
 | [sbcli_ws.md](documents/sbcli_ws.md) | `sb ws` and workspace `sb install`: the repository `sb.flow.yaml`, instances, wires, the installed copy, `active` marker |
 | [sbcli_messages.md](documents/sbcli_messages.md) | `sb message`: vault lifecycle, codegen, capacity configuration |
-| [sbcli_pubsub.md](documents/sbcli_pubsub.md) | `sb io` (and the deprecated `sb pub` / `sb sub` / `sb list`): resolution, validation, encodings, conflicts |
+| [sbcli_pubsub.md](documents/sbcli_pubsub.md) | `sb io`: resolution, validation, encodings, conflicts |
 | [sbcli_pubsub_consuming.md](documents/sbcli_pubsub_consuming.md) | Per-language guide to wiring generated files into your build |
 | [sbcli_launch.md](documents/sbcli_launch.md) | `sb up` / `run` / `stop` / `down` / `attach`: build, one tmux window per instance, stop, Windows |
-| [sbcli_reqres.md](documents/sbcli_reqres.md) | Services (`sb io add service`, `sb service`): request/response over Zenoh queryables |
+| [sbcli_reqres.md](documents/sbcli_reqres.md) | Services (`sb io add service`): request/response over Zenoh queryables |
 | [sbcli_app.md](documents/sbcli_app.md) | `sb app` / `sb install`: app packages, `sb.app.yml`, running `sb <name>` |
 | [sbcli_update.md](documents/sbcli_update.md) | `sb update` / `sb --version`: update notice, `--check`, in-place self-update |
 

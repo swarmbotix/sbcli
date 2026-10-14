@@ -5,7 +5,8 @@ built, started, restarted, stopped, torn down, and reattached under
 tmux.
 
 This document is normative for behavior shipped at L5, extended by the
-native launch of `sb 0.6.0+` (§1 onward).
+native launch of `sb 0.6.0+` (§1 onward). `sb 0.7.0+` launches every
+module natively (§1.4).
 
 The canonical spec is `requirements.md` in the sbcli **source
 repository**, a maintainer document that is not part of your install;
@@ -114,16 +115,16 @@ checked, then every build runs, and only then is tmux called. A
 workspace where one module has a broken manifest or a failing build
 launches *nothing* rather than a partial session.
 
-### 1.4 Native and legacy modules
+### 1.4 Every module is native (sb 0.7.0+)
 
-| Module has | Launched |
-|---|---|
-| `scripts:` in `sb.module.yaml`, or no launch script at its root | **natively**, as described in this document |
-| a legacy `runscript.bash` and no `scripts:` | the pre-0.6.0 way, with a deprecation warning (§10) |
-| both | natively; the script is ignored, with a warning |
-
-A module adopted with `sb 0.6.0+` has no launch script, so it is native
-from the start.
+Every module is launched as this document describes, from its
+`sb.module.yaml`: its own `scripts:` where it declares them, its
+language defaults ([sbcli_module.md](sbcli_module.md) §3.2) where it
+does not. `sb 0.7.0+` never runs a per-module launch or stop script of
+the kind releases before 0.6.0 generated, even when one is still present
+at the module root. `sb ws check` and `sb doctor` list such leftovers in
+their `deprecated` row ([sbcli_doctor.md](sbcli_doctor.md) §4.11), and
+[sbcli_module.md](sbcli_module.md) §11.3 and §11.4 translate them.
 
 ---
 
@@ -145,7 +146,7 @@ In order:
    kinds of module are skipped, each with a `skipped <module>: <reason>`
    line on stdout, printed before any build: a module whose `platforms:`
    do not list this host, a Unity module (it has no start command), and
-   a module whose instances declare `docker:` (sb 0.6.0 does not start
+   a module whose instances declare `docker:` (`sb` does not start
    containers yet; [sbcli_module.md](sbcli_module.md) §11.6). The
    session check also happens here.
 2. **Build.** Run each planned module's `build`, inline, printing
@@ -180,11 +181,11 @@ attach with: tmux attach -t sb-docdemo
 
 The other two reasons read
 `unity modules have no start command (launch them from their editor)`
-and
-`instance <id> declares docker:, which native launch does not run yet (keep its runscript.bash and no scripts: until it does)`.
+and `instance <id> declares docker:, which native launch does not run yet`
+([sbcli_module.md](sbcli_module.md) §11.6 has the way forward).
 
-Deprecation warnings (a legacy file name, a legacy launch script) go to
-stderr and never change these lines.
+Warnings, such as the stale-copy warning below, go to stderr and never
+change these lines.
 
 **`up: false` modules are skipped** (sb 0.5.0+). A module registered as
 `{ path: ..., up: false }` ([sbcli_ws.md](sbcli_ws.md) §4.4) is neither
@@ -305,9 +306,7 @@ are exactly what the window would have had (§1.2).
 
 `--fg` starts exactly one process: an instanced module needs its
 `:<id>` (otherwise:
-``module "cam" has 2 instances and `sb run --fg` runs one; pick it with cam:<id>``),
-and a legacy module (§10) cannot be run this way. It replaces the
-`SB_NO_TMUX=1` switch of the old generated launch scripts.
+``module "cam" has 2 instances and `sb run --fg` runs one; pick it with cam:<id>``).
 
 ---
 
@@ -524,48 +523,17 @@ that crashed on startup still shows its window and its last output.
 | `tmux not found on PATH` | tmux/psmux not installed or not configured | install it, or set `tmux:` in `sb.config.yml`; `sb doctor` checks it |
 | `sb stop` "worked" but the process is still alive | the real work is not the window's process | `scripts.stop` must reach it (container, unit, remote); see §4.1 |
 | `scripts.stop` never ran during teardown | `sb down` runs none by design | `sb stop <module>` per module first (§5) |
-| a `deprecated` warning on every launch | a legacy file name or launch script is still in use | [sbcli_module.md](sbcli_module.md) §11 |
+| a module that used to start from its own launch script now starts the wrong program, or none | `sb 0.7.0+` never runs per-module launch scripts; the module starts from its manifest and the language defaults (§1.4) | declare `scripts:` ([sbcli_module.md](sbcli_module.md) §11.3) |
+| `[WARN] deprecated` in `sb ws check` / `sb doctor` | files from before 0.6.0 are still in the workspace; they are ignored | [sbcli_module.md](sbcli_module.md) §11 |
 | Two workspaces fighting over one session | they are not: sessions are per workspace | `tmux ls` shows `sb-<workspace>` for each |
 
 ---
 
-## 10. Legacy modules (deprecated)
+## 10. Legacy modules (removed in 0.7.0)
 
-Deprecated since 0.6.0, removed in 0.7.0. A module with a
-`runscript.bash` at its root and no `scripts:` in its manifest is still
-launched the pre-0.6.0 way, and every launch prints a deprecation
-warning on stderr. Migrate it with
-[sbcli_module.md](sbcli_module.md) §11.3 and §11.4; most modules
-migrate by deleting the script.
-
-What differs for a legacy module:
-
-| | Native (§1 to §4) | Legacy |
-|---|---|---|
-| build | `scripts.build`, before tmux | whatever the script does, inside its window |
-| window command | the start argv, run directly | `cd <module root> && ./runscript.bash [args...]`, a shell command line |
-| instances | one window per instance | one window per module; the script dispatches on `--id` itself |
-| after the process exits | window stays open | window closes |
-| `sb run --fg` | supported | not supported |
-| `sb stop` | closes windows, then `scripts.stop` | respawns the window with `stopscript.bash` when there is one; otherwise closes the window |
-| Windows (psmux) | supported (§11) | not supported: the window command is a POSIX command line |
-
-`sb stop` on a legacy module with a stop script keeps its old output,
-for example
-
-```console
-$ sb stop beta
-stopping beta in tmux session "sb-docdemo"
-```
-
-In that path the running process is killed by `respawn-window -k`
-first and the stop script runs in its place, then the window closes
-when the script exits; with no session running, `sb stop` creates one
-for the script's duration. A legacy module **without** a stop script is
-no longer an error (sb 0.6.0+): `sb stop` closes its window like a
-native module's. `sb run <module>:<id>` is refused for a legacy module,
-since its script dispatches on `--id` itself; pass `--id <id>` as an
-argument instead.
+Removed in 0.7.0: every module launches natively (§1.4); migrate a
+module that still carries launch or stop scripts with
+[sbcli_module.md](sbcli_module.md) §11.3 and §11.4.
 
 ---
 
@@ -579,7 +547,6 @@ is what psmux needs: the same `sb.module.yaml` launches on both
 platforms, and per-OS differences go under `platforms.windows`
 ([sbcli_module.md](sbcli_module.md) §6).
 
-Legacy modules (§10) still do not launch on Windows. Language defaults
-pick the Windows forms automatically: `{exe}` is `.exe`, a C++ binary
+Language defaults pick the Windows forms automatically: `{exe}` is `.exe`, a C++ binary
 is looked up under `build/Release/`, and `{python}` falls back to
 `python`.

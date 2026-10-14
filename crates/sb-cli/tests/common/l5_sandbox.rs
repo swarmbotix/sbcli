@@ -2,13 +2,13 @@
 //!
 //! Builds on [`WsSandbox`] (L2 primitives). Two ways to add a module:
 //!
-//! - [`L5Sandbox::adopt`]: an empty Rust project root, `sb init --rust`,
-//!   and a caller-supplied `runscript.bash` body. A runscript with no
-//!   `scripts:` in the manifest makes the module **legacy** (deprecated
-//!   launch path, still supported).
+//! - [`L5Sandbox::adopt`]: an empty Rust project root, `sb init --rust`.
+//!   The module is registered and installed, but its root holds no
+//!   `Cargo.toml`, so it suits tests that read or rewrite its manifest
+//!   (gopro), not tests that launch it.
 //! - [`L5Sandbox::native`]: a root holding only a caller-written
 //!   `sb.module.yaml`. Register it with [`L5Sandbox::write_installed_flow`],
-//!   which is also how a test lists instances.
+//!   which is also how a test lists instances. Launch tests use this.
 //!
 //! Tmux is required for any test that actually launches a session.
 //! Use [`tmux_launch_supported`] to skip in environments without it (CI
@@ -75,11 +75,10 @@ impl L5Sandbox {
         }
     }
 
-    /// Create a Rust project root `<tempdir>/<name>/`, `sb init` it,
-    /// then write the runscript body. `runscript = None` leaves no
-    /// runscript on disk, which makes the module launch natively with the
-    /// rust defaults (`cargo build --release` first).
-    pub fn adopt(&mut self, name: &str, runscript: Option<&str>) -> L5Module {
+    /// Create an empty Rust project root `<tempdir>/<name>/` and `sb init`
+    /// it. Launching it would run the rust default build (`cargo build
+    /// --release`) on an empty root, so launch tests use [`Self::native`].
+    pub fn adopt(&mut self, name: &str) -> L5Module {
         let root = self.ws.tempdir().join(name);
         std::fs::create_dir_all(&root).unwrap();
         let out = self
@@ -93,20 +92,6 @@ impl L5Sandbox {
             out.status.success(),
             "sb init --rust {name} failed: {out:?}"
         );
-        let runscript_path = root.join("runscript.bash");
-        match runscript {
-            Some(body) => {
-                std::fs::write(&runscript_path, body).unwrap();
-                make_executable(&runscript_path);
-            }
-            None => {
-                // `sb init` writes a runscript stub only with
-                // `--runscript`; remove one if it is there anyway.
-                if runscript_path.exists() {
-                    std::fs::remove_file(&runscript_path).unwrap();
-                }
-            }
-        }
         let m = L5Module {
             name: name.to_string(),
             root,
@@ -116,9 +101,8 @@ impl L5Sandbox {
     }
 
     /// Create `<tempdir>/<name>/` holding only `sb.module.yaml` with
-    /// `manifest` as its body. No `sb init`, no runscript: the module
-    /// launches natively. It is not registered anywhere; list it in
-    /// [`Self::write_installed_flow`].
+    /// `manifest` as its body. No `sb init`: it is not registered
+    /// anywhere; list it in [`Self::write_installed_flow`].
     pub fn native(&mut self, name: &str, manifest: &str) -> L5Module {
         let root = self.ws.tempdir().join(name);
         std::fs::create_dir_all(&root).unwrap();
@@ -131,29 +115,12 @@ impl L5Sandbox {
         m
     }
 
-    /// Write an executable `stopscript.bash` into an already-adopted
-    /// module's root. Mirror of [`Self::adopt`] for the runscript half
-    /// (legacy modules only; a native module uses `scripts.stop`).
-    pub fn write_stopscript(&self, module: &str, body: &str) {
-        let m = self
-            .modules
-            .iter()
-            .find(|m| m.name == module)
-            .unwrap_or_else(|| panic!("module {module:?} not adopted"));
-        let path = m.root.join("stopscript.bash");
-        std::fs::write(&path, body).unwrap();
-        make_executable(&path);
-    }
-
-    /// The active workspace's installed flow: `sb.flow.yaml`, or the
-    /// pre-0.6 `flow.yaml` if that is the one on disk.
+    /// The active workspace's installed flow, `sb.flow.yaml`.
     pub fn installed_flow_path(&self) -> PathBuf {
-        let dir = self.sb_home().join("workspaces").join(&self.workspace);
-        ["sb.flow.yaml", "flow.yaml"]
-            .iter()
-            .map(|f| dir.join(f))
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| dir.join("sb.flow.yaml"))
+        self.sb_home()
+            .join("workspaces")
+            .join(&self.workspace)
+            .join("sb.flow.yaml")
     }
 
     /// Replace the active workspace's installed flow with `body`, the way
@@ -193,17 +160,6 @@ impl Drop for L5Sandbox {
     }
 }
 
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).unwrap();
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
-
 /// `path` as a YAML single-quoted scalar (no escape sequences inside),
 /// for a module entry's `path:` in [`L5Sandbox::write_installed_flow`].
 pub fn yaml_path(path: &Path) -> String {
@@ -236,12 +192,10 @@ pub fn tmux_available() -> bool {
 
 /// True if the multiplexer can run the panes these tests launch.
 ///
-/// Legacy panes are a POSIX command line (`cd '<dir>' &&
-/// '<dir>/runscript.bash'`, see `sb_launch::Pane::shell_command`) around a
-/// bash script, and the native fixtures start `sh -c ...` directly. On
-/// Windows the `tmux` on PATH is psmux, whose pane semantics (direct exec,
-/// `-c`, `-e`, exact targets) are not verified yet, so these tests skip
-/// there; see installguide_windows.md §9.5.
+/// The fixtures start `sleep` or `sh -c ...` directly. On Windows the
+/// `tmux` on PATH is psmux, whose pane semantics (direct exec, `-c`, `-e`,
+/// exact targets) are not verified yet, so these tests skip there; see
+/// installguide_windows.md §9.5.
 ///
 /// Tests that only build a plan or assert preconditions can keep using
 /// [`tmux_available`]; tests that expect a pane to run something must use

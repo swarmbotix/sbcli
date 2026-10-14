@@ -10,9 +10,11 @@
 //! | `sb.flow.yaml`   | `WorkspaceFlow`   | workspace registry  |
 //!
 //! `sb.module.yaml` and `sb.flow.yaml` replaced `sb.dev.yml` and
-//! `flow.yaml` in 0.6.0. The old names are still read (see
-//! [`module_file_candidates`] and [`flow_file_candidates`]); callers report
-//! them as deprecated. sb-core does no file IO, so probing is the caller's.
+//! `flow.yaml` in 0.6.0, and the old names are not read since 0.7.0.
+//! Callers look for them only to refuse them with a pointer to the
+//! migration notes ([`removed_module_file_message`],
+//! [`removed_flow_file_message`]). sb-core does no file IO, so probing is
+//! the caller's.
 //!
 //! Every field is `Option<T>` where it can legitimately be absent in a
 //! given layer; `SbCliConfig::merge` then resolves the layering.
@@ -35,31 +37,62 @@ use crate::transport::Transport;
 
 /// A module's manifest, at the module root.
 pub const MODULE_FILE: &str = "sb.module.yaml";
-/// The pre-0.6.0 manifest name. Read, never written; deprecated.
-pub const LEGACY_MODULE_FILE: &str = "sb.dev.yml";
 /// A workspace's flow, at the repository root (and the installed copy).
 pub const FLOW_FILE: &str = "sb.flow.yaml";
-/// The pre-0.6.0 flow name. Read, never written; deprecated.
-pub const LEGACY_FLOW_FILE: &str = "flow.yaml";
 
-/// Probe order for a module directory: new name first, then legacy.
-pub fn module_file_candidates() -> [&'static str; 2] {
-    [MODULE_FILE, LEGACY_MODULE_FILE]
+/// The names a module directory is probed for: [`MODULE_FILE`] only.
+pub fn module_file_candidates() -> [&'static str; 1] {
+    [MODULE_FILE]
 }
 
-/// Probe order for a workspace directory: new name first, then legacy.
-pub fn flow_file_candidates() -> [&'static str; 2] {
-    [FLOW_FILE, LEGACY_FLOW_FILE]
+/// The names a workspace directory is probed for: [`FLOW_FILE`] only.
+pub fn flow_file_candidates() -> [&'static str; 1] {
+    [FLOW_FILE]
 }
 
-/// True when `path`'s file name is [`LEGACY_MODULE_FILE`].
-pub fn is_legacy_module_file(path: &Path) -> bool {
-    path.file_name().is_some_and(|n| n == LEGACY_MODULE_FILE)
+/// The pre-0.6.0 manifest name. Not read since 0.7.0; callers look for it
+/// only to refuse it ([`removed_module_file_message`]) and `sb doctor`
+/// lists it.
+pub const REMOVED_MODULE_FILE: &str = "sb.dev.yml";
+/// The pre-0.6.0 flow name. Not read since 0.7.0; callers look for it
+/// only to refuse it ([`removed_flow_file_message`]) and `sb doctor`
+/// lists it.
+pub const REMOVED_FLOW_FILE: &str = "flow.yaml";
+/// Where every message about a removed file or form points.
+pub const MIGRATING_HINT: &str = "see sbcli_module.md §Migrating";
+
+/// The error for a module directory `dir` that holds
+/// [`REMOVED_MODULE_FILE`] and no [`MODULE_FILE`].
+pub fn removed_module_file_message(dir: &Path) -> String {
+    format!(
+        "module manifest {MODULE_FILE} not found at {}; {REMOVED_MODULE_FILE} is no longer \
+         read since 0.7.0, rename it ({MIGRATING_HINT})",
+        dir.display()
+    )
 }
 
-/// True when `path`'s file name is [`LEGACY_FLOW_FILE`].
-pub fn is_legacy_flow_file(path: &Path) -> bool {
-    path.file_name().is_some_and(|n| n == LEGACY_FLOW_FILE)
+/// The error for a workspace directory `dir` that holds
+/// [`REMOVED_FLOW_FILE`] and no [`FLOW_FILE`].
+pub fn removed_flow_file_message(dir: &Path) -> String {
+    format!(
+        "{FLOW_FILE} not found at {}; {REMOVED_FLOW_FILE} is no longer read since 0.7.0, \
+         rename it ({MIGRATING_HINT})",
+        dir.display()
+    )
+}
+
+/// `path` with a final [`REMOVED_MODULE_FILE`] replaced by
+/// [`MODULE_FILE`], any other path unchanged. Flows and installed copies
+/// written before 0.7.0 may record `.../sb.dev.yml`; the entry then
+/// stands for the manifest in that directory, and the caller's
+/// missing-file check refuses a directory that still holds only the old
+/// file. The old file itself is never read.
+pub fn current_manifest_path(path: &Path) -> PathBuf {
+    if path.file_name().is_some_and(|n| n == REMOVED_MODULE_FILE) {
+        path.with_file_name(MODULE_FILE)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// One deprecation hit found while reading a file or planning a launch.
@@ -68,7 +101,7 @@ pub fn is_legacy_flow_file(path: &Path) -> bool {
 /// `warning: <item> is deprecated since ...; <hint>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deprecation {
-    /// What is deprecated, as the warning names it (`sb.dev.yml`).
+    /// What is deprecated, as the warning names it.
     pub item: String,
     /// What to do instead.
     pub hint: String,
@@ -420,7 +453,7 @@ impl SbCliConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// ModuleDevConfig — `sb.module.yaml` (legacy name `sb.dev.yml`)
+// ModuleDevConfig — `sb.module.yaml`
 // ─────────────────────────────────────────────────────────────────────
 
 /// Per-module manifest: identity, launch scripts, environment, and the
@@ -557,8 +590,7 @@ impl ModuleDevConfig {
     }
 
     /// Whether `scripts:` is declared at the top level or in any
-    /// `platforms:` overlay. A module that declares scripts launches
-    /// natively even when a `runscript.bash` sits beside it.
+    /// `platforms:` overlay.
     pub fn declares_scripts(&self) -> bool {
         !self.scripts.is_empty() || self.platforms.0.values().any(|o| !o.scripts.is_empty())
     }
@@ -1589,7 +1621,7 @@ pub struct LegacyTopic {
     pub key: String,
 }
 
-/// Scan raw `sb.dev.yml` text for legacy `topic: /...` entries.
+/// Scan raw module manifest text for legacy `topic: /...` entries.
 ///
 /// Uses a loose parse that ignores every other top-level key, so it works
 /// on files the strict [`ModuleDevConfig`] would reject. Never errors:
@@ -1626,7 +1658,7 @@ pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// WorkspaceFlow — `sb.flow.yaml` (legacy name `flow.yaml`)
+// WorkspaceFlow — `sb.flow.yaml`
 // ─────────────────────────────────────────────────────────────────────
 
 /// Workspace module registry. Maps module name → path to its manifest.
@@ -1642,11 +1674,11 @@ pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
 ///
 /// Instances are the workspace's deployment topology: one tmux window,
 /// and one node in the L6 graph editor, per declared instance of a
-/// module. Since 0.6.0 they sit under the module entry
+/// module. They sit under the module entry
 /// (`cam: { path: cam, instances: [left, right] }`); the pre-0.6.0
-/// top-level `instances:` map is still read. Use
-/// [`WorkspaceFlow::instances_for`] rather than either field. A module
-/// with no instances runs as a single (un-suffixed) process.
+/// top-level `instances:` map is not read since 0.7.0
+/// ([`probe_legacy_flow_keys`]). A module with no instances runs as a
+/// single (un-suffixed) process.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceFlow {
@@ -1658,11 +1690,6 @@ pub struct WorkspaceFlow {
     /// Message directories imported into the vault on install.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<MessageSource>,
-    /// Legacy top-level form (`instances: { cam: [left, right] }`),
-    /// deprecated since 0.6.0. Read, and copied as is on install; never
-    /// written by code paths that build a new flow.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub instances: BTreeMap<String, Vec<ModuleInstance>>,
     /// Subscriber to publisher links, `<module>.<entry>:
     /// <module>[<selector>].<entry>`. Parsed and validated in 0.6.0; see
     /// [`WorkspaceFlow::wires`].
@@ -1689,19 +1716,12 @@ impl WorkspaceFlow {
         self.instances_for(module).iter().find(|i| i.id == id)
     }
 
-    /// The module's instances: the inline list under its `modules:` entry
-    /// if non-empty, else the legacy top-level list, else empty.
+    /// The module's instances: the list under its `modules:` entry, empty
+    /// for a module that declares none or is not registered.
     pub fn instances_for(&self, module: &str) -> &[ModuleInstance] {
-        match self.modules.get(module) {
-            Some(m) if !m.instances.is_empty() => &m.instances,
-            _ => self.instances.get(module).map_or(&[][..], Vec::as_slice),
-        }
-    }
-
-    /// True when the legacy top-level `instances:` map has any entry, so
-    /// the caller can warn that it is deprecated.
-    pub fn has_legacy_instances(&self) -> bool {
-        !self.instances.is_empty()
+        self.modules
+            .get(module)
+            .map_or(&[][..], |m| m.instances.as_slice())
     }
 
     /// The parsed `wires:`, in key order. Errors are grammar only
@@ -1715,11 +1735,9 @@ impl WorkspaceFlow {
     }
 
     /// Validate the workspace name, module paths, message sources, every
-    /// instance id in both forms (rejecting duplicates within one
-    /// module's list), that no module uses both instance forms, that the
-    /// top-level form names only registered modules, and the grammar of
-    /// every wire. Call after deserializing the flow so bad input fails
-    /// at load time, not at launch time.
+    /// instance id (rejecting duplicates within one module's list), and
+    /// the grammar of every wire. Call after deserializing the flow so bad
+    /// input fails at load time, not at launch time.
     pub fn validate(&self) -> Result<(), FlowValidationError> {
         if let Some(name) = &self.name {
             validate_identifier(name).map_err(|e| FlowValidationError::BadName {
@@ -1734,24 +1752,27 @@ impl WorkspaceFlow {
                 });
             }
             validate_instance_list(module, &m.instances)?;
-            if !m.instances.is_empty() && self.instances.contains_key(module) {
-                return Err(FlowValidationError::BothInstanceForms(module.clone()));
-            }
         }
         for (index, src) in self.messages.iter().enumerate() {
             src.validate(index)?;
         }
-        for (module, list) in &self.instances {
-            if !self.modules.contains_key(module) {
-                return Err(FlowValidationError::InstancesForUnknownModule(
-                    module.clone(),
-                ));
-            }
-            validate_instance_list(module, list)?;
-        }
         self.wires()?;
         Ok(())
     }
+}
+
+/// Pre-parse check for flow keys sb no longer reads. A top-level
+/// `instances:` key gives [`FlowValidationError::LegacyTopLevelInstances`].
+/// Run it on the raw text before the strict parse, which would reject the
+/// key only as an unknown field. Text that is not a YAML mapping gives
+/// `None`; the strict parse reports what is wrong with it.
+pub fn probe_legacy_flow_keys(yaml: &str) -> Option<FlowValidationError> {
+    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(yaml)
+    else {
+        return None;
+    };
+    map.contains_key("instances")
+        .then_some(FlowValidationError::LegacyTopLevelInstances)
 }
 
 /// Every id in one module's instance list is valid and unique.
@@ -1801,13 +1822,13 @@ pub enum FlowValidationError {
     EmptyMessagePath { index: usize },
     #[error("messages[{index}]: unknown backend {backend:?} (expected one of: proto, fb, iox2)")]
     UnknownBackend { index: usize, backend: String },
+    /// A top-level `instances:` map, the pre-0.6.0 form. Raised by
+    /// [`probe_legacy_flow_keys`] before the strict parse.
     #[error(
-        "module {0:?} declares instances both under its modules: entry and in the top-level \
-         instances: map; keep only the list under modules:"
+        "top-level instances: is no longer read since 0.7.0; move each list under \
+         modules.<name>.instances (see sbcli_module.md §Migrating)"
     )]
-    BothInstanceForms(String),
-    #[error("top-level instances: names module {0:?}, which is not listed under modules:")]
-    InstancesForUnknownModule(String),
+    LegacyTopLevelInstances,
     /// `(lhs, reason)`: the wire's key and what is wrong with it.
     #[error("wires.{0}: {1}")]
     BadWire(String, String),
@@ -1832,8 +1853,7 @@ pub struct ModuleRef {
     pub path: PathBuf,
     pub up: bool,
     /// One window per entry under `sb up`. Empty = one un-suffixed
-    /// process. Read through [`WorkspaceFlow::instances_for`], which also
-    /// honours the legacy top-level form.
+    /// process.
     pub instances: Vec<ModuleInstance>,
 }
 
@@ -2391,12 +2411,13 @@ mod tests {
 
     #[test]
     fn workspace_flow_without_instances_key_still_parses() {
-        // Pre-instances flow.yaml shape — must continue to parse so
-        // existing user workspaces keep working when sb is upgraded.
-        let y = "modules:\n  camera: /home/u/projects/camera/sb.dev.yml\n";
+        // Pre-instances flow shape — must continue to parse so existing
+        // user workspaces keep working when sb is upgraded.
+        let y = "modules:\n  camera: /home/u/projects/camera/sb.module.yaml\n";
+        assert_eq!(probe_legacy_flow_keys(y), None);
         let f: WorkspaceFlow = serde_yaml::from_str(y).unwrap();
         assert_eq!(f.modules.len(), 1);
-        assert!(f.instances.is_empty());
+        assert!(f.instances_for("camera").is_empty());
         assert!(f.validate().is_ok());
     }
 
@@ -2420,33 +2441,29 @@ mod tests {
 
     #[test]
     fn workspace_flow_validate_rejects_duplicate_instance_id() {
-        // Legacy top-level form.
         let left = ModuleInstance::new("left");
-        let mut f = WorkspaceFlow {
-            modules: BTreeMap::from([("cam".to_owned(), ModuleRef::new("apps/cam"))]),
-            instances: BTreeMap::from([("cam".to_owned(), vec![left.clone(), left.clone()])]),
+        let cam = ModuleRef {
+            instances: vec![left.clone(), left],
+            ..ModuleRef::new("apps/cam")
+        };
+        let f = WorkspaceFlow {
+            modules: BTreeMap::from([("cam".to_owned(), cam)]),
             ..Default::default()
         };
         assert!(matches!(
             f.validate(),
             Err(FlowValidationError::DuplicateInstanceId { .. })
         ));
-        assert!(f.has_legacy_instances());
-        // Both forms for one module, and the top-level form for a module
-        // that is not registered.
-        f.instances.insert("cam".to_owned(), vec![left.clone()]);
-        f.modules.get_mut("cam").unwrap().instances = vec![left.clone()];
-        assert_eq!(
-            f.validate(),
-            Err(FlowValidationError::BothInstanceForms("cam".into()))
+        // The pre-0.6.0 top-level form is refused with the migration hint
+        // by the probe; the strict parse alone rejects it as unknown.
+        let y = "modules:\n  cam: apps/cam\ninstances:\n  cam: [left]\n";
+        let e = probe_legacy_flow_keys(y).unwrap();
+        assert_eq!(e, FlowValidationError::LegacyTopLevelInstances);
+        assert!(
+            e.to_string().contains("no longer read since 0.7.0"),
+            "{e}"
         );
-        f.instances = BTreeMap::from([("ghost".to_owned(), vec![left])]);
-        assert_eq!(
-            f.validate(),
-            Err(FlowValidationError::InstancesForUnknownModule(
-                "ghost".into()
-            ))
-        );
+        assert!(serde_yaml::from_str::<WorkspaceFlow>(y).is_err());
     }
 
     // ── encoding: / type: / mime: rules ───────────────────────────────

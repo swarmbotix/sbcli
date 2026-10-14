@@ -71,8 +71,8 @@ mkdir -p "$SB_HOME/ws"
 "$SB" init --rust "$SUBBER" >/dev/null
 
 echo "--- L3: scaffold pub + sub on Zenoh ---"
-( cd "$PUBBER" && "$SB" pub add -m ros2/std/StringStamped hello --zenoh --force )
-( cd "$SUBBER" && "$SB" sub add -m ros2/std/StringStamped --key dev01/demo/pubber/zenoh/hello --zenoh --force )
+( cd "$PUBBER" && "$SB" io add pub -m ros2/std/StringStamped hello --zenoh --force )
+( cd "$SUBBER" && "$SB" io add sub -m ros2/std/StringStamped --key dev01/demo/pubber/zenoh/hello --zenoh --force )
 
 echo "--- L5: sb up (builds both modules, then launches them) ---"
 "$SB" up

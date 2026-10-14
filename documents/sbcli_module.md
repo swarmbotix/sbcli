@@ -17,10 +17,10 @@ and `sb stop` do with the manifest), [sbcli_ws.md](sbcli_ws.md)
 (which writes the first manifest), [sbcli_pubsub.md](sbcli_pubsub.md)
 (the publisher, subscriber, and service entries).
 
-**Added in sb 0.6.0.** `sb.module.yaml` replaces `sb.dev.yml`, and its
-`scripts:` block replaces the per-module launch and stop scripts. The
-old names keep working until 0.7.0, with a warning; §11 is the
-migration guide.
+**Added in sb 0.6.0.** `sb.module.yaml` replaces the pre-0.6.0 module
+file, and its `scripts:` block replaces the per-module launch and stop
+scripts. `sb 0.7.0+` reads only `sb.module.yaml` and runs no such
+script; §11 is the migration guide, required since 0.7.0.
 
 ---
 
@@ -50,9 +50,8 @@ no path that is true on only one machine (§6.3).
 
 `<module root>/sb.module.yaml`. The module root is the directory that
 holds the file, unless `root:` says otherwise (§2). A workspace's
-`sb.flow.yaml` names the module directory, and `sb` looks for the
-manifest in it: `sb.module.yaml` first, then the deprecated `sb.dev.yml`
-(§11.1).
+`sb.flow.yaml` names the module directory, and `sb` looks for
+`sb.module.yaml` in it. `sb 0.7.0+` looks for no other name (§11.1).
 
 ### 1.2 What `sb` does with it
 
@@ -533,8 +532,8 @@ wires:
 
 No module declares `scripts:`: every binary is named after its module,
 so the Rust defaults apply. The camera list exists once, in
-`sb.flow.yaml`. Deleted: every `runscript.bash`, every
-`stopscript.bash`, `flow.yaml`, and every `sb.dev.yml`.
+`sb.flow.yaml`. Deleted: every per-module launch and stop script, and
+the pre-0.6.0 flow and module files (§11).
 
 What `sb install .` then `sb up` does on Linux:
 
@@ -583,12 +582,15 @@ not read them yet. Until a later release generates subscriber keys from
 
 ---
 
-## 11. Migrating from 0.5
+## 11. Migrating from 0.5 (required since 0.7.0)
 
-Every item below keeps working in 0.6.0 and prints a warning on stderr;
-all are removed in 0.7.0 ([sbcli.md](sbcli.md) §10 holds the table).
-There is no migration command: each change is a rename or a few lines
-of YAML, made by hand.
+Every item below was deprecated in 0.6.0 and is removed in 0.7.0
+([sbcli.md](sbcli.md) §10 holds the table). `sb 0.7.0+` refuses the old
+file names and the top-level `instances:` map with an error that ends
+`(see sbcli_module.md §Migrating)`, which is this section, and ignores
+the old launch and stop scripts. There is no migration command: each
+change is a rename or a few lines of YAML, made by hand, and none of it
+needs an older `sb`.
 
 ### 11.1 `sb.dev.yml` becomes `sb.module.yaml`
 
@@ -599,11 +601,19 @@ git mv modules/ips_track/sb.dev.yml modules/ips_track/sb.module.yaml
 sb install .        # the installed copy records manifest paths; refresh it
 ```
 
-Until the rename, `sb` reads `sb.dev.yml` when no `sb.module.yaml` sits
-next to it, and warns. When both exist, `sb.module.yaml` is read and
-`sb.dev.yml` is ignored. Reinstall after the rename: the installed copy
-of the workspace names each manifest by path, and the `ws modules` row
-fails for a manifest that is no longer there.
+`sb 0.7.0+` refuses a module directory that holds `sb.dev.yml` and no
+`sb.module.yaml`; `sb install`, `sb init`, `sb io`, and `sb doctor` stop
+with
+
+```
+module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)
+```
+
+When both files exist, `sb.module.yaml` is read and `sb.dev.yml` is
+ignored; `sb ws check` lists it in the `deprecated` row until you delete
+it. An installed copy written before the rename may still record the
+old path; `sb` reads such an entry as the `sb.module.yaml` in the same
+directory, and the next `sb install .` records the new name.
 
 ### 11.2 `flow.yaml` becomes `sb.flow.yaml`
 
@@ -613,10 +623,17 @@ sb install .
 ```
 
 Before, at the repository root: `flow.yaml`. After: `sb.flow.yaml`, same
-contents. `sb install` and `sb init` look for `sb.flow.yaml` first and
-fall back to `flow.yaml` with a warning. `sb ws create` writes
-`sb.flow.yaml`, and every install writes its installed copy under that
-name.
+contents. `sb 0.7.0+` reads only `sb.flow.yaml`; a directory that holds
+`flow.yaml` and no `sb.flow.yaml` is refused with
+
+```
+sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)
+```
+
+The same applies to an installed copy written before 0.6.0 under
+`<sb_home>/workspaces/<name>/`: rename it there too, or reinstall the
+repository, which writes `sb.flow.yaml`. A leftover `flow.yaml` beside an
+`sb.flow.yaml` is ignored; delete it.
 
 ### 11.3 `runscript.bash` becomes `scripts:`
 
@@ -657,17 +674,13 @@ then `git rm runscript.bash`. Line by line:
 | an absolute path true on one box | `${VAR:-default}` (§6.3) |
 | pipes, redirection, `$(...)` | not available (§3.1); move the logic into the program or a build step |
 
-How `sb` decides, per module:
-
-| Module has | Launched as |
-|---|---|
-| `scripts:` (top level or any overlay) | native |
-| no `scripts:` and no `runscript.bash` | native, with the language defaults |
-| `runscript.bash` and no `scripts:` | legacy, with the warning `runscript.bash is deprecated ...` |
-| both | native; the script is ignored, with a warning saying so |
-
-A module whose defaults fit can therefore migrate by deleting the
-script and nothing else.
+`sb 0.7.0+` launches every module natively and never runs
+`runscript.bash`, whether or not the manifest declares `scripts:`. A
+module whose defaults fit therefore migrates by deleting the script and
+nothing else; one whose script did more needs the lines in the table
+above, or it starts the wrong program (or none) after the upgrade.
+Until the script is deleted, `sb ws check` lists it in its `deprecated`
+row.
 
 ### 11.4 `stopscript.bash` becomes `scripts.stop`, or nothing
 
@@ -684,7 +697,9 @@ scripts:
 The difference in timing: the old script ran inside the module's tmux
 window after `sb` had killed the process in it; `scripts.stop` runs in
 your terminal after the windows are closed. Both are teardown, not a
-graceful signal ([sbcli_launch.md](sbcli_launch.md) §4.1).
+graceful signal ([sbcli_launch.md](sbcli_launch.md) §4.1). `sb 0.7.0+`
+never runs `stopscript.bash`, so cleanup it still performs must move to
+`scripts.stop` before the upgrade.
 
 ### 11.5 Top-level `instances:` moves under the module entry
 
@@ -705,26 +720,29 @@ modules:
 ```
 
 An instance is a bare id, or a map `{ id, label, args, env, docker }`
-([sbcli_ws.md](sbcli_ws.md) §4.6). Declaring instances for one module
-in both places is an error; the top-level map alone is read with a
-warning.
+([sbcli_ws.md](sbcli_ws.md) §4.6). `sb 0.7.0+` refuses a flow that still
+has a top-level `instances:` map, before anything else in it is read:
+
+```
+top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)
+```
+
+An installed copy written by 0.6.0 from such a flow carries the map
+too, so move the lists in the repository's `sb.flow.yaml`, then
+`sb install .`.
 
 ### 11.6 `sb init --docker` no longer writes a bash template
 
 `sb init --docker` still checks the module's instances (each needs a
 `docker.image`) before writing anything, but writes only the manifest.
-An instance's `docker:` block stays valid and is validated, but sb 0.6.0
-does not start a container from it, and rather than run the host binary
-in its place, `sb up` **skips** a module whose instances declare
-`docker:` (`sb run` refuses it). Two ways forward until native container
-launch lands:
-
-1. **Keep the generated docker launch script** and declare no
-   `scripts:`. The module stays on the legacy path
-   ([sbcli_launch.md](sbcli_launch.md) §10): one window, the script
-   dispatching on `--id` as before, with a deprecation warning.
-2. **Move the container into `scripts.start`** and drop the `docker:`
-   blocks, carrying the per-instance differences as instance `args`:
+An instance's `docker:` block stays valid and is validated, but `sb`
+does not start a container from it yet, and rather than run the host
+binary in its place, `sb up` **skips** a module whose instances declare
+`docker:` (`sb run` refuses it). The docker launch script that releases
+before 0.6.0 generated is not run either (sb 0.7.0+), so until native
+container launch lands there is one way forward: **move the container
+into `scripts.start`** and drop the `docker:` blocks, carrying the
+per-instance differences as instance `args`:
 
 ```yaml
 # modules/cam_gige_ht/sb.module.yaml
@@ -760,8 +778,9 @@ container outlives its window, add a `scripts.stop` that removes it
 ### 11.7 `SB_NO_TMUX=1` becomes `sb run --fg`
 
 The variable only ever switched off the tmux wrapper inside a generated
-launch script. To run a module in the current terminal, with its build
-first and its exit code passed through:
+launch script, and nothing reads it since 0.7.0. To run a module in the
+current terminal, with its build first and its exit code passed
+through:
 
 ```bash
 sb run --fg ips_viz
@@ -770,7 +789,11 @@ sb run --fg ips_detect:sb00      # one instance of an instanced module
 
 ### 11.8 `sb pub`, `sb sub`, `sb list`, `sb service` become `sb io`
 
-Deprecated in 0.5.0; from 0.6.0 each prints a warning when used.
+Deprecated in 0.5.0, warned about from 0.6.0, removed in 0.7.0: each
+now fails, exit 1, with
+``error: `<verb>` is not an sb command or an installed app.``
+(plus a spelling guess, which does not point here). Use the right-hand
+column.
 
 | Before | After |
 |---|---|
@@ -779,23 +802,26 @@ Deprecated in 0.5.0; from 0.6.0 each prints a warning when used.
 | `sb pub edit <name>`, `sb sub edit <topic-or-key>` | `sb io edit <name>` |
 | `sb pub rm <name>`, `sb sub rm <topic-or-key>` | `sb io rm <name>` |
 | `sb list`, `sb pub list`, `sb sub list` | `sb io list` |
-| `sb service init` | `sb io add service <name>` |
+| `sb service init` | `sb io add service service` (the default service; any other name adds a named one) |
 
-Details in [sbcli_pubsub.md](sbcli_pubsub.md) §14.
+Two differences to know. `sb io` names every entry, a subscriber
+included, by its `name:` (`sb io list` shows it), not by its topic or
+key. And `sb io add service service` renders the default router to
+`<io_dir>/services/service.<ext>` and records it under `services:`,
+where the old verb wrote `<io_dir>/service.<ext>` and recorded nothing;
+both serve on the same base key ([sbcli_reqres.md](sbcli_reqres.md) §3).
+A router file the old verb wrote keeps working as your own file, but
+nothing regenerates it. Details in [sbcli_pubsub.md](sbcli_pubsub.md)
+§14.
 
-### 11.9 The warnings, and confirming you are done
+### 11.9 Confirming you are done
 
-Each deprecated item prints one line on stderr, once per command, and
-never changes stdout:
+`sb 0.7.0+` prints no deprecation warnings. What remains is the
+`deprecated` row of `sb ws check` and `sb doctor`, which lists every
+leftover pre-0.6.0 file it finds, one per line:
 
 ```
-warning: <item> is deprecated since 0.6.0 and will be removed in 0.7.0; <hint>
-```
-
-For example:
-
-```
-warning: runscript.bash is deprecated since 0.6.0 and will be removed in 0.7.0; declare scripts: in sb.module.yaml; see sbcli_module.md §Migrating
+[WARN] deprecated   runscript.bash at /home/el/ws_ips/modules/ips_track/runscript.bash is ignored since 0.7.0 (see sbcli_module.md §Migrating)
 ```
 
 A migrated workspace shows no `[WARN] deprecated` row in `sb ws check`
@@ -810,8 +836,8 @@ The whole migration, for one repository:
 4. Translate each launch script into `scripts:`, or delete it when the
    defaults fit; delete each stop script, or turn it into
    `scripts.stop` (§11.3, §11.4).
-5. `sb install .`, then `sb ws check` until it shows no `deprecated`
-   warning.
+5. `sb install .`, then `sb ws check` until `ws modules` passes and
+   the `deprecated` row reads `nothing deprecated in use`.
 
 ---
 
@@ -832,6 +858,7 @@ usually behind the module or file they concern.
 | `{id}` without instances | `{id} used but this module has no instances` |
 | `{args}` inside a word or an `env:` value | `{args} must be a whole token` |
 | unclosed `{` or `${` | `unterminated placeholder in "<text>"` |
+| a module directory with only the pre-0.6.0 manifest (sb 0.7.0+, §11.1) | `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` |
 
 ---
 
@@ -839,8 +866,8 @@ usually behind the module or file they concern.
 
 ### 13.1 `sb io` rewrites the file
 
-`sb io add`, `edit`, and `rm` (and the deprecated `sb pub` / `sb sub`)
-write `sb.module.yaml` back from its parsed form. Every key survives,
+`sb io add`, `edit`, and `rm` write `sb.module.yaml` back from its
+parsed form. Every key survives,
 `scripts:` included, but YAML comments and your own key order do not,
 and `topic:` is written out even where you omitted it. Keep notes about
 the module in a README rather than in comments.

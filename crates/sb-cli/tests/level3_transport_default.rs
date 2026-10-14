@@ -1,6 +1,6 @@
 //! L3 TDD #4 — transport defaulting.
 //!
-//! With no `--zenoh` / `--iox2`, `sb pub add` reads the default
+//! With no `--zenoh` / `--iox2`, `sb io add pub` reads the default
 //! transport from sb.config.yml's `transport_on_device`. Explicit flag
 //! always wins.
 
@@ -27,10 +27,10 @@ fn sb_config_override_flips_default() {
 
     let out = s
         .cmd_in_module()
-        .args(["pub", "add", "-m", "ros2/std/StringStamped", "hello"])
+        .args(["io", "add", "pub", "-m", "ros2/std/StringStamped", "hello"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "pub add failed: {out:?}");
+    assert!(out.status.success(), "io add pub failed: {out:?}");
     let body = std::fs::read_to_string(s.dev_yml()).unwrap();
     assert!(
         body.contains("transport: zenoh"),

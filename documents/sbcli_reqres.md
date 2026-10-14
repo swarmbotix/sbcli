@@ -7,10 +7,10 @@ routes against.
 
 `sb 0.5.0+`: a service is a `services:` entry in `sb.module.yaml`, added with
 `sb io add service <name>` and rendered to `<io_dir>/services/<name>.<ext>`.
-The older `sb service init` still works but is deprecated (§2.2).
+Since 0.7.0 that is the only way to add one (§2.2).
 
-This document is normative for the behavior shipped alongside the `sb service`
-command and, from 0.5.0, the `services:` entries of `sb io`.
+This document is normative for the behavior shipped at L4 and, from 0.5.0,
+the `services:` entries of `sb io`.
 
 The canonical spec is `requirements.md` in the sbcli **source
 repository** — a maintainer document that is not part of your install;
@@ -20,7 +20,7 @@ when it and this page disagree, it wins.
 
 ## 1. Conceptual model
 
-Zenoh answers a `get` (query) with a **queryable**. `sb service` ships a small
+Zenoh answers a `get` (query) with a **queryable**. `sb` ships a small
 router — `ServiceApp` — that wraps `declare_queryable` so you define routes the
 way you would in FastAPI:
 
@@ -69,39 +69,23 @@ Flutter and Unity have no service router.
   clone gets its routers and an edited one is never overwritten
   ([sbcli_ws.md](sbcli_ws.md) §5.2).
 
-Module resolution is the same chain as `sb pub/sub` (see
+Module resolution is the chain every `sb io` verb uses (see
 [sbcli_pubsub.md](sbcli_pubsub.md) §3): `--module` + sibling dir
 (`./<name>/sb.module.yaml`), then `--module` + the active workspace's
-`sb.flow.yaml`, then `./sb.module.yaml` in cwd; each step also accepts
-the deprecated `sb.dev.yml` name (sb 0.6.0+).
+`sb.flow.yaml`, then `./sb.module.yaml` in cwd.
 
 The router file is a **static, self-contained source file**: sb fills only the
 namespace constants (`device`, `workspace`, `module`, and the service name);
 everything else is verbatim. You own the file and may edit it; the only state
 is in your own route handlers. Regenerating it overwrites it.
 
-### 2.2 `sb service init` (deprecated)
+### 2.2 The pre-`services:` default router (removed in 0.7.0)
 
-```
-sb service init [--module <name>]
-```
-
-Deprecated in favour of `sb io add service <name>` from sb 0.5.0; it keeps
-working as before and receives no new features. It writes the module's
-**default** service router to `<io_dir>/service.<ext>` (`service.py` /
-`service.rs`, directly in the io dir, not under `services/`) and does **not**
-add a `services:` entry. Re-run any time to refresh after a config change; it
-overwrites the file. Rust and Python modules only; Flutter/Unity error.
-
-Output:
-
-```
-wrote service router on module api
-  wrote /path/to/api/swarmbotix_io/service.rs
-  serves on elcom/demo/api/zenoh/service/**
-```
-
-(`refreshed` / `updated` on a re-run.)
+Removed in 0.7.0 ([sbcli.md](sbcli.md) §10): the verb that wrote the
+default router to `<io_dir>/service.<ext>` without a `services:` entry.
+`sb io add service service` adds the default service as an entry
+instead (§3). A router file the old verb wrote keeps working as your own
+file, but nothing regenerates it.
 
 ---
 
@@ -117,8 +101,9 @@ base = <device>/<workspace>/<module>/zenoh/service/<name>    # a services: entry
 base = <device>/<workspace>/<module>/zenoh/service           # the default service
 ```
 
-The default service is the router `sb service init` writes, and also a
-`services:` entry named `service`; both serve on the bare base. Every other
+The default service is a `services:` entry named `service` (and a
+router file `<io_dir>/service.<ext>` written before 0.7.0, §2.2); it
+serves on the bare base. Every other
 named service hangs off its own `<name>` segment, so several services on one
 module never share a route. The table below uses the default base; for
 `services/calib.<ext>` insert `/calib` after `service`.
@@ -138,8 +123,8 @@ Wildcards (`*`, `**`) and `?(name=Bob)` params behave exactly as in Zenoh.
 ## 4. Generated API — Python
 
 ```python
-from swarmbotix_io.services.calib import ServiceApp   # sb 0.5.0+ services: entry
-# from swarmbotix_io.service import ServiceApp        # sb service init (default service)
+from swarmbotix_io.services.calib import ServiceApp       # a services: entry named calib
+# from swarmbotix_io.services.service import ServiceApp   # the default service (named service)
 
 app = ServiceApp()                       # namespace baked in
 
@@ -186,7 +171,7 @@ Same model, closures instead of decorators. Handlers take `Req`, return
 `serde_json::Value`. Requires the `zenoh` and `serde_json` crates.
 
 ```rust
-use swarmbotix_io::service::{ServiceApp, Req};
+use swarmbotix_io::services::calib::{ServiceApp, Req};
 use serde_json::json;
 
 let mut app = ServiceApp::open();        // default `/` auto-registered
@@ -209,9 +194,8 @@ loop {
 `Req` methods: `json()`, `bytes()`, `param(key)`, field `key`. `open()` returns
 `Self` (infallible); `start()` returns `zenoh::Result<()>`. Include the file the
 same way as generated pub/sub: `#[path = "../swarmbotix_io/services/calib.rs"] pub mod calib;`
-for a `services:` entry (sb 0.5.0+), or
-`#[path = "../swarmbotix_io/service.rs"] pub mod service;` for the router
-`sb service init` writes.
+for a `services:` entry (sb 0.5.0+); the default service's file is
+`services/service.rs`.
 
 ---
 
@@ -294,10 +278,11 @@ Three rules for REST-facing routes:
 ## 7. Limitations
 
 - **GET only / JSON only.** Writes (PUT/DELETE) are pub/sub, not services. Use
-  `sb pub/sub` for streaming data.
+  publishers and subscribers (`sb io add pub` / `sb io add sub`) for streaming
+  data.
 - **Handlers run on Zenoh's callback threads.** Keep them short; guard shared
   state with a lock; hand heavy work to your own loop/queue.
 - **Overlapping routes fan out** — multiple matching queryables all reply.
 - **No path-param capture.** Split `req.key` yourself for wildcard segments.
 - **Rust + Python only.** No service router for Flutter/Unity
-  (`sb io add service` and `sb service init` error with a clear message).
+  (`sb io add service` errors with a clear message).

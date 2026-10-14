@@ -58,25 +58,6 @@ enum Cmd {
     /// Manage a module's publishers, subscribers, and services, and regenerate their code.
     #[command(subcommand)]
     Io(IoCmd),
-    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io list`.
-    ///
-    /// List publishers and subscribers across the resolved module.
-    List(ListArgs),
-    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io add pub`, `sb io edit`, `sb io rm`.
-    ///
-    /// Manage publishers.
-    #[command(subcommand)]
-    Pub(PubCmd),
-    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io add sub`, `sb io edit`, `sb io rm`.
-    ///
-    /// Manage subscribers.
-    #[command(subcommand)]
-    Sub(SubCmd),
-    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io add service`.
-    ///
-    /// REST-style request/response over Zenoh (FastAPI-style route router).
-    #[command(subcommand)]
-    Service(ServiceCmd),
     /// Inspect live topics — list, listen, or one-shot publish.
     #[command(subcommand)]
     Topic(TopicCmd),
@@ -91,17 +72,14 @@ enum Cmd {
     ///
     /// Builds first, then starts the module's windows; a window that is
     /// already up is restarted in place. Any args after the target are
-    /// appended to the start command (or forwarded verbatim to a legacy
-    /// `runscript.bash`). Use `--` if your args clash with `sb` flags.
-    /// `--fg` runs one instance in this terminal, without tmux.
+    /// appended to the start command. Use `--` if your args clash with `sb`
+    /// flags. `--fg` runs one instance in this terminal, without tmux.
     Run(RunArgs),
     /// Stop a module: close all its windows, then run `scripts.stop`.
     ///
     /// Closes every `<module>` and `<module>-<id>` window in the
     /// `sb-<workspace>` session, then runs the manifest's `scripts.stop`
-    /// inline if it declares one, with any trailing args appended. A legacy
-    /// module with a `stopscript.bash` runs that script in its window
-    /// instead (deprecated).
+    /// inline if it declares one, with any trailing args appended.
     Stop(StopArgs),
     /// Kill the workspace's tmux session.
     Down,
@@ -394,10 +372,9 @@ struct RunArgs {
     /// `<module>` (every instance) or `<module>:<id>` (one instance), as
     /// registered in the active workspace's flow.
     module: String,
-    /// Extra args appended to the module's start command (or forwarded
-    /// verbatim to a legacy `runscript.bash`). Anything after the target is
-    /// collected here; use `--` to disambiguate args that start with `-`
-    /// from `sb`'s own flags.
+    /// Extra args appended to the module's start command. Anything after
+    /// the target is collected here; use `--` to disambiguate args that
+    /// start with `-` from `sb`'s own flags.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -406,8 +383,7 @@ struct RunArgs {
 struct StopArgs {
     /// Module name registered in the active workspace's flow.
     module: String,
-    /// Extra args appended to the module's `scripts.stop` (or forwarded
-    /// verbatim to a legacy `stopscript.bash`).
+    /// Extra args appended to the module's `scripts.stop`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -420,149 +396,6 @@ struct GoproArgs {
     /// Freeze every module in the active workspace.
     #[arg(long)]
     all: bool,
-}
-
-#[derive(clap::Args)]
-struct ListArgs {
-    /// Operate on this module — see resolution order in level3.html.
-    #[arg(long)]
-    module: Option<String>,
-}
-
-#[derive(Subcommand)]
-enum PubCmd {
-    /// List publishers on the resolved module.
-    List {
-        #[arg(long)]
-        module: Option<String>,
-    },
-    /// Add a publisher.
-    Add(PubAddCli),
-    /// Edit a publisher (change its msg type or topic).
-    Edit(PubEditCli),
-    /// Remove a publisher and its generated file.
-    Rm {
-        name: String,
-        #[arg(long)]
-        module: Option<String>,
-    },
-}
-
-#[derive(clap::Args)]
-struct PubAddCli {
-    /// Bare topic (hello), prefixed <device>/<ws>/<module>/<transport>/ at
-    /// codegen; may not contain '/'. Use --key for a verbatim wire key.
-    #[arg(required_unless_present = "key", conflicts_with = "key")]
-    topic: Option<String>,
-    /// Verbatim wire key (dev01/ws/mod/iox2/hello), used as is
-    #[arg(long, value_name = "WIRE_KEY")]
-    key: Option<String>,
-    /// Message type from the vault, e.g. `std/StringStamped`. `-m` is
-    /// reserved for this — module selection uses `--module`.
-    #[arg(short = 'm', long = "msg")]
-    msg: String,
-    /// Identifier override; defaults to the topic's last `/`-segment.
-    #[arg(short = 'n', long)]
-    name: Option<String>,
-    /// Force iceoryx2 transport.
-    #[arg(long = "iox2", group = "transport")]
-    iox2: bool,
-    /// Force Zenoh transport.
-    #[arg(long, group = "transport")]
-    zenoh: bool,
-    /// Overwrite any existing publisher / subscriber that collides on
-    /// name or topic. Mutually exclusive with `--skip-existing`.
-    #[arg(long, group = "conflict")]
-    force: bool,
-    /// No-op if a publisher / subscriber already occupies the name or
-    /// topic. Mutually exclusive with `--force`.
-    #[arg(long, group = "conflict")]
-    skip_existing: bool,
-    /// Operate on this module — see resolution order in level3.html.
-    #[arg(long)]
-    module: Option<String>,
-}
-
-#[derive(clap::Args)]
-struct PubEditCli {
-    /// Existing publisher name.
-    name: String,
-    /// New message type from the vault.
-    #[arg(short = 'm', long = "msg")]
-    msg: Option<String>,
-    /// New bare topic (no '/').
-    #[arg(short = 't', long, conflicts_with = "key")]
-    topic: Option<String>,
-    /// New verbatim wire key
-    #[arg(long, value_name = "WIRE_KEY")]
-    key: Option<String>,
-    #[arg(long)]
-    module: Option<String>,
-}
-
-#[derive(Subcommand)]
-enum SubCmd {
-    /// List subscribers on the resolved module.
-    List {
-        #[arg(long)]
-        module: Option<String>,
-    },
-    /// Add a subscriber.
-    Add(SubAddCli),
-    /// Re-render a subscriber file from the current module manifest.
-    Edit {
-        /// Bare topic or wire key of the subscriber (a leading '/' is ignored)
-        topic: String,
-        #[arg(long)]
-        module: Option<String>,
-    },
-    /// Remove a subscriber and its generated file.
-    Rm {
-        /// Bare topic or wire key of the subscriber (a leading '/' is ignored)
-        topic: String,
-        #[arg(long)]
-        module: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ServiceCmd {
-    /// Copy the service router (`service.py` / `service.rs`) into the module's
-    /// io dir, with this module's namespace baked in. Re-run to refresh after
-    /// a config change. Rust and Python modules only.
-    Init {
-        /// Target module (default: resolve from cwd / active workspace).
-        #[arg(long)]
-        module: Option<String>,
-    },
-}
-
-#[derive(clap::Args)]
-struct SubAddCli {
-    /// Bare topic (hello), prefixed <device>/<ws>/<module>/<transport>/ at
-    /// codegen; may not contain '/'. Use --key for a verbatim wire key.
-    #[arg(required_unless_present = "key", conflicts_with = "key")]
-    topic: Option<String>,
-    /// Verbatim wire key (dev01/ws/mod/iox2/hello), used as is
-    #[arg(long, value_name = "WIRE_KEY")]
-    key: Option<String>,
-    /// Message type from the vault.
-    #[arg(short = 'm', long = "msg")]
-    msg: String,
-    #[arg(long = "iox2", group = "transport")]
-    iox2: bool,
-    #[arg(long, group = "transport")]
-    zenoh: bool,
-    /// Overwrite any existing publisher / subscriber that collides on
-    /// name or topic. Mutually exclusive with `--skip-existing`.
-    #[arg(long, group = "conflict")]
-    force: bool,
-    /// No-op if a publisher / subscriber already occupies the name or
-    /// topic. Mutually exclusive with `--force`.
-    #[arg(long, group = "conflict")]
-    skip_existing: bool,
-    #[arg(long)]
-    module: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -915,7 +748,7 @@ struct InitArgs {
     #[arg(long, group = "lang")]
     unity: bool,
     /// Write a fresh `sb.module.yaml` over the existing manifest (its entries
-    /// are dropped), and with --runscript overwrite `runscript.bash`.
+    /// are dropped).
     #[arg(long)]
     force: bool,
     /// Check, before writing anything, that every instance of this module in
@@ -923,10 +756,6 @@ struct InitArgs {
     /// documents/sbcli_module.md.
     #[arg(long)]
     docker: bool,
-    /// Also write a `runscript.bash` stub (deprecated: sb launches modules
-    /// natively from `scripts:` in sb.module.yaml).
-    #[arg(long)]
-    runscript: bool,
 }
 
 #[derive(Subcommand)]
@@ -1183,42 +1012,6 @@ fn real_main() -> Result<ExitCode> {
                 all,
             } => cmd_io_update(module.as_deref(), services, all),
         },
-        // The four pre-`sb io` verbs: warn on stderr first, then do the old
-        // work unchanged.
-        Cmd::List(a) => {
-            deprecation::warn_deprecated(deprecation::items::VERB_LIST, "use sb io list");
-            cmd_list(a.module.as_deref(), Scope::All)
-        }
-        Cmd::Pub(p) => {
-            deprecation::warn_deprecated(
-                deprecation::items::VERB_PUB,
-                "use sb io add pub, sb io edit, sb io rm",
-            );
-            match p {
-                PubCmd::List { module } => cmd_list(module.as_deref(), Scope::PubsOnly),
-                PubCmd::Add(a) => cmd_pub_add(a),
-                PubCmd::Edit(a) => cmd_pub_edit(a),
-                PubCmd::Rm { name, module } => cmd_pub_rm(&name, module.as_deref()),
-            }
-        }
-        Cmd::Sub(s) => {
-            deprecation::warn_deprecated(
-                deprecation::items::VERB_SUB,
-                "use sb io add sub, sb io edit, sb io rm",
-            );
-            match s {
-                SubCmd::List { module } => cmd_list(module.as_deref(), Scope::SubsOnly),
-                SubCmd::Add(a) => cmd_sub_add(a),
-                SubCmd::Edit { topic, module } => cmd_sub_edit(&topic, module.as_deref()),
-                SubCmd::Rm { topic, module } => cmd_sub_rm(&topic, module.as_deref()),
-            }
-        }
-        Cmd::Service(s) => {
-            deprecation::warn_deprecated(deprecation::items::VERB_SERVICE, "use sb io add service");
-            match s {
-                ServiceCmd::Init { module } => cmd_service_init(module.as_deref()),
-            }
-        }
         Cmd::Topic(t) => match t {
             TopicCmd::List(a) => cmd_topic_list(a),
             TopicCmd::Listen(a) => cmd_topic_listen(a),
@@ -1375,7 +1168,7 @@ fn cmd_list(module: Option<&str>, scope: Scope) -> Result<()> {
     Ok(())
 }
 
-/// The `<topic>` positional / `--key` pair of `sb pub|sub add|edit` as a
+/// The `<topic>` positional / `--key` pair of `sb io add|edit` as a
 /// [`TopicRef`]. A bare topic may not contain `/`; the error points at
 /// `--key` with the leading `/` already dropped.
 fn topic_ref_from_cli(topic: Option<&str>, key: Option<&str>) -> Result<TopicRef> {
@@ -1391,131 +1184,6 @@ fn topic_ref_from_cli(topic: Option<&str>, key: Option<&str>) -> Result<TopicRef
             _ => anyhow::anyhow!("topic is empty"),
         }),
     }
-}
-
-fn cmd_pub_add(a: PubAddCli) -> Result<()> {
-    let topic = topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?;
-    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
-    let name = a
-        .name
-        .clone()
-        .unwrap_or_else(|| sb_pubsub::default_name(&topic));
-    let transport =
-        transport_from_flags(a.zenoh, a.iox2).unwrap_or_else(|| sb_pubsub::default_transport(&cfg));
-    let colliders = find_pub_colliders(&handle.config, &name, &topic, transport);
-    let policy = resolve_conflict_policy(a.force, a.skip_existing, &colliders, "publisher")?;
-    let args = PubAddArgs {
-        topic: &topic,
-        msg_type: Some(&a.msg),
-        name: a.name.as_deref(),
-        transport: Some(transport),
-        encoding: Encoding::Proto,
-        mime: None,
-        policy,
-    };
-    let outcome = sb_pubsub::pub_add(&mut handle, &args, &cfg, &vault, &ws, &device)?;
-    print_outcome(&handle, &outcome);
-    Ok(())
-}
-
-fn cmd_pub_edit(a: PubEditCli) -> Result<()> {
-    if a.msg.is_none() && a.topic.is_none() && a.key.is_none() {
-        anyhow::bail!("at least one of -m/--msg, -t/--topic, or --key is required");
-    }
-    let topic = if a.topic.is_some() || a.key.is_some() {
-        Some(topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?)
-    } else {
-        None
-    };
-    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
-    let args = PubEditArgs {
-        name: &a.name,
-        msg_type: a.msg.as_deref(),
-        topic: topic.as_ref(),
-        encoding: None,
-        mime: None,
-    };
-    let outcome = sb_pubsub::pub_edit(&mut handle, &args, &cfg, &vault, &ws, &device)?;
-    print_outcome(&handle, &outcome);
-    Ok(())
-}
-
-fn cmd_pub_rm(name: &str, module: Option<&str>) -> Result<()> {
-    let (_, _, _, mut handle, _, _) = resolve_for_pubsub(module)?;
-    let outcome = sb_pubsub::pub_rm(&mut handle, name)?;
-    print_outcome(&handle, &outcome);
-    Ok(())
-}
-
-fn cmd_sub_add(a: SubAddCli) -> Result<()> {
-    let topic = topic_ref_from_cli(a.topic.as_deref(), a.key.as_deref())?;
-    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(a.module.as_deref())?;
-    let name = sb_pubsub::default_name(&topic);
-    let transport =
-        transport_from_flags(a.zenoh, a.iox2).unwrap_or_else(|| sb_pubsub::default_transport(&cfg));
-    let colliders = find_sub_colliders(&handle.config, &name, &topic, transport);
-    let policy = resolve_conflict_policy(a.force, a.skip_existing, &colliders, "subscriber")?;
-    let args = SubAddArgs {
-        topic: &topic,
-        msg_type: Some(&a.msg),
-        name: None,
-        transport: Some(transport),
-        encoding: Encoding::Proto,
-        mime: None,
-        policy,
-    };
-    let outcome = sb_pubsub::sub_add(&mut handle, &args, &cfg, &vault, &ws, &device)?;
-    print_outcome(&handle, &outcome);
-    Ok(())
-}
-
-fn cmd_sub_edit(topic: &str, module: Option<&str>) -> Result<()> {
-    let (cfg, _, vault, mut handle, ws, device) = resolve_for_pubsub(module)?;
-    let outcome = sb_pubsub::sub_edit(&mut handle, topic, &cfg, &vault, &ws, &device)?;
-    print_outcome(&handle, &outcome);
-    Ok(())
-}
-
-fn cmd_sub_rm(topic: &str, module: Option<&str>) -> Result<()> {
-    let (_, _, _, mut handle, _, _) = resolve_for_pubsub(module)?;
-    let outcome = sb_pubsub::sub_rm(&mut handle, topic)?;
-    print_outcome(&handle, &outcome);
-    Ok(())
-}
-
-/// `sb service init` — copy the per-module service router into the io dir,
-/// with the module's namespace baked in. Independent of pub/sub state.
-fn cmd_service_init(module: Option<&str>) -> Result<()> {
-    let (_, _, _, handle, ws, device) = resolve_for_pubsub(module)?;
-    let input = sb_codegen::ServiceAppInput {
-        module: &handle.config.module,
-        workspace: &ws,
-        device: &device,
-        language: handle.config.language,
-    };
-    let rendered = sb_codegen::render_service_app(&input)?;
-    let abs = handle.io_dir().join(&rendered.rel_path);
-    if let Some(parent) = abs.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let existed = abs.exists();
-    std::fs::write(&abs, &rendered.contents)
-        .with_context(|| format!("writing {}", abs.display()))?;
-
-    let (verb, file_verb) = if existed {
-        ("refreshed", "updated")
-    } else {
-        ("wrote", "wrote")
-    };
-    println!("{verb} service router on module {}", handle.config.module);
-    println!("  {file_verb} {}", abs.display());
-    println!(
-        "  serves on {device}/{ws}/{}/zenoh/{}/**",
-        handle.config.module,
-        sb_codegen::SERVICE_SEGMENT,
-    );
-    Ok(())
 }
 
 fn print_outcome(handle: &ModuleHandle, outcome: &sb_pubsub::MutationOutcome) {
@@ -2163,7 +1831,6 @@ fn cmd_init(a: InitArgs) -> Result<()> {
         language,
         force: a.force,
         docker: a.docker,
-        runscript: a.runscript,
     };
     let outcome = sb_workspace::init_module(&home, &opts)?;
     let lang_tag = outcome.language.map(|l| l.as_str()).unwrap_or("?");
@@ -2175,14 +1842,6 @@ fn cmd_init(a: InitArgs) -> Result<()> {
     );
     if outcome.manifest_written {
         println!("  wrote {}", sb_workspace::MODULE_FILE);
-    } else if outcome.legacy_manifest {
-        println!(
-            "  adopted existing {} (deprecated)",
-            sb_workspace::LEGACY_MODULE_FILE
-        );
-    }
-    if outcome.runscript_written {
-        println!("  wrote runscript.bash (executable)");
     }
     if outcome.io_dir_created {
         println!("  created IO directory");
@@ -2240,7 +1899,7 @@ const REPOS_DIR: &str = "repos";
 enum PackageKind {
     /// `sb.app.yml`
     App,
-    /// `sb.flow.yaml` (or the legacy `flow.yaml`)
+    /// `sb.flow.yaml`
     Workspace,
 }
 
@@ -2256,17 +1915,21 @@ fn package_kind(root: &Path, shown: &str) -> Result<PackageKind> {
         ),
         (true, None) => Ok(PackageKind::App),
         (false, Some(_)) => Ok(PackageKind::Workspace),
-        (false, None) => anyhow::bail!(
-            "{shown} has neither sb.app.yml (an app package) nor {} (a workspace \
-             package) at its root",
-            sb_workspace::FLOW_FILE
-        ),
+        (false, None) => {
+            // A 0.5 `flow.yaml` alone gets the rename hint instead.
+            sb_workspace::refuse_removed_flow_file(root)?;
+            anyhow::bail!(
+                "{shown} has neither sb.app.yml (an app package) nor {} (a workspace \
+                 package) at its root",
+                sb_workspace::FLOW_FILE
+            )
+        }
     }
 }
 
 /// The workspace flow at the root of package folder `root`: `sb.flow.yaml`,
-/// else the legacy `flow.yaml`, else the new name (so a later error names
-/// the file that is missing).
+/// whether or not it exists (so a later error names the file that is
+/// missing).
 fn package_flow(root: &Path) -> PathBuf {
     sb_workspace::find_flow_file(root).unwrap_or_else(|| sb_workspace::new_flow_file(root))
 }
@@ -2530,6 +2193,9 @@ fn staged_workspace_name(repo: &Path, url: &str) -> Result<String> {
     let flow: sb_core::WorkspaceFlow = if text.trim().is_empty() {
         sb_core::WorkspaceFlow::default()
     } else {
+        if let Some(e) = sb_core::probe_legacy_flow_keys(&text) {
+            anyhow::bail!("{shown} from {url}: {e}");
+        }
         serde_yaml::from_str(&text).with_context(|| format!("parsing {shown} from {url}"))?
     };
     let name = flow
@@ -3567,7 +3233,7 @@ fn cmd_message_list() -> Result<()> {
     // bare leaves underneath: that would make a line meaningful only in
     // relation to the header above it, which is the exact ambiguity these
     // names exist to remove. Every line here is directly pasteable into
-    // `sb pub add -m` and directly greppable.
+    // `sb io add pub -m` and directly greppable.
     // Honors the cwd pin, so standing in a standalone message repo lists
     // that repo's messages rather than every sibling directory.
     let mut names = Vec::new();
@@ -4862,7 +4528,7 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
             warned_no_schema = true;
             eprintln!(
                 "warning: no schema on the wire for {}; re-render the publisher with \
-                 `sb pub edit <name> -m <type>` or pass --type <style>/<ns>/<Leaf>",
+                 `sb io edit <name> -m <type>` or pass --type <style>/<ns>/<Leaf>",
                 resolved.full_topic
             );
         }
@@ -5268,8 +4934,8 @@ fn require_active_workspace() -> Result<(SbCliConfig, SbHome, String)> {
 }
 
 /// Warn (and carry on) when the active workspace's repo flow
-/// (`sb.flow.yaml`, or the deprecated `flow.yaml`) was edited after it was
-/// installed: `sb up` / `sb run` / `sb stop` use the installed copy.
+/// (`sb.flow.yaml`) was edited after it was installed: `sb up` / `sb run` /
+/// `sb stop` use the installed copy.
 fn warn_if_stale(home: &SbHome, ws: &str) {
     if let Ok(Some((repo_flow, _))) = sb_workspace::is_stale(home, ws) {
         let file = repo_flow
@@ -5347,8 +5013,7 @@ fn cmd_run(a: &RunArgs) -> Result<()> {
 }
 
 /// `sb stop <module> [args...]`: close every window of the module, then
-/// run its `scripts.stop` inline. A legacy module with a `stopscript.bash`
-/// runs that script in its window instead, with the pre-0.6 output.
+/// run its `scripts.stop` inline.
 fn cmd_stop(module: &str, args: &[String]) -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
     warn_if_stale(&home, &ws);
@@ -5356,30 +5021,6 @@ fn cmd_stop(module: &str, args: &[String]) -> Result<()> {
     crate::deprecation::warn_all(&plan.deprecations);
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
     let outcome = sb_launch::stop(&plan, &tmux)?;
-    if outcome.legacy {
-        // `killed` here means the module's window already held another
-        // command (typically the running runscript), the expected case for
-        // "stop after run", so the distinction is not surfaced loudly.
-        let verb = if outcome.killed.is_empty() {
-            "stopping"
-        } else {
-            "stopping (replaced existing window for)"
-        };
-        if args.is_empty() {
-            println!(
-                "{verb} {} in tmux session {:?}",
-                plan.module, outcome.session
-            );
-        } else {
-            println!(
-                "{verb} {} in tmux session {:?} (args: {})",
-                plan.module,
-                outcome.session,
-                args.join(" "),
-            );
-        }
-        return Ok(());
-    }
     println!(
         "stopped {}: closed {} window(s) [{}]",
         plan.module,

@@ -144,8 +144,8 @@ Everything the tooling needs, derived from `OS` alone:
 | `windows` | `x86_64-pc-windows-msvc` | `sb.exe` | `windows-x86_64` | `platforms/windows/dist/<ver>/` | `install.ps1` | `%USERPROFILE%\.swarmbotix` |
 | `mac` | `aarch64-apple-darwin` | `sb` | `macos-arm64` | `platforms/mac/dist/<ver>/` | `install.sh` | `$HOME/.swarmbotix` |
 
-Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.6.0 is
-`swarmbotix-0.6.0-windows-x86_64`.
+Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.7.0 is
+`swarmbotix-0.7.0-windows-x86_64`.
 
 `%USERPROFILE%\.swarmbotix` is not a free choice — it is what
 `dirs::home_dir()` returns on Windows, which is what `sb` itself uses to find
@@ -255,9 +255,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.sh
 │   │   └── sb.config.yml.template                    ← .so paths
 │   └── dist/                                         ← release OUTPUT, one dir per version
-│       ├── 0.6.0/
-│       │   ├── swarmbotix-0.6.0-linux-x86_64.zip
-│       │   ├── swarmbotix-0.6.0-linux-x86_64.zip.sha256
+│       ├── 0.7.0/
+│       │   ├── swarmbotix-0.7.0-linux-x86_64.zip
+│       │   ├── swarmbotix-0.7.0-linux-x86_64.zip.sha256
 │       │   └── install.sh                            ← verbatim from dist-tooling/
 │       └── 0.1.28/ …                                 ← previous cuts kept side by side
 │
@@ -267,9 +267,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.ps1
 │   │   └── sb.config.win.yml.template                ← .dll paths
 │   └── dist/
-│       └── 0.6.0/
-│           ├── swarmbotix-0.6.0-windows-x86_64.zip  ← the payload
-│           ├── swarmbotix-0.6.0-windows-x86_64.zip.sha256
+│       └── 0.7.0/
+│           ├── swarmbotix-0.7.0-windows-x86_64.zip  ← the payload
+│           ├── swarmbotix-0.7.0-windows-x86_64.zip.sha256
 │           └── install.ps1                           ← verbatim from dist-tooling/
 │
 └── mac/                                              ← not created yet; add as a sibling
@@ -298,7 +298,7 @@ Identical shape to Linux — one top-level dir named after the package stem, whi
 is what `install.ps1` asserts on:
 
 ```
-swarmbotix-0.6.0-windows-x86_64/
+swarmbotix-0.7.0-windows-x86_64/
 ├── bin/
 │   └── sb.exe                        ← from target/x86_64-pc-windows-msvc/release/
 ├── messages/                         ← one subdir per style; minus .cache/, targets/, message_targets/
@@ -627,7 +627,7 @@ Run on this box (Windows 11, rustc 1.89.0, host `x86_64-pc-windows-msvc`):
   all 26 zenoh 1.9 crates, `iceoryx2 0.9`, and every `sb-*` crate.
 - `cargo build --release --bin sb` → **links**, 2m16s cold, producing
   `target\release\sb.exe` (27.2 MB) + `sb.pdb` (9.8 MB).
-- `sb.exe --version` → `sb 0.6.0`.
+- `sb.exe --version` → `sb 0.7.0`.
 - `sb.exe doctor` → runs, correctly reports the four unset tool paths, and
   **auto-detects psmux**: `[OK] tmux  …\WinGet\Links\tmux.exe (tmux 3.3.4)`.
   The `which`-based resolution in `sb-launch` works exactly as its comment
@@ -652,13 +652,13 @@ It is now split per platform, next to that platform's tooling:
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.6.0-windows-x86_64"
+  "package_stem": "swarmbotix-0.7.0-windows-x86_64"
 }
 ```
 
@@ -738,7 +738,7 @@ declares its build and start commands in `sb.module.yaml` (or takes the
 language defaults), and `sb-launch` hands tmux the start **argv** as separate
 trailing arguments with `-c <module root>` and one `-e KEY=VAL` per variable,
 so no shell parses anything. `sb init` no longer writes a launch script
-(`--runscript` keeps the old stub, deprecated), `{exe}` / `{os}` / per-OS
+(0.6.0's deprecated `--runscript` stub is removed in 0.7.0), `{exe}` / `{os}` / per-OS
 `platforms:` overlays carry the Windows differences, and `resolve_tmux` falls
 back to `psmux` on `PATH`. Shipped docs: `documents/sbcli_module.md`,
 `documents/sbcli_launch.md` §11.
@@ -748,8 +748,9 @@ trailing arguments directly; whether psmux does the same, and honors `-e` on
 `new-window` / `new-session` / `respawn-window` and `remain-on-exit`, has not
 been run. Until it has, treat Windows launch as expected rather than tested,
 and run the L5 native-launch tests (`level5_native_up`, `level5_native_stop`)
-on Windows to settle it. A module that still carries a bash launch script
-(legacy mode) cannot launch under psmux at all; migrating it is the fix.
+on Windows to settle it. A bash launch script left in a module folder is
+ignored from 0.7.0 on (0.6.0 still launched it in legacy mode, which psmux
+could not run); the module launches natively from `sb.module.yaml`.
 
 What landed around the old gap, still in place:
 
@@ -846,7 +847,7 @@ Windows analogue of installguide_ubuntu.md §"Smoke testing before release" — 
 Linux smoke test covers have an equivalent:
 
 ```powershell
-$Dist = "platforms\windows\dist\0.6.0"
+$Dist = "platforms\windows\dist\0.7.0"
 
 $Sandbox = Join-Path $env:TEMP "sb-smoke-$(Get-Random)"
 New-Item -ItemType Directory -Force $Sandbox | Out-Null
@@ -856,7 +857,7 @@ $env:SB_HOME = "$Sandbox\.swarmbotix"
 & "$Dist\install.ps1" -Yes
 
 # Verify
-& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.6.0
+& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.7.0
 Get-ChildItem "$env:SB_HOME\messages"
 & "$env:SB_HOME\bin\sb.exe" doctor                 # lists what's missing
 
@@ -901,7 +902,7 @@ throwaway box or VM — the sandbox verifies extraction and layout, not PATH.
 
 Remaining:
 
-- [ ] **1.** Verify native launch under psmux: 0.6.0 replaced the bash pane
+- [ ] **1.** Verify native launch under psmux: 0.7.0 replaced the bash pane
       command with an argv (§9.5); run the L5 pane-executing tests on Windows
       (they currently skip via `tmux_launch_supported()`) and record what
       psmux does with multi-argument exec, `-e`, and `remain-on-exit`.

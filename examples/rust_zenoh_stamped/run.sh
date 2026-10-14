@@ -33,13 +33,13 @@ mkdir -p "$SB_HOME/ws"
 "$SB" ws set demo
 # No --force on the Rust module: its committed sb.module.yaml carries a
 # scripts.start (the binary is not named after the module), and --force
-# would rewrite the manifest without it. `sb pub/sub add --force` below
+# would rewrite the manifest without it. `sb io add pub/sub --force` below
 # still resets the entries, so the example stays re-runnable.
 "$SB" init --rust "$PUBBER" >/dev/null
 
 # 2. Scaffold the L3 publisher. The example's main.rs `#[path]`-mounts
 #    `swarmbotix_io/publishers/chatter.rs` produced by this command.
-( cd "$PUBBER" && "$SB" pub add -m ros2/std/StringStamped chatter --zenoh --force )
+( cd "$PUBBER" && "$SB" io add pub -m ros2/std/StringStamped chatter --zenoh --force )
 
 # 3. Build the example so the run is fast. prost-build needs `protoc`
 #    on PATH — surface the dev box's path explicitly so the build script

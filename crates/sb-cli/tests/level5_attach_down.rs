@@ -5,6 +5,7 @@
 //! "no session" message.
 
 mod common;
+use common::l5_sandbox::yaml_path;
 use common::{L5Sandbox, has_session, tmux_launch_supported};
 
 #[test]
@@ -16,7 +17,15 @@ fn level5_attach_reports_session_then_down_clears_it() {
         return;
     }
     let mut sb = L5Sandbox::empty();
-    sb.adopt("alpha", Some("#!/usr/bin/env bash\nsleep 30\n"));
+    // A module that just sleeps, so the session outlives `sb up`.
+    let alpha = sb.native(
+        "alpha",
+        "module: alpha\nlanguage: python\nscripts:\n  start: sleep 30\n",
+    );
+    sb.write_installed_flow(&format!(
+        "modules:\n  alpha: {}\n",
+        yaml_path(&alpha.manifest())
+    ));
 
     let session = format!("sb-{}", sb.workspace);
 

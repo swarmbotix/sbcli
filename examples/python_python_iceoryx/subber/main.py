@@ -3,7 +3,7 @@ prints the first one that arrives, exits 0.
 
 Post-`<T>` API: the generated module re-exports the iox2-flat
 `ImageStamped` class loaded from the absolute path baked in by
-`sb sub add`. No shared payload module is needed.
+`sb io add sub`. No shared payload module is needed.
 """
 import os
 import sys

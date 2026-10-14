@@ -419,9 +419,9 @@ fn check_deprecated_keys(cfg: &SbCliConfig) -> CheckResult {
 /// which is the same wire key, so nothing breaks; the warning only says
 /// how to store it in the canonical form. `modules` yields
 /// `(module name, path)` pairs as the workspace registry records them; the
-/// path is the module's manifest or its directory, which is probed for
-/// `sb.module.yaml` then the legacy `sb.dev.yml`. A file that cannot be
-/// read is skipped silently (other checks own that failure).
+/// path is the module's manifest or its directory, which stands for its
+/// `sb.module.yaml`. A file that cannot be read is skipped silently (other
+/// checks own that failure).
 ///
 /// One `[WARN]` per offending module. When none offend and at least one
 /// file was scanned, a single `[OK]`; when nothing was scanned, no result.
@@ -458,19 +458,13 @@ pub fn check_module_topics<'a>(
                 lt.role, lt.name, lt.topic, lt.key
             ));
         }
-        // Any write of the manifest stores every legacy entry as `key:`.
-        // `sb sub edit` rewrites the file without changing the entry; a
-        // module with only legacy publishers needs `sb pub edit --key`.
-        if let Some(sub) = legacy.iter().find(|lt| lt.role == "sub") {
+        // Any write of the manifest stores every legacy entry as `key:`;
+        // `sb io edit <name>` with no flags regenerates one entry and
+        // rewrites the file without changing any entry.
+        if let Some(first) = legacy.first() {
             msg.push_str(&format!(
-                "\n{MSG_COL}rewrite: `sb sub edit {} --module {module}` \
-                 (publishers: `sb pub edit <name> --key <key>`)",
-                sub.key
-            ));
-        } else if let Some(publ) = legacy.first() {
-            msg.push_str(&format!(
-                "\n{MSG_COL}rewrite: `sb pub edit {} --key {} --module {module}`",
-                publ.name, publ.key
+                "\n{MSG_COL}rewrite: `sb io edit {} --module {module}`",
+                first.name
             ));
         }
         out.push(warn("topics", msg));
@@ -493,8 +487,7 @@ pub fn check_module_topics<'a>(
 pub struct WorkspaceView<'a> {
     /// Workspace name; the `<ws>` segment of every owned wire key.
     pub name: &'a str,
-    /// The installed copy (`<sb_home>/workspaces/<name>/sb.flow.yaml`, or
-    /// `flow.yaml` from a pre-0.6 install).
+    /// The installed copy (`<sb_home>/workspaces/<name>/sb.flow.yaml`).
     pub flow: &'a WorkspaceFlow,
     /// Root of the vault `type:` names resolve in (the configured
     /// `messages_root`, the one `sb install` imports into).
@@ -511,7 +504,7 @@ pub struct WorkspaceView<'a> {
 /// A module of the workspace whose manifest parsed and validated.
 struct LoadedModule<'a> {
     name: &'a str,
-    /// The manifest file (`sb.module.yaml`, or the legacy `sb.dev.yml`).
+    /// The manifest file (`sb.module.yaml`).
     manifest: &'a Path,
     dev: ModuleDevConfig,
 }
@@ -565,8 +558,8 @@ fn entries_of(dev: &ModuleDevConfig) -> Vec<EntryRef<'_>> {
 ///   list this host.
 /// - `ws wires`: `[FAIL]` per problem with a `wires:` entry, checked against
 ///   the module manifests and instance lists.
-/// - `deprecated`: one `[WARN]` listing every pre-0.6 file or form the
-///   workspace still uses, one per line.
+/// - `deprecated`: one `[WARN]` listing every pre-0.6 file the workspace
+///   still holds and sb ignores since 0.7.0, one per line.
 /// - `ws source`: `[WARN]` when the repo flow file is newer than the
 ///   installed copy; `[SKIP]` for a workspace with no `source:`.
 ///
@@ -620,7 +613,7 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
     out.push(check_ws_requires(&ws.host, &loaded));
     out.extend(check_ws_platforms(&ws.host, &loaded));
     out.extend(check_ws_wires(ws.flow, &loaded));
-    out.push(check_ws_deprecated(ws, &loaded));
+    out.push(check_ws_deprecated(ws, &manifests, &loaded));
     out.push(match (&ws.flow.source, ws.stale_repo_flow) {
         (None, _) => skip("ws source", "no repo flow.yaml to compare with"),
         (Some(_), Some(repo)) => warn(
@@ -641,6 +634,12 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
 /// Read, parse and validate one module manifest; the error is the row text.
 fn load_manifest(manifest: &Path) -> Result<ModuleDevConfig, String> {
     if !manifest.is_file() {
+        if let Some(dir) = manifest
+            .parent()
+            .filter(|dir| dir.join(sb_core::REMOVED_MODULE_FILE).is_file())
+        {
+            return Err(sb_core::removed_module_file_message(dir));
+        }
         return Err(format!(
             "no module manifest at {} (run `sb init` in the module)",
             manifest.display()
@@ -661,19 +660,16 @@ fn load_manifest(manifest: &Path) -> Result<ModuleDevConfig, String> {
     Ok(dev)
 }
 
-/// The manifest file a flow or registry path names. A directory is probed
-/// for [`sb_core::module_file_candidates`] in order (new name first) and
-/// falls back to the new name when neither exists; a file path is used as
-/// is, so a 0.5 install that recorded `.../sb.dev.yml` keeps resolving.
+/// The manifest file a flow or registry path names. A directory stands for
+/// its `sb.module.yaml`; a file path is used as is, except that a 0.5
+/// `.../sb.dev.yml`, which installs before 0.7.0 recorded, stands for the
+/// `sb.module.yaml` beside it ([`sb_core::current_manifest_path`]). The
+/// old file is never read.
 fn manifest_path(path: &Path) -> PathBuf {
-    if !path.is_dir() {
-        return path.to_path_buf();
+    if path.is_dir() {
+        return path.join(sb_core::MODULE_FILE);
     }
-    sb_core::module_file_candidates()
-        .into_iter()
-        .map(|name| path.join(name))
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| path.join(sb_core::MODULE_FILE))
+    sb_core::current_manifest_path(path)
 }
 
 fn check_ws_types(
@@ -736,8 +732,8 @@ fn is_iox2_variant(cfg: &SbCliConfig, name: &sb_vault::MessageName) -> bool {
 fn check_ws_instances(flow: &WorkspaceFlow) -> Vec<CheckResult> {
     let mut out = Vec::new();
     let mut total = 0usize;
-    // `instances_for` is the inline list under the module entry, else the
-    // legacy top-level one, which is what launch fans out.
+    // `instances_for` is the list under the module entry, which is what
+    // launch fans out.
     for module in flow.modules.keys() {
         let mut seen = std::collections::BTreeSet::new();
         for inst in flow.instances_for(module) {
@@ -1107,48 +1103,55 @@ fn find_loaded<'m, 'a>(
     modules.iter().find(|m| m.name == name)
 }
 
-/// Suffix of every `deprecated` line: where the migration steps live.
-const MIGRATING: &str = "-> see sbcli_module.md §Migrating";
-
-/// `deprecated`: one `[WARN]` listing every pre-0.6 file or form the
-/// workspace still relies on, one per line, each pointing at the migration
-/// guide. All of them still work in 0.6 and are removed in 0.7.0. Only
-/// modules whose manifest loaded are inspected.
-fn check_ws_deprecated(ws: &WorkspaceView<'_>, modules: &[LoadedModule<'_>]) -> CheckResult {
-    let mut items: Vec<String> = Vec::new();
-    for m in modules {
-        if sb_core::is_legacy_module_file(m.manifest) {
-            items.push(format!("sb.dev.yml at {}", m.manifest.display()));
+/// `deprecated`: one `[WARN]` listing every pre-0.6 file the workspace
+/// still holds, one per line, each pointing at the migration guide. sb
+/// ignores all of them since 0.7.0: `sb.dev.yml` and `runscript.bash` /
+/// `stopscript.bash` in a module directory (`manifests`, every registered
+/// module, loaded or not), and `flow.yaml` beside the repo flow. Scripts
+/// are looked for at the module root of a loaded manifest, else in the
+/// manifest's directory.
+fn check_ws_deprecated(
+    ws: &WorkspaceView<'_>,
+    manifests: &[(String, PathBuf)],
+    modules: &[LoadedModule<'_>],
+) -> CheckResult {
+    let root_of = |name: &str, manifest: &Path| -> Option<PathBuf> {
+        match find_loaded(modules, name) {
+            Some(m) => Some(m.dev.module_root(m.manifest)),
+            None => manifest.parent().map(Path::to_path_buf),
+        }
+    };
+    let mut found: Vec<PathBuf> = Vec::new();
+    for (_, manifest) in manifests {
+        if let Some(dir) = manifest.parent() {
+            found.push(dir.join(sb_core::REMOVED_MODULE_FILE));
         }
     }
-    let repo_flow = ws.flow.source.as_ref().map(|src| src.repo_flow.as_path());
-    if let Some(repo) = repo_flow {
-        if sb_core::is_legacy_flow_file(repo) && repo.is_file() {
-            items.push(format!("flow.yaml at {}", repo.display()));
-        }
+    if let Some(dir) = ws.flow.source.as_ref().and_then(|src| src.repo_flow.parent()) {
+        found.push(dir.join(sb_core::REMOVED_FLOW_FILE));
     }
     for script in ["runscript.bash", "stopscript.bash"] {
-        for m in modules {
-            let path = m.dev.module_root(m.manifest).join(script);
-            if path.is_file() {
-                items.push(format!("{script} at {}", path.display()));
+        for (name, manifest) in manifests {
+            if let Some(root) = root_of(name, manifest) {
+                found.push(root.join(script));
             }
         }
     }
-    if ws.flow.has_legacy_instances() {
-        let flow = match repo_flow {
-            Some(repo) => repo.display().to_string(),
-            None => format!("the installed flow of workspace {}", ws.name),
-        };
-        items.push(format!("top-level instances: in {flow}"));
-    }
-    if items.is_empty() {
+    let lines: Vec<String> = found
+        .iter()
+        .filter(|path| path.is_file())
+        .filter_map(|path| {
+            let file = path.file_name()?.to_string_lossy();
+            Some(format!(
+                "{file} at {} is ignored since 0.7.0 ({})",
+                path.display(),
+                sb_core::MIGRATING_HINT
+            ))
+        })
+        .collect();
+    if lines.is_empty() {
         return ok("deprecated", "nothing deprecated in use");
     }
-    let lines: Vec<String> = items
-        .into_iter()
-        .map(|item| format!("{item} {MIGRATING}"))
-        .collect();
     warn("deprecated", lines.join(&format!("\n{MSG_COL}")))
 }
 

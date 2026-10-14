@@ -1,6 +1,6 @@
 //! L5 — `sb gopro`: freeze a module for production.
 //!
-//! Reads the module manifest (`sb.module.yaml`, or a legacy `sb.dev.yml`),
+//! Reads the module manifest (`sb.module.yaml`),
 //! walks `<module_root>/<io_dir>/` to confirm every declared pub/sub has
 //! its generated file on disk, then writes a sanitized `sb.prd.yml` next
 //! to the manifest.
@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use sb_core::{Language, ModuleDevConfig, ModulePrdConfig};
-use sb_workspace::{SbHome, read_flow};
+use sb_core::{Language, ModuleDevConfig, ModulePrdConfig, current_manifest_path};
+use sb_workspace::{SbHome, read_flow, refuse_removed_module_file};
 
 // ─────────────────────────────────────────────────────────────────────
 // Pure transform — ModuleDevConfig → ModulePrdConfig
@@ -262,7 +262,10 @@ pub struct GoproOutcome {
 }
 
 /// Run gopro on a single module given its manifest on disk
-/// (`sb.module.yaml`, or a legacy `sb.dev.yml`).
+/// (`sb.module.yaml`). A path naming a 0.5 `sb.dev.yml`, as an installed
+/// copy written before 0.7.0 may record, stands for the `sb.module.yaml`
+/// beside it; a directory that holds only the old file is refused with the
+/// 0.7.0 rename hint.
 ///
 /// Steps:
 ///   1. Parse the manifest.
@@ -272,7 +275,12 @@ pub struct GoproOutcome {
 ///   5. Sanitization lint — abort if any leak.
 ///   6. Write `sb.prd.yml` next to the manifest.
 pub fn gopro_module(dev_yml_path: &Path) -> Result<GoproOutcome> {
+    let manifest = current_manifest_path(dev_yml_path);
+    let dev_yml_path = manifest.as_path();
     if !dev_yml_path.exists() {
+        if let Some(dir) = dev_yml_path.parent() {
+            refuse_removed_module_file(dir)?;
+        }
         bail!("module manifest not found at {}", dev_yml_path.display());
     }
     let body = fs::read_to_string(dev_yml_path)

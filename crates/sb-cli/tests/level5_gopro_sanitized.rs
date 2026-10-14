@@ -11,7 +11,7 @@ use common::L5Sandbox;
 #[test]
 fn gopro_output_strips_host_specific_fields() {
     let mut sb = L5Sandbox::empty();
-    let m = sb.adopt("alpha", Some("#!/usr/bin/env bash\nexit 0\n"));
+    let m = sb.adopt("alpha");
 
     // Run gopro inside the module's cwd so the default-cwd resolution
     // picks it up.

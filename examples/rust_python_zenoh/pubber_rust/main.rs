@@ -1,6 +1,6 @@
 //! Example pubber driven by `examples/rust_python_zenoh/run.sh`.
 //!
-//! Reads the publisher class scaffolded by `sb pub add` (lives under
+//! Reads the publisher class scaffolded by `sb io add pub` (lives under
 //! `swarmbotix_io/publishers/hello.rs`) and publishes a known payload
 //! a handful of times so the Python subscriber has a chance to attach.
 

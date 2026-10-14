@@ -43,7 +43,7 @@ mkdir -p "$SB_HOME/ws"
 
 # No --force on the Rust modules: each committed sb.module.yaml carries a
 # scripts.start (the binary is not named after the module), and --force
-# would rewrite the manifest without it. `sb pub/sub add --force` below
+# would rewrite the manifest without it. `sb io add pub/sub --force` below
 # still resets the entries, so the example stays re-runnable.
 "$SB" init --rust "$PUBBER" >/dev/null
 "$SB" init --rust "$SUBBER" >/dev/null
@@ -51,8 +51,8 @@ mkdir -p "$SB_HOME/ws"
 # Subscriber points at the publisher's fully-qualified topic; `--key` is
 # used verbatim.
 TOPIC_FULL="dev01/demo/pubber/iox2/frame"
-( cd "$PUBBER" && "$SB" pub add -m ros2/std/ImageStamped frame --iox2 --force )
-( cd "$SUBBER" && "$SB" sub add -m ros2/std/ImageStamped --key "$TOPIC_FULL" --iox2 --force )
+( cd "$PUBBER" && "$SB" io add pub -m ros2/std/ImageStamped frame --iox2 --force )
+( cd "$SUBBER" && "$SB" io add sub -m ros2/std/ImageStamped --key "$TOPIC_FULL" --iox2 --force )
 
 # Build both before we race them.
 ( cd "$PUBBER" && cargo build --quiet --bin pub_frame )

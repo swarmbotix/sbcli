@@ -1,6 +1,6 @@
 //! L2 TDD test #3 — `sb init --rust ./pubber` writes `sb.module.yaml` and
-//! an empty IO directory (no runscript unless `--runscript`), and registers
-//! the module in the active workspace's installed flow.
+//! an empty IO directory (no runscript), and registers the module in the
+//! active workspace's installed flow.
 
 mod common;
 use common::WsSandbox;
@@ -32,11 +32,11 @@ fn init_empty_dir_writes_manifest_and_io_dir_and_registers() {
     assert!(body.contains("module: pubber"), "body: {body}");
     assert!(body.contains("language: rust"), "body: {body}");
     assert!(body.contains("io_dir: swarmbotix_io"), "body: {body}");
-    assert!(!project.join(sb_core::LEGACY_MODULE_FILE).exists());
+    assert!(!project.join(sb_core::REMOVED_MODULE_FILE).exists());
 
     // 2. No runscript.bash: sb launches the module natively.
     let rs = project.join("runscript.bash");
-    assert!(!rs.exists(), "runscript.bash written without --runscript");
+    assert!(!rs.exists(), "sb init wrote runscript.bash");
 
     // 3. swarmbotix_io/ exists as empty dir.
     let io = project.join("swarmbotix_io");
@@ -62,26 +62,4 @@ fn init_empty_dir_writes_manifest_and_io_dir_and_registers() {
         flow_body.contains(canon_manifest.to_str().unwrap()),
         "installed flow missing absolute path to the manifest: {flow_body}"
     );
-
-    // 5. `--runscript` still writes the executable stub (deprecated path).
-    let legacy = s.tempdir().join("legacy_launch");
-    std::fs::create_dir_all(&legacy).unwrap();
-    let out = s
-        .cmd()
-        .args(["init", "--rust", "--runscript"])
-        .arg(&legacy)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "init --runscript failed: {out:?}");
-    let rs = legacy.join("runscript.bash");
-    assert!(rs.exists(), "runscript.bash missing with --runscript");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&rs).unwrap().permissions().mode();
-        assert!(
-            mode & 0o111 != 0,
-            "runscript not executable (mode {mode:o})"
-        );
-    }
 }

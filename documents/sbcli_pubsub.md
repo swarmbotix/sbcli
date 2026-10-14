@@ -1,28 +1,27 @@
-# `sb io` / `sb pub` / `sb sub` / `sb list`: Pub/Sub Reference
+# `sb io`: Pub/Sub Reference
 
-Official reference for the `sb pub`, `sb sub`, and `sb list`
-subcommand surfaces and, `sb 0.5.0+`, for `sb io`, the surface that
-replaces them: module resolution, validation, mutation semantics,
-transport selection, encodings, conflict-policy flags, per-language
-codegen, and the operational guarantees that govern when files are
-written, regenerated, or removed.
+Official reference for `sb io`, the codegen surface for a module's
+publishers, subscribers, and services: module resolution, validation,
+mutation semantics, transport selection, encodings, conflict-policy
+flags, per-language codegen, and the operational guarantees that govern
+when files are written, regenerated, or removed.
 
-This document is normative for behavior shipped at L3.
+This document is normative for behavior shipped at L3, extended by
+`sb io` in `sb 0.5.0+`.
 
-**sb 0.5.0+: use `sb io` (§14).** It manages publishers, subscribers,
-and services in one name space per module, adds the `encoding:` choice
-(`proto`, `fb`, `raw`), and regenerates a whole module with
-`sb io update`. `sb pub`, `sb sub`, `sb list`, and `sb service` keep
-working as documented here but are deprecated and receive no new
-features; `sb 0.6.0+` prints a deprecation warning on stderr each time
-one is used, and 0.7.0 removes them ([sbcli.md](sbcli.md) §10).
-Sections 1 to 13 describe the model both surfaces share: resolution,
-schema, codegen, and conflict policy.
+**sb 0.7.0+: `sb io` is the only codegen surface.** It manages
+publishers, subscribers, and services in one name space per module,
+carries the `encoding:` choice (`proto`, `fb`, `raw`), and regenerates
+a whole module with `sb io update`. The four older verbs it replaced
+were removed in 0.7.0 ([sbcli.md](sbcli.md) §10);
+[sbcli_module.md](sbcli_module.md) §11.8 maps each to its `sb io` form.
+Sections 1 to 13 describe the model: resolution, schema, codegen, and
+conflict policy. §14 is the command reference.
 
-`sb 0.6.0+`: the module file is `sb.module.yaml` (`sb.dev.yml` before;
-still read, with a warning, until 0.7.0). Its launch keys (`scripts`,
-`env`, `requires`, `platforms`) are documented in
-[sbcli_module.md](sbcli_module.md); this document covers its
+`sb 0.6.0+`: the module file is `sb.module.yaml`, and `sb 0.7.0+` reads
+no other name. Its launch keys (`scripts`, `env`, `requires`,
+`platforms`) are documented in [sbcli_module.md](sbcli_module.md); this
+document covers its
 `publishers`, `subscribers`, and `services`.
 
 The canonical spec is `requirements.md` in the sbcli **source
@@ -33,43 +32,24 @@ when it and this page disagree, it wins.
 
 ## 1. Conceptual model
 
-`sb pub` and `sb sub` are **mutating** verbs that operate on a single
-module's `sb.module.yaml`. Each `add`, `edit`, or `rm` does two things in
+`sb io add`, `sb io edit`, and `sb io rm` are **mutating** verbs that
+operate on a single module's `sb.module.yaml`. Each does two things in
 lockstep:
 
 1. **Mutates the YAML.** Reads `sb.module.yaml`, modifies the
-   `publishers:` or `subscribers:` list, writes back.
+   `publishers:`, `subscribers:`, or `services:` list, writes back.
 2. **Mirrors the change on disk.** Calls `sb-codegen` to render (or
    delete) the matching language file under
-   `<module_root>/<io_dir>/{publishers,subscribers}/<name>.<ext>`.
+   `<module_root>/<io_dir>/{publishers,subscribers,services}/<name>.<ext>`.
 
 If either half fails, the command exits non-zero. The two halves are
 **not transactional** — a codegen failure after a YAML write leaves
 the disk reflecting the post-mutation YAML but missing the generated
 file (see §11 for partial-failure semantics).
 
-`sb list`, `sb pub list`, and `sb sub list` are **read-only**.
-
-The verb surface is:
-
-```
-sb list                            [--module <name>]
-sb pub list                        [--module <name>]
-sb pub add  -m <MsgType> (<topic> | --key <WIRE_KEY>)
-                                   [-n <name>] [--iox2 | --zenoh]
-                                   [--force | --skip-existing]
-                                   [--module <name>]
-sb pub edit <name>                 [-m <MsgType>] [-t <topic> | --key <WIRE_KEY>]
-                                   [--module <name>]
-sb pub rm   <name>                 [--module <name>]
-sb sub list                        [--module <name>]
-sb sub add  -m <MsgType> (<topic> | --key <WIRE_KEY>)
-                                   [--iox2 | --zenoh]
-                                   [--force | --skip-existing]
-                                   [--module <name>]
-sb sub edit <topic-or-key>         [--module <name>]
-sb sub rm   <topic-or-key>         [--module <name>]
-```
+`sb io list` is **read-only**, and `sb io update` regenerates the files
+without changing the YAML (§14.6). The full verb surface, with every
+flag, is in §14.
 
 `-m` is **reserved for `MsgType`**. Module selection uses the
 long-only flag `--module <name>` to avoid the clash.
@@ -114,20 +94,24 @@ regenerated to match).
 
 ## 3. Module resolution
 
-Every `sb pub/sub *` verb takes an optional `--module <name>` flag.
-The lookup chain (highest priority first):
+Every `sb io` verb except `update` takes an optional `--module <name>`
+flag (`update` takes the module as its argument, §14.6). The lookup
+chain (highest priority first):
 
 1. **`--module <name>` given AND `./<name>/sb.module.yaml` exists** in
-   the current working directory (or, deprecated, `./<name>/sb.dev.yml`).
+   the current working directory.
 2. **`--module <name>` given AND active workspace's `sb.flow.yaml`
    has `<name>`**: the value in the installed copy is the absolute
    path to its manifest ([sbcli_ws.md](sbcli_ws.md) §4.3).
-3. **No `--module` flag → `./sb.module.yaml` in cwd** (or, deprecated,
-   `./sb.dev.yml`). Errors if neither exists.
+3. **No `--module` flag → `./sb.module.yaml` in cwd.** Errors if it
+   does not exist.
 
-`sb 0.6.0+` looks for `sb.module.yaml` first and falls back to
-`sb.module.yaml` with a warning; an installed copy written by 0.5.0 names
-`sb.dev.yml` paths explicitly, and those keep resolving.
+`sb 0.7.0+` looks for no other manifest name. A directory that holds
+only the pre-0.6.0 manifest stops the lookup with the rename error in
+[sbcli_module.md](sbcli_module.md) §12. An installed copy written
+before the rename may still record the old manifest path; `sb` reads
+such an entry as the `sb.module.yaml` in the same directory
+([sbcli_module.md](sbcli_module.md) §11.1).
 
 If `--module <name>` is given and neither rule 1 nor rule 2 hits, the
 CLI errors with **every path it tried**, including the dangling
@@ -151,9 +135,8 @@ sibling, rule 2 workspace) require the resolved file to exist; a
 registered-but-missing entry in `sb.flow.yaml` is treated as a miss for
 that rule, **and** the path is included in the error tail.
 
-`sb io` (§14) and `sb service` resolve their module through the same
-chain. The module root is then the directory holding `sb.module.yaml`
-unless the file sets `root:` (§4.1).
+The module root is then the directory holding `sb.module.yaml` unless
+the file sets `root:` (§4.1).
 
 ---
 
@@ -178,7 +161,7 @@ subscribers:
 | Field | Type | Set by | Notes |
 |---|---|---|---|
 | `name` | identifier | `-n` flag or topic's last segment | Drives the generated filename + the struct name (PascalCase). Must satisfy `validate_identifier`. |
-| `topic` | string | `<topic>` positional, or `-t` on `sb pub edit` | An owned, bare topic (`image_raw`). Codegen prepends `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. An entry carries at most one of `topic` and `key` (sb 0.5.0+). `sb 0.6.0+`: optional; an entry with neither uses its `name` as the topic, and `sb` writes `topic:` back on the next write. |
+| `topic` | string | `<topic>` positional on `sb io add`, or `-t` on `sb io edit` | An owned, bare topic (`image_raw`). Codegen prepends `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. An entry carries at most one of `topic` and `key` (sb 0.5.0+). `sb 0.6.0+`: optional; an entry with neither uses its `name` as the topic, and `sb` writes `topic:` back on the next write. |
 | `key` | string | `--key` flag | A verbatim wire key (`dev01/nav/teleop/zenoh/cmd_vel`), used as is: no prefix is prepended and no `<transport>` segment is injected. A leading `/` given to `--key` is dropped. An entry carries exactly one of `topic` and `key` (sb 0.5.0+). |
 | `type` | string | `-m` / `--msg` flag | Must parse as `<style>/<namespace>/<Leaf>` and exist in the vault (see §5.1). Stored verbatim, e.g. `ros2/std/ImageStamped`. Two-segment names are rejected; see [sbcli_messages.md](sbcli_messages.md) §2. `sb 0.5.0+`: required unless `encoding: raw`, which takes none. |
 | `transport` | enum (`zenoh` / `iceoryx2`) | `--zenoh` / `--iox2` or sb.config.yml default | See §7 for default resolution. |
@@ -204,14 +187,11 @@ encoding other than `proto` needs `transport: zenoh` (error texts in
 §12). When an entry breaks several rules, the topic error is reported
 first, then the transport one.
 
-`SubSpec` is identical in shape to `PubSpec`, but `sb sub *` keys
-subscribers by **topic or key** rather than name (because subscribers
-are fan-out and a single name doesn't uniquely identify one). Internally
-the `name` is still derived (it's the generated filename) but the
-user-facing API only ever takes the topic or key: `sb sub edit` and
-`sb sub rm` match their argument against both, ignoring a leading `/`
-(sb 0.5.0+). `sb io` (§14) addresses every entry by name instead, which
-the shared name space below makes unambiguous.
+`SubSpec` is identical in shape to `PubSpec`. Like every entry, a
+subscriber is addressed by its `name` (`sb io edit <name>`,
+`sb io rm <name>`), which the shared name space below makes
+unambiguous. The name defaults to the bare topic, or the key's last
+segment (§5.3), and `sb io list` shows it.
 
 ### 4.1 Module-level fields (sb 0.5.0+)
 
@@ -289,7 +269,7 @@ publish `swarmbotix/images/Image720pRgb8` and subscribe to
 - Any user-created namespaces under the resolved
   `<message_definitions>/`.
 
-No protoc / compile step runs — `sb pub add` is a metadata operation,
+No protoc / compile step runs — `sb io add` is a metadata operation,
 not a codegen one. It does **not** require the message to have been
 `sb message compile`'d. `sb 0.5.0+`: an `encoding: raw` entry has no
 `type` and skips this lookup; `sb io add --fb` is the one case that
@@ -314,7 +294,7 @@ conflict policy resolved in §8. The default is to error.
 
 ### 5.3 Default-name derivation
 
-When the user omits `-n` on `sb pub add`, the name is derived from
+When the user omits `-n` on `sb io add`, the name is derived from
 the topic or key: a bare topic is its own name, and a key gives its
 **last `/`-separated segment**:
 
@@ -323,7 +303,8 @@ the topic or key: a bare topic is its own name, and a key gives its
 | `hello` | `hello` |
 | `--key dev01/ws/cam/iox2/image_raw` | `image_raw` |
 
-`sb sub add` always derives the name this way (no `-n` flag).
+`sb io add pub` and `sb io add sub` both accept `-n`; pass it when the
+derived name is already used on the module (§4.1).
 
 ### 5.4 Identifier validation on name
 
@@ -423,8 +404,8 @@ topic_iox    = topic_full                                                    # s
 topic_bare   = <topic>, or the last segment of <key>
 ```
 
-**Worked example**: `sb pub add -m ros2/std/StringStamped hello --iox2
---module app2_cpp` in workspace `ws1` on device `dev01`:
+**Worked example**: `sb io add pub hello -m ros2/std/StringStamped
+--iox2 --module app2_cpp` in workspace `ws1` on device `dev01`:
 
 | Template var       | Value                                     | Where it appears                                                  |
 |--------------------|-------------------------------------------|-------------------------------------------------------------------|
@@ -451,8 +432,8 @@ The two refer to **different logical topics** that happen to share a
 bare name, which is exactly the collision avoidance the transport
 segment buys us. `sb topic list` shows them as
 `dev01/ws1/app2_cpp/iox2/hello` and
-`dev01/ws1/app2_cpp/zenoh/hello`; `sb list` shows each entry's stored
-`topic`, `hello`, with its transport (§9.7).
+`dev01/ws1/app2_cpp/zenoh/hello`; `sb io list` shows each entry's
+stored `topic`, `hello`, with its transport (§14.5).
 
 Because the canonical form carries the transport, `sb topic listen` and
 `sb topic pub` read it from the `<transport>` segment (sb 0.4.1+):
@@ -508,9 +489,9 @@ every sample names its vault message. The payload bytes are unchanged:
 this tag before the Header probe ([sbcli_messages.md](sbcli_messages.md)
 §1.1). The Flutter and Unity Zenoh templates are unchanged and set no
 encoding. A publisher file generated before 0.4.0 carries no tag until it
-is re-rendered, for example with `sb pub edit <name> -m <its current type>`
-(§9.2), or (sb 0.5.0+) with `sb io update`; `sb message compile` does not
-rewrite publisher files. Until then,
+is re-rendered, for example with `sb io update` or `sb io edit <name>`
+(§14.4, §14.6); `sb message compile` does not rewrite publisher
+files. Until then,
 `sb topic listen` types its frames by the Header probe, `--type`, or
 (sb 0.4.1+) the entry's `type` in the module's `sb.module.yaml`
 ([sbcli_messages.md](sbcli_messages.md) §1.1).
@@ -590,7 +571,7 @@ Any change to this contract (return type, access pattern, lifetime rules) **must
 
 **`is_owned == false` (foreign topic, a `key:` entry):** the user
 passed a verbatim wire key (e.g.
-`sb sub add -m ros2/std/ImageStamped --key dev01/demo/cam/iox2/image_raw --iox2`).
+`sb io add sub --key dev01/demo/cam/iox2/image_raw -m ros2/std/ImageStamped --iox2`).
 The template skips the override machinery and emits a single
 `SERVICE = "<verbatim>"` const. Rationale: that key belongs to whoever
 owns it; the subscriber is just listening, and per-segment overrides
@@ -637,11 +618,11 @@ CI workflow is: edit template, `SB_BLESS=1`, review the diff, commit.
 
 ### 6.7 What about edits + transports?
 
-`sb pub edit <name> -m <NewType>` does **not** re-derive a different
+`sb io edit <name> -m <NewType>` does **not** re-derive a different
 template path; the transport in the in-memory spec stays the same.
-To change the transport, `sb pub rm <name>` + `sb pub add ...
---<new-transport>`. There's intentionally no `sb pub edit
---transport` — flipping transports is a bigger change (different file
+To change the transport, `sb io rm <name>` + `sb io add ...
+--<new-transport>`. There's intentionally no transport flag on
+`sb io edit`: flipping transports is a bigger change (different file
 contents, different service-name format) and the rm + add pair makes
 the diff visible.
 
@@ -660,17 +641,21 @@ merged `sb.config.yml`:
 
 The current implementation uses `transport_on_device` as the bare-
 default (no flag). The CLI does **not** automatically distinguish
-on-vs-cross-device at `pub add` time — it just falls back to the
+on-vs-cross-device at `sb io add` time — it just falls back to the
 on-device default. The cross-device knob exists for future routing
 decisions (e.g. L6's swarmctl placement engine).
 
 Override per-invocation with the explicit flag:
 
 ```bash
-sb pub add -m ros2/std/StringStamped chatter --zenoh         # explicit
-sb pub add -m ros2/std/ImageStamped image_raw --iox2         # explicit
-sb pub add -m ros2/std/StringStamped chatter                 # uses config default (iceoryx2)
+sb io add pub chatter -m ros2/std/StringStamped --zenoh      # explicit
+sb io add pub image_raw -m ros2/std/ImageStamped --iox2      # explicit
+sb io add pub chatter -m ros2/std/StringStamped              # uses config default (iceoryx2)
 ```
+
+The default applies to `proto` entries only: an `--fb` or `--raw`
+entry without a transport flag uses Zenoh, the only transport it
+allows (§14.1).
 
 `$SB_CONFIG` and per-workspace overrides flow through the standard
 merge chain (see [sbcli_config.md](sbcli_config.md) §3).
@@ -679,8 +664,8 @@ merge chain (see [sbcli_config.md](sbcli_config.md) §3).
 
 ## 8. Conflict policy — `--force`, `--skip-existing`, interactive prompt
 
-When `sb pub add` or `sb sub add` finds existing entries that collide
-on name or topic (§5.2), the verb consults a `ConflictPolicy`:
+When `sb io add pub` or `sb io add sub` finds existing entries that
+collide on name or topic (§5.2), the verb consults a `ConflictPolicy`:
 
 | Source | Resolves to |
 |---|---|
@@ -697,8 +682,8 @@ Force semantics:
 - Removes **every** colliding entry — both publishers and
   subscribers, both same-name and same-topic — in one pass.
 - Deletes the corresponding generated file before adding the new one
-  (so a stale `publishers/image.rs` doesn't survive a
-  `pub add --force` that re-targets the slot).
+  (so a stale `publishers/image.rs` doesn't survive an
+  `sb io add --force` that re-targets the slot).
 - Reports each removed entry on stdout:
   ```
     overwrote pub hello
@@ -717,214 +702,60 @@ Skip semantics:
 Error semantics (default in non-TTY):
 
 ```
-error: sb pub add blocked by 1 existing entry:
+error: <add> blocked by 1 existing entry:
   - pub "hello" on topic "hello" (same topic)
 Re-run with --force to overwrite, --skip-existing to no-op, or `cd`
 to a TTY and re-run for an interactive prompt.
 ```
 
-The collider description includes a `reason`: `same name`, `same
-topic`, or `same name + topic`.
+`<add>` names the add that was refused. The collider description
+includes a `reason`: `same name`, `same topic`, or `same name + topic`.
 
-Cross-role collision: `sb sub add hello` against an existing
-publisher `hello` (same topic) is a same-topic collision. `--force`
-removes the publisher. Documented in
+Cross-role collision: `sb io add sub hello ...` against an existing
+publisher `hello` on the same topic collides on both name and topic.
+`--force` removes the publisher. Documented in
 `crates/sb-cli/tests/level3_conflict_policy.rs`.
 
 ---
 
-## 9. Subcommands
+## 9. Subcommands (removed in 0.7.0)
 
-`sb pub`, `sb sub`, and `sb list` are deprecated in favour of `sb io` (§14) from sb 0.5.0: they keep working as described in this section but receive no new features, so `encoding:`, `mime:`, and services are reachable only through `sb io`.
+The per-role verbs this section documented were removed in 0.7.0
+([sbcli.md](sbcli.md) §10). Their behavior lives on in `sb io`; each
+former subsection below points at its replacement.
 
-### 9.1 `sb pub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
+### 9.1 Add a publisher
 
-`<topic>` is a bare name (sb 0.5.0+). A positional containing `/`,
-leading or inner, is refused, and the error spells out the `--key`
-form:
+Removed in 0.7.0; see `sb io add pub`, §14.1.
 
-```
-error: topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello
-```
+### 9.2 Edit a publisher
 
-`--key <WIRE_KEY>` stores a `key:` entry instead of a `topic:` one; a
-leading `/` on its value is dropped. The two conflict.
+Removed in 0.7.0; see `sb io edit`, §14.4.
 
-**Effects (in order)**:
+### 9.3 Remove a publisher
 
-1. Resolve the module (§3). Errors with `"no module manifest ..."` or
-   `"module not found ..."` on miss.
-2. Validate `<MsgType>` against the vault (§5.1).
-3. Derive `<name>` (§5.3) or use `-n` value. Validate against the
-   identifier rule (§5.4).
-4. Find colliders (§5.2). Apply policy (§8) — may error, skip, or
-   queue Force-removals.
-5. Resolve transport (§7).
-6. Render the template (§6) and write
-   `<io_dir>/publishers/<name>.<ext>` (creating subdirs as needed).
-7. Append the new `PubSpec` to `sb.module.yaml`. Write back, rewriting
-   any legacy `topic: /...` entries in the file as `key:` (§13.9).
-8. Print the outcome.
+Removed in 0.7.0; see `sb io rm`, §14.5.
 
-Output (Force path, with overwrite):
+### 9.4 Add a subscriber
 
-```
-  overwrote pub hello
-added publisher on module pubber
-  wrote /path/to/pubber/swarmbotix_io/publishers/hello.rs
-  updated /path/to/pubber/sb.module.yaml
-```
+Removed in 0.7.0; see `sb io add sub`, §14.1.
 
-### 9.2 `sb pub edit <name> [OPTIONS]`
+### 9.5 Regenerate a subscriber
 
-```bash
-sb pub edit hello -m ros2/std/StringStamped
-sb pub edit hello -t new_topic
-sb pub edit hello --key new/topic
-sb pub edit hello -m ros2/std/Header -t other_topic
-```
+Removed in 0.7.0; see `sb io edit <name>` with no flags (§14.4), or
+`sb io update` (§14.6).
 
-**Effects (in order)**:
+### 9.6 Remove a subscriber
 
-1. Resolve module (§3).
-2. Error if none of `-m`, `-t`, `--key` is given:
-   `"at least one of -m/--msg, -t/--topic, or --key is required"`.
-3. Find the publisher by `<name>`. Error if missing:
-   `"publisher <name> not found on module <module>"`.
-4. Clone the spec. Apply requested mutations:
-   - `-m`: validate new MsgType. Update spec's `type`.
-   - `-t`: a bare topic only; a value containing `/` is refused, as
-     for `sb pub add` (§9.1). Check the new topic doesn't collide with
-     **other** publishers/subscribers (the edited publisher's own
-     current topic is excluded). The entry becomes `topic: <new>`,
-     replacing its `topic` or `key`.
-   - `--key` (sb 0.5.0+): a verbatim wire key, leading `/` dropped.
-     Same collision check. The entry becomes `key: <new>`, replacing
-     its `topic` or `key`. Conflicts with `-t`.
-5. Re-render the file (same path: `<name>` doesn't change on edit).
-6. Replace the spec in the list. Write `sb.module.yaml`, rewriting any
-   legacy `topic: /...` entries as `key:` (§13.9).
+Removed in 0.7.0; see `sb io rm`, §14.5.
 
-`edit` does **not** support changing the transport — see §6.7. To
-change transport: `rm` + `add`.
+### 9.7 List a module's entries
 
-Output:
+Removed in 0.7.0; see `sb io list`, §14.5.
 
-```
-edited publisher on module pubber
-  wrote /path/to/pubber/swarmbotix_io/publishers/hello.rs
-  updated /path/to/pubber/sb.module.yaml
-```
+### 9.8 List one role
 
-### 9.3 `sb pub rm <name> [--module <name>]`
-
-**Effects (in order)**:
-
-1. Resolve module (§3).
-2. Find the publisher by `<name>`. Error if missing.
-3. Remove it from the list.
-4. Delete `<io_dir>/publishers/<name>.<ext>` if it exists.
-5. Write back `sb.module.yaml`.
-
-Removing a publisher does **not** remove a subscriber on the same
-topic; they're independent entries. Use `sb sub rm <topic-or-key>` for
-the subscriber.
-
-Output:
-
-```
-removed publisher on module pubber
-  removed /path/to/pubber/swarmbotix_io/publishers/hello.rs
-  updated /path/to/pubber/sb.module.yaml
-```
-
-If the generated file was already absent (e.g. you deleted it
-manually before running `rm`), the `removed` line is omitted but the
-YAML write still happens.
-
-### 9.4 `sb sub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
-
-Same shape as `sb pub add` (§9.1), including the `/`-in-topic error
-and `--key`, except:
-
-- `-n` flag is not exposed; the name is always derived from the bare
-  topic, or from the key's last segment.
-- The collider check considers same-topic conflicts against both
-  publishers and subscribers.
-
-### 9.5 `sb sub edit <topic-or-key> [--module <name>]`
-
-```bash
-sb sub edit dev01/demo/cam/iox2/image_raw
-```
-
-The argument matches an entry's `topic` or its `key`. A leading `/` is
-ignored, so `/dev01/demo/cam/iox2/image_raw` finds the same entry
-(sb 0.5.0+).
-
-`sub edit` is **regenerate-from-current-state**, not "change the
-fields." Useful when `sb.config.yml`'s `device:` or
-`transport_*_device:` defaults change and you want to refresh the
-generated file without removing-and-readding the subscriber.
-
-**Effects (in order)**:
-
-1. Resolve module.
-2. Find the subscriber by `<topic-or-key>`. Error if missing:
-   `subscriber for topic/key "<x>" not found on module "<m>"`.
-3. Validate the spec's stored MsgType (in case the vault has
-   changed under the subscriber).
-4. Re-render the file from current spec values.
-
-Output:
-
-```
-regenerated subscriber on module subber
-  wrote /path/to/subber/swarmbotix_io/subscribers/image_raw.py
-```
-
-`sb sub edit` does **not** write `sb.module.yaml` for the entry it
-regenerates (the spec is unchanged; only the file is). That's by
-design. The exception (sb 0.5.0+) is a file that still holds legacy
-`topic: /...` entries: those are rewritten as `key:` (§13.9).
-
-### 9.6 `sb sub rm <topic-or-key> [--module <name>]`
-
-Same shape as `sb pub rm` (§9.3) but keyed by topic or key, matched as
-in §9.5 (a leading `/` is ignored).
-
-### 9.7 `sb list [--module <name>]`
-
-Renders both publishers and subscribers in a single table:
-
-```
-role  name       type               topic                          transport
-----------------------------------------------------------------------------
-pub   hello      std/StringStamped  hello                          zenoh
-sub   image_raw  std/ImageStamped   dev01/demo/cam/iox2/image_raw  iceoryx2
-```
-
-Columns: role, name, type, topic, transport. The topic column shows the
-entry's `topic`, or its `key` as stored, never with a leading `/`
-(sb 0.5.0+). Widths auto-fit per invocation. An empty module renders:
-
-```
-(no publishers or subscribers)
-```
-
-### 9.8 `sb pub list [--module <name>]` / `sb sub list [--module <name>]`
-
-Same as `sb list` filtered to one scope:
-
-```bash
-$ sb pub list
-role  name   type               topic   transport
---------------------------------------------------
-pub   hello  std/StringStamped  hello   zenoh
-```
-
-The role column is preserved even in the filtered views (consistent
-output that can be piped through the same parsers).
+Removed in 0.7.0; `sb io list` shows every role (§14.5).
 
 ---
 
@@ -936,10 +767,10 @@ output that can be piped through the same parsers).
 sb ws create demo && sb ws set demo
 
 sb init --rust /path/to/pubber
-( cd /path/to/pubber && sb pub add -m ros2/std/StringStamped hello --zenoh )
+( cd /path/to/pubber && sb io add pub hello -m ros2/std/StringStamped --zenoh )
 
 sb init --python /path/to/subber
-( cd /path/to/subber && sb sub add -m ros2/std/StringStamped --key dev01/demo/pubber/zenoh/hello --zenoh )
+( cd /path/to/subber && sb io add sub --key dev01/demo/pubber/zenoh/hello -m ros2/std/StringStamped --zenoh )
 ```
 
 The subscriber uses `--key` with the **publisher's full key** so both
@@ -952,13 +783,13 @@ for a working end-to-end script.
 ### 10.2 Iterate on a publisher with `--force`
 
 ```bash
-$ sb pub add -m ros2/std/StringStamped hello --zenoh
+$ sb io add pub hello -m ros2/std/StringStamped --zenoh
 added publisher on module pubber
   wrote .../publishers/hello.rs
   updated .../sb.module.yaml
 
-# Realize the type was wrong — change it without manual cleanup:
-$ sb pub add -m ros2/std/Header hello --zenoh --force
+# Realize the type was wrong — replace it without manual cleanup:
+$ sb io add pub hello -m ros2/std/Header --zenoh --force
   overwrote pub hello
 added publisher on module pubber
   wrote .../publishers/hello.rs
@@ -970,17 +801,17 @@ scratch:
 
 ```bash
 for pub in hello world; do
-  sb pub add -m ros2/std/StringStamped --key "dev01/demo/api/zenoh/$pub" --zenoh --force
+  sb io add pub --key "dev01/demo/api/zenoh/$pub" -m ros2/std/StringStamped --zenoh --force
 done
 ```
 
 ### 10.3 Idempotent CI: `--skip-existing`
 
-CI re-runs an init script that always calls `sb pub add`. Without a
+CI re-runs an init script that always calls `sb io add pub`. Without a
 flag, the second run errors. With `--skip-existing`:
 
 ```bash
-$ sb pub add -m ros2/std/StringStamped hello --zenoh --skip-existing
+$ sb io add pub hello -m ros2/std/StringStamped --zenoh --skip-existing
 publisher skipped on module pubber (already exists)
 $ echo $?
 0
@@ -995,14 +826,14 @@ other reads. The subscriber passes the publisher's full key with
 `--key`:
 
 ```bash
-sb pub add -m ros2/std/ImageStamped image_raw --iox2 --module camera
+sb io add pub image_raw -m ros2/std/ImageStamped --iox2 --module camera
 # camera publishes on dev01/demo/camera/iox2/image_raw
 
-sb sub add -m ros2/std/ImageStamped --key dev01/demo/camera/iox2/image_raw --iox2 --module detector
+sb io add sub --key dev01/demo/camera/iox2/image_raw -m ros2/std/ImageStamped --iox2 --module detector
 # detector listens on the same key
 ```
 
-`--key` is the working mechanism in 0.6.0. `sb 0.6.0+` also accepts the
+`--key` is the working mechanism in 0.6.0 and 0.7.0. `sb 0.6.0+` also accepts the
 same edge declared once in the workspace's `sb.flow.yaml`,
 
 ```yaml
@@ -1033,9 +864,6 @@ sb io update camera           # one module
 entry is verbatim, so its key keeps naming `dev01` until you change it
 (`sb io edit <name> --key <new key>`).
 
-Before 0.5.0 the sweep was `sb sub edit <topic>` per subscriber (which
-re-renders without changing the YAML) and `rm` + `add` per publisher.
-
 ### 10.6 List everything across a workspace
 
 There's no built-in `sb io list --all-modules` yet (planned for L6). For
@@ -1055,8 +883,8 @@ yq '.modules | to_entries[] | .key' ~/.swarmbotix/workspaces/demo/sb.flow.yaml |
 
 ### 11.1 Mutation order
 
-Each `add` / `edit` / `rm` runs §9 in **strict order**: YAML write
-**after** the codegen succeeds. So if the template renders but the
+Each `add` / `edit` / `rm` runs its steps (§14.1) in **strict order**:
+YAML write **after** the codegen succeeds. So if the template renders but the
 YAML write fails (disk full, permissions), you end up with a file on
 disk that the YAML doesn't know about. The recovery is to re-run the
 command (idempotent if the file is byte-identical — which the
@@ -1072,7 +900,7 @@ the YAML; the new add proceeds).
 
 ### 11.3 Two structurally-different "no template" errors
 
-`sb pub add --iox2` on a Flutter or Unity module errors with:
+`sb io add pub ... --iox2` on a Flutter or Unity module errors with:
 
 ```
 error: flutter has no iceoryx2 path — Flutter and Unity run on mobile / sandboxed game runtimes where shared memory is unavailable. Use --zenoh.
@@ -1096,7 +924,7 @@ that error is reachable only if a future language is added to
 ### 11.4 Vault drift mid-edit
 
 If you `sb message rm` a type while a publisher references it, then
-re-run `sb pub edit <pub> -t new_topic`, the validation step in
+run `sb io edit <pub> -t new_topic`, the validation step in
 `pub_edit` re-checks the stored type. If it's gone from the vault,
 edit fails:
 
@@ -1105,7 +933,7 @@ error: invalid stored msg_type "ros2/robot_msgs/Gone": message "ros2/robot_msgs/
 ```
 
 Recovery: either restore the type (`sb message new ros2/robot_msgs/Gone`
-and fill in the schema) or `sb pub rm` and re-add with a still-valid
+and fill in the schema) or `sb io rm` and re-add with a still-valid
 type.
 
 ---
@@ -1122,10 +950,7 @@ Stable wordings (substring-asserted by integration tests in
 | MsgType parse | `invalid message name "<m>": <reason from MessageNameError>` |
 | MsgType missing | `message "<m>" not in vault. Run \`sb message list\` to see available types.` |
 | Identifier | `invalid publisher name "<n>": <reason>` / `invalid subscriber name "<n>" (derived from topic): <reason>` |
-| Publisher missing on edit/rm | `publisher "<n>" not found on module "<m>"` |
-| Subscriber missing on edit/rm | `subscriber for topic/key "<x>" not found on module "<m>"` (sb 0.5.0+) |
-| Already exists (default policy) | `sb pub add blocked by N existing entr<y|ies>:\n  - <role> "<n>" on topic "<t>" (<reason>)\n  ...\nRe-run with --force to overwrite, --skip-existing to no-op, or \`cd\` to a TTY and re-run for an interactive prompt.` |
-| `pub edit` with no mutation flag | `at least one of -m/--msg, -t/--topic, or --key is required` (sb 0.5.0+) |
+| Already exists (default policy) | `<add> blocked by N existing entr<y|ies>:\n  - <role> "<n>" on topic "<t>" (<reason>)\n  ...\nRe-run with --force to overwrite, --skip-existing to no-op, or \`cd\` to a TTY and re-run for an interactive prompt.` (§8) |
 | `<topic>` positional containing `/` | `topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello` (sb 0.5.0+) |
 | `sb.module.yaml` load: entry has both `topic` and `key` | `publishers[0]: exactly one of topic: or key: is required (both given)` (sb 0.5.0+) |
 | manifest load: entry has neither | before 0.6.0 only: `publishers[0]: exactly one of topic: or key: is required (neither given)`. `sb 0.6.0+` reads such an entry as `topic: <name>` (§4) |
@@ -1152,7 +977,7 @@ or `subscribers[<i>]`.
 
 ### 13.1 Topic containing `/`
 
-`<topic>` (and `-t` on `sb pub edit`) is a bare name. Any `/` in it,
+`<topic>` (and `-t` on `sb io edit`) is a bare name. Any `/` in it,
 leading or inner, is refused (sb 0.5.0+):
 
 ```
@@ -1167,14 +992,14 @@ is accepted on the command line any more.
 ### 13.2 Editing the topic to one that exists as a subscriber
 
 ```bash
-sb sub add -m ros2/std/StringStamped chat --zenoh    # subscriber on `chat`
-sb pub add -m ros2/std/StringStamped foo --zenoh     # publisher on `foo`
-sb pub edit foo -t chat                         # → collision detected
+sb io add sub chat -m ros2/std/StringStamped --zenoh    # subscriber on `chat`
+sb io add pub foo -m ros2/std/StringStamped --zenoh     # publisher on `foo`
+sb io edit foo -t chat                                  # → collision detected
 ```
 
-`pub edit` rejects with the same collider message `pub add` uses. If
-you want to claim the topic for a publisher, `sb sub rm chat` first,
-or use `sb pub add chat --force` and remove the publisher you no
+`sb io edit` refuses the new topic because the subscriber holds it. If
+you want to claim the topic for a publisher, `sb io rm chat` first, or
+use `sb io add pub chat ... --force` and remove the publisher you no
 longer want.
 
 ### 13.3 IO dir lives under a build-system out-of-tree dir
@@ -1195,20 +1020,21 @@ that dir however it wants.
 Common in CI:
 
 ```yaml
-- run: sb pub add -m ros2/std/StringStamped hello --zenoh
+- run: sb io add pub hello -m ros2/std/StringStamped --zenoh
 ```
 
 If a prior pipeline step (or a previous build of the same step) left
 `hello` registered, this command fails because non-TTY default is
 `Error`. Fix: add `--skip-existing` to the script. The cost is that a
 genuinely-wrong type wouldn't get caught either — pick the trade-off
-your CI tolerates. Some pipelines run `sb pub rm` first as a hard
+your CI tolerates. Some pipelines run `sb io rm hello` first as a hard
 reset.
 
-### 13.5 `sb pub add` doesn't compile messages
+### 13.5 `sb io add` doesn't compile messages
 
-You're free to `sb pub add -m ros2/custom/NotCompiledYet ...` even if
-`custom/NotCompiledYet.proto` is just a `// TODO` skeleton. The
+You're free to `sb io add pub ... -m ros2/custom/NotCompiledYet` even if
+`custom/NotCompiledYet.proto` is just a `// TODO` skeleton (an `--fb`
+entry excepted, §14.3). The
 generated pub/sub file references the type by name (in comments + in
 the example block) but doesn't import it at codegen time. When the
 user fills in the proto and runs `sb message compile`, the generated
@@ -1218,7 +1044,7 @@ into their `main.rs` / `main.py` / etc.
 ### 13.6 `--name` with a bare topic
 
 ```bash
-sb pub add -m ros2/std/StringStamped hello -n other --zenoh
+sb io add pub hello -m ros2/std/StringStamped -n other --zenoh
 ```
 
 Stores `name: other, topic: hello`. The generated filename is
@@ -1229,7 +1055,7 @@ collides with something else but the topic should keep its bare form.
 ### 13.7 `--key` bypasses namespace prefixing (sb 0.5.0+)
 
 ```bash
-sb pub add -m ros2/std/StringStamped --key flat/path/hello --zenoh
+sb io add pub --key flat/path/hello -m ros2/std/StringStamped --zenoh
 ```
 
 `topic_full` is `flat/path/hello` verbatim, **not**
@@ -1247,20 +1073,19 @@ five-segment form, so for a key like this one pass `-t zenoh` or
 `-t iox2` (sb 0.4.1+); without it they exit 1 with
 `cannot infer transport from flat/path/hello: expected <device>/<ws>/<module>/<zenoh|iox2>/<topic>, or pass -t zenoh|iox2`.
 
-### 13.8 `sb sub list` with no module errors with a more useful message
+### 13.8 `sb io list` with no module errors with a more useful message
 
-When in a directory without a module manifest, `sb pub list` and
-`sb sub list` error the same way as `sb pub add` — same module
-resolution chain. To list a specific module from anywhere with an
-active workspace:
+When in a directory without a module manifest, `sb io list` errors the
+same way as `sb io add`: same module resolution chain (§3). To list a
+specific module from anywhere with an active workspace:
 
 ```bash
-sb pub list --module pubber
+sb io list --module pubber
 ```
 
 ### 13.9 Legacy `topic: /...` entries (configs written before 0.5.0)
 
-A module manifest (then `sb.dev.yml`) or `sb.prd.yml` written before 0.5.0 may hold entries
+A module manifest or `sb.prd.yml` written before 0.5.0 may hold entries
 whose `topic` starts with `/`:
 
 ```yaml
@@ -1282,14 +1107,16 @@ rewrites it.
   entry with its old and new spelling, and the command that rewrites
   the file ([sbcli_doctor.md](sbcli_doctor.md) §4.10). The warning
   never fails doctor.
-- Any `sb pub` / `sb sub` command that writes the file (`add`, `edit`,
-  `rm`) rewrites every legacy entry in it as `key:` and says so:
+- Any `sb io add`, `sb io edit`, or `sb io rm` that writes the file
+  rewrites every legacy entry in it as `key:` and says so:
 
   ```
     rewrote 1 legacy topic entry as key: in /path/to/subber/sb.module.yaml
   ```
 
-  (`entries` when the count is not 1.)
+  (`entries` when the count is not 1.) `sb io update` does the same and
+  reports it on its module line (§14.6), so `sb io update <module>`
+  rewrites a module's legacy entries in one step.
 
 A legacy entry with an inner `/` but no leading one (`topic: a/b`) is
 **not** carried over. Before 0.5.0 it was prefixed like a bare name;
@@ -1304,12 +1131,12 @@ workspace, module, and transport), to keep the same wire key.
 
 ## 14. `sb io` (sb 0.5.0+)
 
-`sb io` is the module-interface surface that replaces `sb pub`,
-`sb sub`, `sb list`, and `sb service init`. It edits the same
-`sb.module.yaml` and renders the same files (§2, §6), with three additions:
-one name space for publishers, subscribers, and services (§4.1); the
-`encoding:` choice (§14.3); and `sb io update`, which regenerates a
-module's `swarmbotix_io/` without changing its YAML (§14.6).
+`sb io` is the module-interface surface (sb 0.5.0+, and since 0.7.0
+the only one). It edits `sb.module.yaml` and renders the files of §2
+and §6, with one name space for publishers, subscribers, and services
+(§4.1), the `encoding:` choice (§14.3), and `sb io update`, which
+regenerates a module's `swarmbotix_io/` without changing its YAML
+(§14.6).
 
 ```
 sb io add pub (<topic> | --key <WIRE_KEY>) -m <Type> [--zenoh | --iox2] [--proto | --fb] [-n <name>]
@@ -1326,14 +1153,15 @@ sb io update [<module> | --all] [--services]
 
 Every verb except `update` acts on one module, resolved as in §3
 (`--module <name>`, else the `sb.module.yaml` in the current directory).
-Mutations print the same lines as `sb pub` / `sb sub` (§9.1), for
-example `added service on module api`.
+A mutation prints one line naming the action and the module, such as
+`added service on module api`, then one indented line per file it wrote
+or removed (§14.1, §14.4, §14.5).
 
 ### 14.1 `sb io add pub` / `sb io add sub`
 
 | Argument | Meaning |
 |---|---|
-| `<topic>` | A bare name, stored as `topic:` and prefixed at codegen. May not contain `/` (§9.1, §13.1). |
+| `<topic>` | A bare name, stored as `topic:` and prefixed at codegen. May not contain `/` (§13.1). |
 | `--key <WIRE_KEY>` | A verbatim wire key instead, stored as `key:` (§13.7). The way to subscribe to another module's publisher. Conflicts with `<topic>`. |
 | `-m <Type>` | Vault message, `<style>/<namespace>/<Leaf>` (§5.1). Required unless `--raw`; refused with `--raw`. |
 | `--zenoh` / `--iox2` | Transport. Without a flag, `--fb` and `--raw` entries use Zenoh (the only transport they allow), and a `proto` entry uses the config default (§7: `transport_on_device`, iceoryx2 unless set). |
@@ -1348,6 +1176,20 @@ subscribers, and services and find topic collisions (§5.2); render
 `<io_dir>/publishers/<name>.<ext>` or `subscribers/<name>.<ext>` (§6);
 write `sb.module.yaml`, rewriting any legacy `topic: /...` entries as
 `key:` (§13.9).
+
+Output, here on the `--force` path with one entry replaced (the
+`overwrote` lines appear only then):
+
+```
+  overwrote pub hello
+added publisher on module pubber
+  wrote /path/to/pubber/swarmbotix_io/publishers/hello.rs
+  updated /path/to/pubber/sb.module.yaml
+```
+
+A subscriber reads `added subscriber`. With `--skip-existing` and a
+collision, the only line is `publisher skipped on module pubber (already exists)`
+(`subscriber` for `add sub`).
 
 ```bash
 sb io add pub pose -m ros2/std/StringStamped --zenoh               # proto, the default
@@ -1401,7 +1243,7 @@ How `sb topic listen` and `sb topic list` read each tag:
 ### 14.4 `sb io edit <name>`
 
 Changes the publisher or subscriber called `<name>` in place, or, with
-no flag at all, only regenerates its file (what `sb sub edit` did).
+no flag at all, only regenerates its file.
 A service has no editable fields
 (``services have no editable fields; edit the file in <io_dir>/services``);
 an unknown name answers
@@ -1411,7 +1253,7 @@ The flags:
 | Flag | Change |
 |---|---|
 | `-m <Type>` | New message type. |
-| `-t <topic>` | New bare topic (`topic:`); no `/` (§9.1). |
+| `-t <topic>` | New bare topic (`topic:`); no `/` (§13.1). |
 | `--key <WIRE_KEY>` | New verbatim key (`key:`). Conflicts with `-t`. |
 | `--proto` / `--fb` / `--raw [<mime>]` | New encoding. Switching to `--raw` drops the stored `type`; switching away from raw drops the stored `mime` and needs `-m`. |
 
@@ -1420,15 +1262,60 @@ The new topic or key is checked against the module's other entries
 name does not change) and `sb.module.yaml` is written. The transport cannot
 be edited (§6.7): `sb io rm` then `sb io add`.
 
+Output:
+
+```
+$ sb io edit hello -m ros2/std/Header
+edited publisher on module pubber
+  wrote /path/to/pubber/swarmbotix_io/publishers/hello.rs
+  updated /path/to/pubber/sb.module.yaml
+
+$ sb io edit image_raw --key dev01/demo/cam2/iox2/image_raw
+regenerated subscriber on module subber
+  wrote /path/to/subber/swarmbotix_io/subscribers/image_raw.py
+  updated /path/to/subber/sb.module.yaml
+
+$ sb io edit image_raw
+regenerated on module subber
+  wrote /path/to/subber/swarmbotix_io/subscribers/image_raw.py
+```
+
+The flagless form leaves `sb.module.yaml` alone unless it still holds
+legacy `topic: /...` entries (§13.9). Use it after a vault or template
+change, or after changing `device:`, to refresh one file.
+
 ### 14.5 `sb io rm <name>` and `sb io list`
 
 `sb io rm <name>` removes the publisher, subscriber, or service called
 `<name>` from `sb.module.yaml` and deletes its generated file. Deleting a
 service file discards any routes written in it.
 
-`sb io list` (alias `sb io ls`) prints the `sb list` table (§9.7) for
-every publisher, subscriber, and service on the module. It never
-writes.
+```
+removed publisher on module pubber
+  removed /path/to/pubber/swarmbotix_io/publishers/hello.rs
+  updated /path/to/pubber/sb.module.yaml
+```
+
+If the generated file was already absent, the `removed` line is
+omitted but the YAML write still happens. Removing a publisher does not
+remove a subscriber on the same topic; they are independent entries.
+
+`sb io list` (alias `sb io ls`) prints one table row for every
+publisher, subscriber, and service on the module. It never writes.
+
+```
+role     name       type                    topic                          transport  encoding
+----------------------------------------------------------------------------------------------
+pub      hello      ros2/std/StringStamped  hello                          zenoh      proto
+sub      image_raw  ros2/std/ImageStamped   dev01/demo/cam/iox2/image_raw  iceoryx2   proto
+service  calib                                                             zenoh
+```
+
+Columns: role, name, type, topic, transport, encoding. The topic column
+shows the entry's `topic`, or its `key` as stored, never with a leading
+`/` (sb 0.5.0+); a raw entry has an empty type, and a service row
+leaves type, topic, and encoding empty. Widths auto-fit per invocation.
+A module with no entries renders `(no publishers or subscribers)`.
 
 ### 14.6 `sb io update [<module> | --all] [--services]`
 

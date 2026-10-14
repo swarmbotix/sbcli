@@ -131,8 +131,8 @@ Using a style — you name it in the message, every time:
 
 ```bash
 sb message list                                      # every style
-sb pub add -m ros2/std/StringStamped chatter --zenoh
-sb pub add -m swarmbotix/images/Image480pMono8 cam --iox2
+sb io add pub chatter -m ros2/std/StringStamped --zenoh
+sb io add pub cam -m swarmbotix/images/Image480pMono8 --iox2
 sb message compile --style ros2                      # a FILTER, not a mode
 sb doctor                                            # what's on disk
 ```
@@ -618,7 +618,7 @@ transport_on_device: zenoh
 EOF
 
 sb ws create demo    # uses /tmp/sb_home as the root
-sb pub add ...       # uses zenoh as the default transport
+sb io add pub ...    # uses zenoh as the default transport
 ```
 
 The env override is the highest layer in the merge chain (§3). It's
@@ -667,9 +667,9 @@ sb config set device dev01
 sb config set device nav_robot_5
 ```
 
-`sb pub add` then prefixes `/nav_robot_5/<ws>/<module>/<topic>` for
-publishers and the cross-device subscribers can address that
-namespace directly.
+`sb io add pub` then builds `nav_robot_5/<ws>/<module>/<transport>/<topic>`
+for owned topics, and cross-device subscribers can address that
+namespace directly with `--key`.
 
 ### 6.3 Move the swarmbotix tree
 
@@ -695,7 +695,7 @@ EOF
 
 SB_CONFIG=$SB_CONFIG sb ws create demo
 SB_CONFIG=$SB_CONFIG sb ws set demo
-SB_CONFIG=$SB_CONFIG sb pub add -m ros2/std/StringStamped hello   # uses zenoh as the default
+SB_CONFIG=$SB_CONFIG sb io add pub hello -m ros2/std/StringStamped   # uses zenoh as the default
 
 rm -rf "$SB_HOME_DIR"
 ```
@@ -709,7 +709,7 @@ user's real `~/.swarmbotix/` is untouched throughout.
 # (future, once `sb config --workspace` lands)
 sb ws set nav
 sb config set --workspace transport_on_device zenoh
-# now `sb pub add` from within the `nav` workspace defaults to zenoh
+# now `sb io add pub` from within the `nav` workspace defaults to zenoh
 sb ws set perception
 # perception still uses iceoryx2 (the global default)
 ```
@@ -744,15 +744,12 @@ or "where does this filename come from?".
 | `sb io add` / `edit` / `rm` / `list` (sb 0.5.0+) | `sb_home_dir`, `messages_root` (vault lookup; the `--fb` check looks for the type's compiled FlatBuffers output), `device`, `iox2_variants` (variant type names), and `transport_on_device` (the transport of a `proto` entry added without `--zenoh` / `--iox2`) |
 | `sb io update` (sb 0.5.0+) | `sb_home_dir` (the active workspace, required: its name is the `<workspace>` key segment, and for `--all` its installed `sb.flow.yaml` lists the modules to regenerate); `messages_root` (vault lookup, and the `message_targets` paths iceoryx2 files bake in); `device`; `iox2_variants` |
 | `sb init` | `sb_home_dir` (workspace lookup) |
-| `sb pub/sub add/edit/rm` | `sb_home_dir`, `messages_root` (vault lookup), `device`, `transport_on_device`, `transport_cross_device` |
-| `sb list` / `sb pub list` / `sb sub list` | `sb_home_dir`, `device` (only used by topic-prefix derivation in subcommands that re-emit files) |
-| `sb service init` | `sb_home_dir`, `messages_root`, `device` — the router's namespace is `<device>/<workspace>/<module>/zenoh/service/**`, resolved through the same chain as `sb pub/sub` |
 | `sb topic list` | Nothing for discovery itself. sb 0.4.1+: when a Zenoh row carries neither a Header type nor an encoding schema, `sb_home_dir`, to read the active workspace's `sb.flow.yaml` and the `sb.module.yaml` of the module the row's key names, for that row's type. Any miss (no active workspace, a module not registered in it, no matching entry) leaves the type blank |
 | `sb topic pub` | `sb_home_dir`, `device`: needed only to expand a **bare** topic against cwd's module + the active workspace. A fully-qualified topic (any argument containing `/`; a leading `/` is accepted and dropped, sb 0.5.0+) short-circuits before the config is even loaded |
 | `sb topic listen` | `sb_home_dir`, `device` for a bare topic, as above. sb 0.4.1+: for a fully-qualified topic, `sb_home_dir` too, to read the active workspace's `sb.flow.yaml` and the `sb.module.yaml` of the module the path names, for the `"config"` type source ([sbcli_messages.md](sbcli_messages.md) §1.1); a bare topic takes that type from cwd's `sb.module.yaml`. Always `messages_root` (or a `messages/` tree found from cwd) and `protoc`: every vault style is compiled so payloads decode. When the transport is iceoryx2 (sb 0.4.0+), whether from `-t` or inferred from the topic, also the iox2 flatten settings `string_array_cap`, `string_array_caps`, `bytes_caps`, `vec_caps`, `iox2_variants`, to rebuild the structs it decodes against |
 | `sb topic prune` | nothing from `sb.config.yml` — it walks iceoryx2's own global node registry |
 | `sb up` / `run` / `stop` / `down` / `attach` | `sb_home_dir` (to find the active workspace's `sb.flow.yaml`) and `tmux` (falls back to `tmux` on `PATH` when unset). Module paths come from `sb.flow.yaml`, never from config |
-| `sb gopro` | `sb_home_dir`, `messages_root`, `device` (module resolution, same chain as `sb pub/sub`) |
+| `sb gopro` | `sb_home_dir`, `messages_root`, `device` (module resolution, same chain as `sb io`) |
 | `sb config open` / `set` | only the path resolver (writes to global) |
 | `sb config show` / `get` | every field — full merge over env / workspace / global / built-in |
 

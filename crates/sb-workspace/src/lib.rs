@@ -14,16 +14,17 @@
 //!
 //! 3. **Module init** (`sb init`): adopt an existing user project as a
 //!    swarmbotix module by writing `sb.module.yaml` and an empty
-//!    `swarmbotix_io/` (plus a `runscript.bash` stub only when asked),
-//!    then registering the module: in the enclosing repo's flow when there
-//!    is one (followed by an install), otherwise in the active workspace's
-//!    installed copy.
+//!    `swarmbotix_io/`, then registering the module: in the enclosing
+//!    repo's flow when there is one (followed by an install), otherwise in
+//!    the active workspace's installed copy.
 //!
-//! File names: every lookup probes the 0.6 name first and the deprecated
-//! 0.5 name second ([`find_module_file`], [`find_flow_file`]); every file
-//! this crate creates gets the 0.6 name ([`new_module_file`],
-//! [`new_flow_file`]). A legacy file that is found is used as is, never
-//! renamed, and reported as a [`Deprecation`].
+//! File names: every lookup probes `sb.module.yaml` / `sb.flow.yaml` only
+//! ([`find_module_file`], [`find_flow_file`]), and every file this crate
+//! creates gets that name ([`new_module_file`], [`new_flow_file`]). The
+//! 0.5 names `sb.dev.yml` and `flow.yaml` are not read since 0.7.0; a
+//! caller that needs a file and finds only the old one refuses with a
+//! rename hint ([`refuse_removed_module_file`],
+//! [`refuse_removed_flow_file`]).
 //!
 //! Filesystem layout owned by this crate:
 //!
@@ -32,7 +33,7 @@
 //!   active                         ← one-line file: active workspace name
 //!   workspaces/
 //!     <name>/
-//!       sb.flow.yaml               ← WorkspaceFlow (flow.yaml before 0.6)
+//!       sb.flow.yaml               ← WorkspaceFlow
 //! ```
 //!
 //! All paths are derived from a [`SbHome`] value so tests can pin `$HOME`
@@ -48,39 +49,51 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use sb_core::{
     Deprecation, FlowSource, Language, MessageSource, ModuleDevConfig, ModuleInstance, ModuleRef,
-    SbCliConfig, WorkspaceFlow, flow_file_candidates, is_legacy_flow_file, is_legacy_module_file,
-    module_file_candidates, validate_identifier,
+    REMOVED_FLOW_FILE, REMOVED_MODULE_FILE, SbCliConfig, WorkspaceFlow, current_manifest_path,
+    probe_legacy_flow_keys, removed_flow_file_message, removed_module_file_message,
+    validate_identifier,
 };
 
-pub use sb_core::{FLOW_FILE, LEGACY_FLOW_FILE, LEGACY_MODULE_FILE, MODULE_FILE};
-
-pub mod runscript;
+pub use sb_core::{FLOW_FILE, MODULE_FILE};
 
 // ─────────────────────────────────────────────────────────────────────
-// File names — probe new first, write new always
+// File names — one name each, read and written
 // ─────────────────────────────────────────────────────────────────────
 
-/// Where the migration notes live; every deprecation hint points here.
-const MIGRATING: &str = "see sbcli_module.md §Migrating";
-
-/// The first of `candidates` that is a file in `dir`.
-fn find_first(dir: &Path, candidates: [&str; 2]) -> Option<PathBuf> {
-    candidates
-        .into_iter()
-        .map(|name| dir.join(name))
-        .find(|p| p.is_file())
-}
-
-/// The module manifest in `dir`: `sb.module.yaml`, else the legacy
-/// `sb.dev.yml`, else `None`.
+/// The module manifest in `dir`: `sb.module.yaml` when it is a file, else
+/// `None`. A caller that needs the manifest runs
+/// [`refuse_removed_module_file`] on a miss.
 pub fn find_module_file(dir: &Path) -> Option<PathBuf> {
-    find_first(dir, module_file_candidates())
+    let path = new_module_file(dir);
+    path.is_file().then_some(path)
 }
 
-/// The workspace flow in `dir`: `sb.flow.yaml`, else the legacy
-/// `flow.yaml`, else `None`.
+/// The workspace flow in `dir`: `sb.flow.yaml` when it is a file, else
+/// `None`. A caller that needs the flow runs [`refuse_removed_flow_file`]
+/// on a miss.
 pub fn find_flow_file(dir: &Path) -> Option<PathBuf> {
-    find_first(dir, flow_file_candidates())
+    let path = new_flow_file(dir);
+    path.is_file().then_some(path)
+}
+
+/// `Err` with the 0.7.0 rename hint when `dir` holds a 0.5 `sb.dev.yml`
+/// and no `sb.module.yaml`; `Ok` otherwise, including when it holds
+/// neither.
+pub fn refuse_removed_module_file(dir: &Path) -> Result<()> {
+    if !new_module_file(dir).is_file() && dir.join(REMOVED_MODULE_FILE).is_file() {
+        bail!("{}", removed_module_file_message(dir));
+    }
+    Ok(())
+}
+
+/// `Err` with the 0.7.0 rename hint when `dir` holds a 0.5 `flow.yaml`
+/// and no `sb.flow.yaml`; `Ok` otherwise, including when it holds
+/// neither.
+pub fn refuse_removed_flow_file(dir: &Path) -> Result<()> {
+    if !new_flow_file(dir).is_file() && dir.join(REMOVED_FLOW_FILE).is_file() {
+        bail!("{}", removed_flow_file_message(dir));
+    }
+    Ok(())
 }
 
 /// Where a new module manifest in `dir` goes: always `sb.module.yaml`.
@@ -91,12 +104,6 @@ pub fn new_module_file(dir: &Path) -> PathBuf {
 /// Where a new workspace flow in `dir` goes: always `sb.flow.yaml`.
 pub fn new_flow_file(dir: &Path) -> PathBuf {
     dir.join(FLOW_FILE)
-}
-
-/// The manifest of the module directory `dir`: the existing one, else the
-/// path a new one would take.
-fn module_file_in(dir: &Path) -> PathBuf {
-    find_module_file(dir).unwrap_or_else(|| new_module_file(dir))
 }
 
 /// Append `d` unless an entry with the same item is already there; the
@@ -146,13 +153,10 @@ impl SbHome {
         self.workspaces_dir().join(name)
     }
 
-    /// The installed flow of workspace `ws`: `sb.flow.yaml`, or the
-    /// `flow.yaml` a 0.5 install wrote when only that one exists. A
-    /// workspace with neither gets the new name. [`write_flow`] always
-    /// writes the new name and drops the legacy copy.
+    /// The installed flow of workspace `ws`:
+    /// `<sb_home>/workspaces/<ws>/sb.flow.yaml`, whether or not it exists.
     pub fn flow_path(&self, ws: &str) -> PathBuf {
-        let dir = self.workspace_dir(ws);
-        find_flow_file(&dir).unwrap_or_else(|| new_flow_file(&dir))
+        new_flow_file(&self.workspace_dir(ws))
     }
 
     /// The pre-0.6 name of [`Self::flow_path`], kept for its callers.
@@ -283,12 +287,14 @@ pub struct DeleteOutcome {
 // Installed flow R/W
 // ─────────────────────────────────────────────────────────────────────
 
-/// Read the installed flow of workspace `ws` (`sb.flow.yaml`, or the
-/// `flow.yaml` a 0.5 install left). Returns an empty `WorkspaceFlow` if
-/// there is no file or it is empty.
+/// Read the installed flow of workspace `ws` (`sb.flow.yaml`). Returns an
+/// empty `WorkspaceFlow` if there is no file or it is empty; refuses a
+/// workspace directory that holds only the `flow.yaml` a 0.5 install
+/// left.
 pub fn read_flow(home: &SbHome, ws: &str) -> Result<WorkspaceFlow> {
     let path = home.flow_path(ws);
     if !path.exists() {
+        refuse_removed_flow_file(&home.workspace_dir(ws))?;
         return Ok(WorkspaceFlow::default());
     }
     read_flow_file(&path)
@@ -301,9 +307,15 @@ fn read_flow_file(path: &Path) -> Result<WorkspaceFlow> {
     parse_flow_text(&s, path)
 }
 
+/// Parse and validate flow text. Keys sb no longer reads are refused with
+/// their migration hint ([`probe_legacy_flow_keys`]) before the strict
+/// parse, which would only call them unknown.
 fn parse_flow_text(text: &str, path: &Path) -> Result<WorkspaceFlow> {
     if text.trim().is_empty() {
         return Ok(WorkspaceFlow::default());
+    }
+    if let Some(e) = probe_legacy_flow_keys(text) {
+        return Err(e).with_context(|| format!("validating {}", path.display()));
     }
     let flow: WorkspaceFlow =
         serde_yaml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
@@ -313,19 +325,13 @@ fn parse_flow_text(text: &str, path: &Path) -> Result<WorkspaceFlow> {
 }
 
 /// Write the installed flow of workspace `ws` as `sb.flow.yaml`, creating
-/// the workspace dir if missing. A `flow.yaml` a 0.5 install left beside
-/// it is removed: the installed copy is derived data, and two copies
-/// would disagree after the next install.
+/// the workspace dir if missing.
 pub fn write_flow(home: &SbHome, ws: &str, flow: &WorkspaceFlow) -> Result<()> {
     let dir = home.workspace_dir(ws);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = new_flow_file(&dir);
     let body = serde_yaml::to_string(flow).context("serializing the workspace flow")?;
     fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    let legacy = dir.join(LEGACY_FLOW_FILE);
-    if legacy.is_file() {
-        fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;
-    }
     Ok(())
 }
 
@@ -334,13 +340,14 @@ pub fn write_flow(home: &SbHome, ws: &str, flow: &WorkspaceFlow) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────
 
 /// The nearest workspace flow at or above `start`: `start` first, then
-/// each parent in turn. Each directory is probed for `sb.flow.yaml`, then
-/// the legacy `flow.yaml`.
+/// each parent in turn. Each directory is probed for `sb.flow.yaml`; one
+/// that holds only a 0.5 `flow.yaml` ends the walk with the 0.7.0 rename
+/// hint ([`refuse_removed_flow_file`]).
 ///
 /// The walk stops at the filesystem root, and never examines `$HOME`
 /// itself (unless `start` is `$HOME`): a stray `~/sb.flow.yaml` would
 /// otherwise capture every project under the home directory.
-pub fn find_flow_upwards(start: &Path) -> Option<PathBuf> {
+pub fn find_flow_upwards(start: &Path) -> Result<Option<PathBuf>> {
     let start = absolutize(start);
     let home = dirs::home_dir().map(|h| h.canonicalize().unwrap_or(h));
     find_flow_upwards_until(&start, home.as_deref())
@@ -348,15 +355,18 @@ pub fn find_flow_upwards(start: &Path) -> Option<PathBuf> {
 
 /// [`find_flow_upwards`] with an explicit ceiling directory, which is
 /// never examined unless the walk starts there.
-fn find_flow_upwards_until(start: &Path, ceiling: Option<&Path>) -> Option<PathBuf> {
+fn find_flow_upwards_until(start: &Path, ceiling: Option<&Path>) -> Result<Option<PathBuf>> {
     let mut dir = start;
     loop {
         if let Some(found) = find_flow_file(dir) {
-            return Some(found);
+            return Ok(Some(found));
         }
-        let parent = dir.parent()?;
+        refuse_removed_flow_file(dir)?;
+        let Some(parent) = dir.parent() else {
+            return Ok(None);
+        };
         if Some(parent) == ceiling {
-            return None;
+            return Ok(None);
         }
         dir = parent;
     }
@@ -374,8 +384,8 @@ pub struct InstallReport {
     pub modules: Vec<InstalledModule>,
     /// The repo flow's `messages:` with every `path` made absolute.
     pub messages: Vec<MessageSource>,
-    /// Deprecated forms the repo uses: the legacy flow name, legacy
-    /// manifest names, a top-level `instances:` map. One entry per item.
+    /// Deprecated forms the repo uses, one entry per item. Empty since
+    /// 0.7.0 removed every 0.6.0 deprecation; kept for the next one.
     pub deprecations: Vec<Deprecation>,
 }
 
@@ -383,8 +393,7 @@ pub struct InstallReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledModule {
     pub name: String,
-    /// Absolute path of the module's manifest (`sb.module.yaml`, or a
-    /// legacy `sb.dev.yml` when that is what the module has).
+    /// Absolute path of the module's manifest (`sb.module.yaml`).
     pub dev_yml: PathBuf,
     /// False when `sb up` skips the module.
     pub up: bool,
@@ -393,26 +402,30 @@ pub struct InstalledModule {
     pub exists: bool,
 }
 
-/// Install the repo-root flow at `repo_flow` (`sb.flow.yaml`, or a legacy
-/// `flow.yaml`) as a workspace.
+/// Install the repo-root flow at `repo_flow` (`sb.flow.yaml`) as a
+/// workspace.
 ///
 /// - The name is the flow's `name:`, else the name of its directory.
 /// - Every module and message path is resolved against the flow's
 ///   directory. A module path may name the module directory (its
-///   manifest is probed: `sb.module.yaml`, then `sb.dev.yml`) or the yaml
-///   itself.
+///   `sb.module.yaml`) or the yaml itself.
 /// - The installed copy at `<sb_home>/workspaces/<name>/sb.flow.yaml` gets
 ///   absolute paths and `source: { repo_flow, url, installed_at }`. Inline
-///   `instances`, `wires`, and a legacy top-level `instances:` map are
-///   carried over unchanged. The workspace directory is created when
-///   missing; re-installing is idempotent. The workspace becomes the
-///   active one.
+///   `instances` and `wires` are carried over unchanged. The workspace
+///   directory is created when missing; re-installing is idempotent. The
+///   workspace becomes the active one.
 /// - The repo copy is never written.
 ///
-/// Refuses to replace a workspace of the same name that was installed
-/// from a different repo flow which still exists; one of the two repos
-/// needs a distinct `name:`.
+/// Refuses, with the 0.7.0 rename hint, a repo directory that holds only
+/// a 0.5 `flow.yaml`, a module directory that holds only a 0.5
+/// `sb.dev.yml`, and a flow with a top-level `instances:` map. Refuses to
+/// replace a workspace of the same name that was installed from a
+/// different repo flow which still exists; one of the two repos needs a
+/// distinct `name:`.
 pub fn install_flow(home: &SbHome, repo_flow: &Path, url: Option<&str>) -> Result<InstallReport> {
+    if let Some(dir) = repo_flow.parent() {
+        refuse_removed_flow_file(dir)?;
+    }
     let repo_flow = repo_flow
         .canonicalize()
         .with_context(|| format!("resolving {}", repo_flow.display()))?;
@@ -425,6 +438,7 @@ pub fn install_flow(home: &SbHome, repo_flow: &Path, url: Option<&str>) -> Resul
         .ok_or_else(|| anyhow!("{} has no parent directory", repo_flow.display()))?;
     let repo = read_flow_file(&repo_flow)?;
     let name = workspace_name_for(&repo, &repo_flow)?;
+    refuse_removed_module_files(&repo, repo_dir)?;
 
     let created = !home.workspace_dir(&name).exists();
     if !created {
@@ -472,15 +486,11 @@ pub fn install_flow(home: &SbHome, repo_flow: &Path, url: Option<&str>) -> Resul
             ..src.clone()
         })
         .collect();
-    let deprecations = install_deprecations(&repo, &repo_flow, &modules);
 
     let installed = WorkspaceFlow {
         name: Some(name.clone()),
         modules: installed_modules,
         messages: messages.clone(),
-        // Copied as is, never folded into the module entries: the repo
-        // owns that migration, and the installed copy mirrors the repo.
-        instances: repo.instances,
         wires: repo.wires,
         source: Some(FlowSource {
             repo_flow: repo_flow.clone(),
@@ -497,53 +507,20 @@ pub fn install_flow(home: &SbHome, repo_flow: &Path, url: Option<&str>) -> Resul
         created,
         modules,
         messages,
-        deprecations,
+        deprecations: Vec::new(),
     })
 }
 
-/// The deprecated forms a repo flow at `repo_flow` and its `modules` use,
-/// one [`Deprecation`] per item: the legacy flow name, legacy manifest
-/// names (all modules in one hint), a top-level `instances:` map.
-fn install_deprecations(
-    repo: &WorkspaceFlow,
-    repo_flow: &Path,
-    modules: &[InstalledModule],
-) -> Vec<Deprecation> {
-    let mut out = Vec::new();
-    if is_legacy_flow_file(repo_flow) {
-        out.push(Deprecation {
-            item: LEGACY_FLOW_FILE.to_owned(),
-            hint: format!(
-                "rename {} to {FLOW_FILE}; {MIGRATING}",
-                repo_flow.display()
-            ),
-        });
+/// [`refuse_removed_module_file`] for the directory of every module the
+/// repo flow `repo` (in `repo_dir`) registers.
+fn refuse_removed_module_files(repo: &WorkspaceFlow, repo_dir: &Path) -> Result<()> {
+    for entry in repo.modules.values() {
+        let manifest = resolve_module_yaml(repo_dir, &entry.path);
+        if let Some(dir) = manifest.parent() {
+            refuse_removed_module_file(dir)?;
+        }
     }
-    let legacy: Vec<&str> = modules
-        .iter()
-        .filter(|m| m.exists && is_legacy_module_file(&m.dev_yml))
-        .map(|m| m.name.as_str())
-        .collect();
-    if !legacy.is_empty() {
-        out.push(Deprecation {
-            item: LEGACY_MODULE_FILE.to_owned(),
-            hint: format!(
-                "rename it to {MODULE_FILE} in module(s) {}; {MIGRATING}",
-                legacy.join(", ")
-            ),
-        });
-    }
-    if repo.has_legacy_instances() {
-        out.push(Deprecation {
-            item: "top-level `instances:`".to_owned(),
-            hint: format!(
-                "move each list under its module entry (`modules.<name>.instances`) in {}; \
-                 {MIGRATING}",
-                repo_flow.display()
-            ),
-        });
-    }
-    out
+    Ok(())
 }
 
 /// The workspace name a repo flow installs under, validated.
@@ -614,9 +591,9 @@ fn resolve_path(base: &Path, p: &Path) -> PathBuf {
 /// the yaml file; a path that does not exist is taken as a directory
 /// unless it ends in `.yml` / `.yaml`.
 ///
-/// A directory is probed for `sb.module.yaml`, then `sb.dev.yml`, and gets
-/// the new name when it has neither. A yaml path is used as is, which
-/// keeps the absolute `.../sb.dev.yml` paths 0.5 installs recorded working.
+/// A directory stands for its `sb.module.yaml`. A yaml path is used as
+/// is, except that a 0.5 `.../sb.dev.yml` stands for the `sb.module.yaml`
+/// beside it ([`current_manifest_path`]); the old file is never read.
 fn resolve_module_yaml(base: &Path, p: &Path) -> PathBuf {
     let resolved = resolve_path(base, p);
     let names_yaml = if resolved.exists() {
@@ -628,9 +605,9 @@ fn resolve_module_yaml(base: &Path, p: &Path) -> PathBuf {
             .is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"))
     };
     if names_yaml {
-        resolved
+        current_manifest_path(&resolved)
     } else {
-        module_file_in(&resolved)
+        new_module_file(&resolved)
     }
 }
 
@@ -752,7 +729,9 @@ pub fn update_from_source(home: &SbHome, name: &str) -> Result<InstallReport> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    install_flow(home, &src.repo_flow, Some(url))
+    // The flow sits at the repo root under its one name; a copy installed
+    // before 0.7.0 may have recorded a `flow.yaml` there.
+    install_flow(home, &new_flow_file(repo_root), Some(url))
 }
 
 /// What [`uninstall_workspace`] did.
@@ -857,9 +836,7 @@ pub struct InitOptions<'a> {
     /// module manifest yet.
     pub language: Option<Language>,
     /// `--force` — write a fresh `sb.module.yaml` over the existing
-    /// manifest (its publishers, subscribers and services are dropped)
-    /// and, with `runscript`, overwrite `runscript.bash`. A legacy
-    /// `sb.dev.yml` is never rewritten; the new file shadows it.
+    /// manifest (its publishers, subscribers and services are dropped).
     pub force: bool,
     /// `--docker` — before anything is written, check that the module has
     /// at least one instance in the registering flow and that each one
@@ -868,9 +845,6 @@ pub struct InitOptions<'a> {
     /// active workspace's installed copy. Nothing docker-specific is
     /// written; `sb up` launches the instances.
     pub docker: bool,
-    /// `--runscript` — also write the `runscript.bash` stub (the
-    /// deprecated launch path) when it is missing, or with `force`.
-    pub runscript: bool,
 }
 
 /// What [`init_module`] actually changed on disk. Lets the CLI render
@@ -890,10 +864,6 @@ pub struct InitOutcome {
     pub manifest_path: PathBuf,
     /// `manifest_path` was written by this call.
     pub manifest_written: bool,
-    /// An existing legacy `sb.dev.yml` was adopted as the manifest; nothing
-    /// was written to it.
-    pub legacy_manifest: bool,
-    pub runscript_written: bool,
     pub io_dir_created: bool,
     /// The module was added to (or repointed in) the flow that registers
     /// it: `repo_flow` when set, else the active workspace's installed copy.
@@ -905,8 +875,9 @@ pub struct InitOutcome {
     /// sits under one. `None` means the module went straight into the
     /// active workspace's installed copy.
     pub repo_flow: Option<PathBuf>,
-    /// Deprecated forms met on the way: an adopted `sb.dev.yml`, and in
-    /// repo mode whatever [`install_flow`] reported. One entry per item.
+    /// Deprecated forms met on the way (in repo mode, whatever
+    /// [`install_flow`] reported). One entry per item. Empty since 0.7.0
+    /// removed every 0.6.0 deprecation; kept for the next one.
     pub deprecations: Vec<Deprecation>,
 }
 
@@ -919,14 +890,13 @@ enum Registry {
 }
 
 /// Adopt `opts.root` as a swarmbotix module. Drops only the missing
-/// artifacts (`sb.module.yaml`, `swarmbotix_io/`, and `runscript.bash`
-/// when `opts.runscript`) unless `--force`, then registers the module.
-/// Idempotent.
+/// artifacts (`sb.module.yaml`, `swarmbotix_io/`) unless `--force`, then
+/// registers the module. Idempotent.
 ///
-/// An existing manifest is adopted as is: `sb.module.yaml`, else a legacy
-/// `sb.dev.yml`, which is read but never written and reported as a
-/// [`Deprecation`]. `--docker` checks the module's instances before any
-/// file is written.
+/// An existing `sb.module.yaml` is adopted as is. A root that holds only a
+/// 0.5 `sb.dev.yml` is refused with the 0.7.0 rename hint, before anything
+/// is written. `--docker` checks the module's instances before any file is
+/// written.
 ///
 /// Registration: when [`find_flow_upwards`] finds a repo flow above the
 /// module root, the module is added there with a path relative to that
@@ -957,13 +927,18 @@ pub fn init_module(home: &SbHome, opts: &InitOptions<'_>) -> Result<InitOutcome>
 
     // 2. Registry: the enclosing repo flow, else the active workspace.
     //    A repo flow that cannot be installed (unparseable, bad name, name
-    //    held by another repo) fails here, before anything is written.
-    let registry = match find_flow_upwards(&root_abs).filter(|f| !is_installed_copy(home, f)) {
+    //    held by another repo, a module still on a 0.5 `sb.dev.yml`)
+    //    fails here, before anything is written.
+    let registry = match find_flow_upwards(&root_abs)?.filter(|f| !is_installed_copy(home, f)) {
         Some(flow) => {
             let flow = flow.canonicalize().unwrap_or(flow);
-            let name = workspace_name_for(&read_flow_file(&flow)?, &flow)?;
+            let repo = read_flow_file(&flow)?;
+            let name = workspace_name_for(&repo, &flow)?;
             if home.workspace_dir(&name).exists() {
                 refuse_foreign_install(home, &name, &flow)?;
+            }
+            if let Some(repo_dir) = flow.parent() {
+                refuse_removed_module_files(&repo, repo_dir)?;
             }
             Registry::Repo(flow)
         }
@@ -986,13 +961,16 @@ pub fn init_module(home: &SbHome, opts: &InitOptions<'_>) -> Result<InitOutcome>
     validate_identifier(&module)
         .map_err(|e| anyhow!("invalid module name {module:?} (from rootpath basename): {e}"))?;
 
-    // 4. The existing manifest (`sb.module.yaml`, else a legacy
-    //    `sb.dev.yml`; an empty file counts as none), then the language:
-    //    flag vs file on disk.
-    let existing: Option<(PathBuf, ModuleDevConfig)> = match find_module_file(&root_abs) {
-        Some(path) => read_manifest(&path)?.map(|dev| (path, dev)),
-        None => None,
-    };
+    // 4. The existing `sb.module.yaml` (an empty file counts as none; a
+    //    lone 0.5 `sb.dev.yml` is refused), then the language: flag vs
+    //    file on disk.
+    let existing: Option<(PathBuf, ModuleDevConfig)> =
+        if let Some(path) = find_module_file(&root_abs) {
+            read_manifest(&path)?.map(|dev| (path, dev))
+        } else {
+            refuse_removed_module_file(&root_abs)?;
+            None
+        };
 
     let language = match (&existing, opts.language) {
         (Some((path, d)), Some(flag)) if d.language != flag => {
@@ -1045,17 +1023,9 @@ pub fn init_module(home: &SbHome, opts: &InitOptions<'_>) -> Result<InitOutcome>
 
     // 6. The manifest: adopt the existing one, or write `sb.module.yaml`
     //    when there is none or under --force. No `root:`: the file's own
-    //    directory is the module root, which keeps it portable. A legacy
-    //    `sb.dev.yml` is never rewritten.
+    //    directory is the module root, which keeps it portable.
     match existing {
         Some((path, _)) if !opts.force => {
-            outcome.legacy_manifest = is_legacy_module_file(&path);
-            if outcome.legacy_manifest {
-                outcome.deprecations.push(Deprecation {
-                    item: LEGACY_MODULE_FILE.to_owned(),
-                    hint: format!("rename {} to {MODULE_FILE}; {MIGRATING}", path.display()),
-                });
-            }
             outcome.manifest_path = path;
         }
         _ => {
@@ -1064,37 +1034,18 @@ pub fn init_module(home: &SbHome, opts: &InitOptions<'_>) -> Result<InitOutcome>
             let body = serde_yaml::to_string(&cfg).context("serializing the module manifest")?;
             fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
             outcome.manifest_written = true;
-            let legacy = root_abs.join(LEGACY_MODULE_FILE);
-            if legacy.is_file() {
-                outcome.deprecations.push(Deprecation {
-                    item: LEGACY_MODULE_FILE.to_owned(),
-                    hint: format!(
-                        "{} is ignored now that {MODULE_FILE} sits beside it; delete it",
-                        legacy.display()
-                    ),
-                });
-            }
             outcome.manifest_path = path;
         }
     }
 
-    // 7. runscript.bash, only with --runscript: when missing, or --force.
-    let runscript_path = root_abs.join("runscript.bash");
-    if opts.runscript && (!runscript_path.exists() || opts.force) {
-        fs::write(&runscript_path, runscript::render(&runscript_path, &module))
-            .with_context(|| format!("writing {}", runscript_path.display()))?;
-        set_executable(&runscript_path)?;
-        outcome.runscript_written = true;
-    }
-
-    // 8. Create the IO directory (empty). Safe to call if already present.
+    // 7. Create the IO directory (empty). Safe to call if already present.
     let io_full = root_abs.join(&io_dir);
     if !io_full.exists() {
         fs::create_dir_all(&io_full).with_context(|| format!("creating {}", io_full.display()))?;
         outcome.io_dir_created = true;
     }
 
-    // 9. Register (idempotent).
+    // 8. Register (idempotent).
     match registry {
         Registry::Repo(repo_flow) => {
             outcome.flow_appended =
@@ -1336,9 +1287,8 @@ fn relative_slash_path(target: &Path, base: &Path) -> Option<String> {
 }
 
 /// The docker instances of `module` in `flow`, checked: at least one
-/// instance (inline under the module entry, or in the legacy top-level
-/// map, per [`WorkspaceFlow::instances_for`]), each with a non-empty
-/// `docker.image`. Pure; `sb init --docker` runs it before writing
+/// instance under the module entry ([`WorkspaceFlow::instances_for`]),
+/// each with a non-empty `docker.image`. Pure; `sb init --docker` runs it before writing
 /// anything, and the launcher can reuse it. `origin` names the flow the
 /// instances were read from (the repository's, or the active workspace's
 /// installed copy) in the error messages.
@@ -1372,28 +1322,6 @@ pub fn preflight_docker_instances<'a>(
         }
     }
     Ok(list)
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?
-        .permissions();
-    // 0o755 — owner rwx, group/other r-x.
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms).with_context(|| format!("chmod 0755 {}", path.display()))?;
-    Ok(())
-}
-
-// The Result is load-bearing on the other side of the cfg: the unix twin
-// really can fail, and callers reach both through one `?`. Narrowing this
-// half to `()` would split the call sites by platform.
-#[allow(clippy::unnecessary_wraps)]
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<()> {
-    // Windows: no chmod bit; .bat / .cmd extensions or a launcher do the work.
-    Ok(())
 }
 
 #[cfg(test)]

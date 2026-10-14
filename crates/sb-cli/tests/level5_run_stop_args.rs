@@ -1,35 +1,19 @@
-//! L5 — `sb run <module> [args...]` forwards trailing args to
-//! `runscript.bash`, and `sb stop <module> [args...]` mirrors it for
-//! `stopscript.bash`. Both share the `sb-<workspace>` tmux session and
-//! the idempotent respawn semantics covered by TDD #4.
+//! L5 — `sb run <module> [args...]` forwards trailing args to the
+//! module's `scripts.start` (where it says `{args}`), and `sb stop
+//! <module> [args...]` mirrors it for `scripts.stop`. Both share the
+//! `sb-<workspace>` tmux session and the idempotent respawn semantics
+//! covered by TDD #4.
 //!
-//! These tests prove the pass-through contract end-to-end: the
-//! runscript writes its argv to a sentinel file, the test reads back
-//! the file and asserts the args round-tripped intact.
+//! These tests prove the pass-through contract end-to-end: the command
+//! writes its argv to a sentinel file, the test reads back the file and
+//! asserts the args round-tripped intact.
 
 mod common;
+use common::l5_sandbox::{wait_for_file, yaml_path};
 use common::{L5Sandbox, list_windows, tmux_launch_supported};
 
-/// Poll a sentinel file (written by the runscript via tmux) until it
-/// appears or the wait expires. Tmux launches the pane asynchronously,
-/// so a strict synchronous assertion would race.
-fn wait_for_file(path: &std::path::Path, max_ms: u64) -> Option<String> {
-    let step_ms = 50u64;
-    let mut waited = 0u64;
-    while waited < max_ms {
-        if let Ok(body) = std::fs::read_to_string(path) {
-            if !body.is_empty() {
-                return Some(body);
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(step_ms));
-        waited += step_ms;
-    }
-    None
-}
-
 #[test]
-fn level5_run_forwards_args_to_runscript() {
+fn level5_run_forwards_args_to_start() {
     if !tmux_launch_supported() {
         eprintln!(
             "skipping: no tmux able to run a POSIX launch pane (see installguide_windows.md §9.5)"
@@ -38,11 +22,22 @@ fn level5_run_forwards_args_to_runscript() {
     }
     let mut sb = L5Sandbox::with_workspace("argpass");
     let sentinel = sb.tempdir().join("alpha-args.txt");
-    let body = format!(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {} \nsleep 30\n",
-        shell_escape(&sentinel.display().to_string())
+    // argv, not shell: sb splits this into `sh`, `-c`, `<script>`, `sh`,
+    // then splices the passthrough args at `{args}`; the script sees them
+    // as "$@" ($0 is the second `sh`).
+    let manifest = format!(
+        "module: alpha\n\
+         language: python\n\
+         scripts:\n  \
+           start: |-\n    \
+             sh -c 'printf \"%s\\n\" \"$@\" > \"{}\"; exec sleep 30' sh {{args}}\n",
+        sentinel.display()
     );
-    sb.adopt("alpha", Some(&body));
+    let alpha = sb.native("alpha", &manifest);
+    sb.write_installed_flow(&format!(
+        "modules:\n  alpha: {}\n",
+        yaml_path(&alpha.manifest())
+    ));
 
     let out = sb
         .cmd()
@@ -62,7 +57,7 @@ fn level5_run_forwards_args_to_runscript() {
     assert!(stdout.contains("--id"), "stdout should echo --id: {stdout}");
 
     let lines = wait_for_file(&sentinel, 5_000)
-        .expect("runscript never wrote sentinel — args never reached the pane");
+        .expect("scripts.start never wrote sentinel — args never reached the pane");
     let got: Vec<&str> = lines.lines().collect();
     assert_eq!(
         got,
@@ -76,7 +71,7 @@ fn level5_run_forwards_args_to_runscript() {
 }
 
 #[test]
-fn level5_stop_executes_stopscript() {
+fn level5_stop_passes_args_to_scripts_stop() {
     if !tmux_launch_supported() {
         eprintln!(
             "skipping: no tmux able to run a POSIX launch pane (see installguide_windows.md §9.5)"
@@ -85,14 +80,23 @@ fn level5_stop_executes_stopscript() {
     }
     let mut sb = L5Sandbox::with_workspace("stopexec");
     let sentinel = sb.tempdir().join("alpha-stop.txt");
-    // Runscript: long-running sleep so we have something to "stop".
-    sb.adopt("alpha", Some("#!/usr/bin/env bash\nsleep 30\n"));
-    // Stopscript: writes its argv to the sentinel.
-    let stop_body = format!(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"stopped\" \"$@\" > {} \n",
-        shell_escape(&sentinel.display().to_string())
+    // start: a long-running sleep so there is something to stop.
+    // stop: writes its argv to the sentinel; the passthrough args land at
+    // `{args}`.
+    let manifest = format!(
+        "module: alpha\n\
+         language: python\n\
+         scripts:\n  \
+           start: sleep 30\n  \
+           stop: |-\n    \
+             sh -c 'printf \"%s\\n\" stopped \"$@\" > \"{}\"' sh {{args}}\n",
+        sentinel.display()
     );
-    sb.write_stopscript("alpha", &stop_body);
+    let alpha = sb.native("alpha", &manifest);
+    sb.write_installed_flow(&format!(
+        "modules:\n  alpha: {}\n",
+        yaml_path(&alpha.manifest())
+    ));
 
     // Start the module, then stop it with a passthrough arg.
     let out = sb.cmd().args(["run", "alpha"]).output().unwrap();
@@ -108,28 +112,11 @@ fn level5_stop_executes_stopscript() {
         "sb stop alpha --graceful failed: {out:?}"
     );
 
-    let lines = wait_for_file(&sentinel, 5_000).expect("stopscript never wrote sentinel");
+    let lines = wait_for_file(&sentinel, 5_000).expect("scripts.stop never wrote sentinel");
     let got: Vec<&str> = lines.lines().collect();
     assert_eq!(
         got,
         vec!["stopped", "--graceful"],
-        "stopscript argv: {got:?}"
+        "scripts.stop argv: {got:?}"
     );
-}
-
-/// Single-quote `s` for embedding in a shell heredoc / script body.
-/// Mirrors `sb-launch`'s internal quoting; we duplicate it here so the
-/// test crate doesn't take a dependency on `sb-launch`'s private fn.
-fn shell_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }

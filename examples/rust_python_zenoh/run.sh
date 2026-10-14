@@ -40,7 +40,7 @@ mkdir -p "$SB_HOME/ws"
 "$SB" ws set demo
 # No --force on the Rust module: its committed sb.module.yaml carries a
 # scripts.start (the binary is not named after the module), and --force
-# would rewrite the manifest without it. `sb pub/sub add --force` below
+# would rewrite the manifest without it. `sb io add pub/sub --force` below
 # still resets the entries, so the example stays re-runnable.
 "$SB" init --rust   "$PUBBER" >/dev/null
 "$SB" init --python "$SUBBER" --force >/dev/null
@@ -48,13 +48,13 @@ mkdir -p "$SB_HOME/ws"
 # 2. Add the publisher / subscriber. Use --force so the example is
 #    re-runnable without manual cleanup.
 #
-# Cross-module pub/sub needs an aligned topic. By default `sb pub add hello`
+# Cross-module pub/sub needs an aligned topic. By default `sb io add pub hello`
 # scopes the topic under the publisher's module (`dev01/demo/pubber_rust/zenoh/hello`).
 # The Python subscriber lives in a different module, so we pass the same
-# fully-qualified topic to `sb sub add --key`; `--key` is used verbatim.
+# fully-qualified topic to `sb io add sub --key`; `--key` is used verbatim.
 TOPIC_FULL="dev01/demo/pubber_rust/zenoh/hello"
-( cd "$PUBBER" && "$SB" pub add -m ros2/std/StringStamped hello --zenoh --force )
-( cd "$SUBBER" && "$SB" sub add -m ros2/std/StringStamped --key "$TOPIC_FULL" --zenoh --force )
+( cd "$PUBBER" && "$SB" io add pub -m ros2/std/StringStamped hello --zenoh --force )
+( cd "$SUBBER" && "$SB" io add sub -m ros2/std/StringStamped --key "$TOPIC_FULL" --zenoh --force )
 
 # 3. Spawn the Python subscriber.
 PY_LOG="$SB_HOME/subber.log"

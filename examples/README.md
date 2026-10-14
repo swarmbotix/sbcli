@@ -45,7 +45,7 @@ scripts:
 ```
 
 Each example's `run.sh` is self-contained: it points `SB_CONFIG` at a
-tempdir, runs `sb ws create` / `sb init` / `sb pub add` / `sb sub add`
+tempdir, runs `sb ws create` / `sb init` / `sb io add pub` / `sb io add sub`
 inside that tempdir (the workspace's `sb.flow.yaml` is written there, not
 here), then runs the two ends and asserts they exchanged the expected
 payload. `level5_hello_world/run.sh` launches both ends with `sb up`,

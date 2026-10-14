@@ -55,7 +55,7 @@ bytes, since two styles may each define an `images/Image`.
 A 2-segment name is therefore an **error**, not a lookup:
 
 ```
-$ sb pub add -m images/Image480pMono8 cam --iox2
+$ sb io add pub cam -m images/Image480pMono8 --iox2
 error: invalid message name "images/Image480pMono8": message names are
 fully qualified as <style>/<namespace>/<Leaf> (e.g. ros2/std/Header,
 swarmbotix/images/Image480pMono8). Run `sb message list` to see every
@@ -1052,7 +1052,7 @@ Rules:
   `Image` exists there normally. Variants are purely an iox2 concern.
 - **Shared dependencies are emitted once.** All eight variants embed
   `header/Header`; it appears in the output a single time.
-- **`sb pub add -m swarmbotix/images/Image480pMono8` works.** Variants have no
+- **`sb io add pub cam -m swarmbotix/images/Image480pMono8` works.** Variants have no
   `.proto`, so vault lookup would miss them; `validate_msg_type` resolves
   a name against `iox2_variants` before failing.
 - Add a resolution by adding an entry here — **never** another `.proto`.

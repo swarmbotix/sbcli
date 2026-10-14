@@ -1,35 +1,31 @@
-//! Deprecation warnings for the surface 0.6.0 replaces.
+//! Deprecation warnings.
 //!
-//! Everything deprecated that `sb` still accepts (the four pre-`sb io`
-//! verbs, the legacy file names, run and stop scripts, top-level
-//! `instances:`) is announced on stderr through [`warn_deprecated`], in one
-//! fixed format:
+//! Anything deprecated that `sb` still accepts is announced on stderr
+//! through [`warn_deprecated`], in one fixed format:
 //!
 //! ```text
-//! warning: <item> is deprecated since 0.6.0 and will be removed in 0.7.0; <hint>
+//! warning: <item> is deprecated since <SINCE> and will be removed in <UNTIL>; <hint>
 //! ```
 //!
 //! Each item is announced at most once per process, so a launch plan that
-//! finds the same legacy file name in six modules prints one line, not six.
+//! finds the same deprecated input in six modules prints one line, not six.
 //! stdout is never written: scripted callers parse it.
+//!
+//! Nothing is deprecated in 0.7.0: the surface 0.6.0 deprecated (the four
+//! pre-`sb io` verbs, the legacy file names, run and stop scripts,
+//! top-level `instances:`) was removed in 0.7.0. The helpers stay so the
+//! next deprecation reuses them.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-/// The release that started warning.
-pub const SINCE: &str = "0.6.0";
-/// The release that removes the deprecated surface.
-pub const UNTIL: &str = "0.7.0";
+// Placeholders: no deprecated item uses SINCE / UNTIL in 0.7.0. Set both
+// when the next deprecation lands.
 
-/// Item texts for deprecations `sb-cli` raises itself. Deprecations found by
-/// other crates arrive as [`sb_core::Deprecation`] values carrying their own
-/// item text.
-pub mod items {
-    pub const VERB_PUB: &str = "`sb pub`";
-    pub const VERB_SUB: &str = "`sb sub`";
-    pub const VERB_LIST: &str = "`sb list`";
-    pub const VERB_SERVICE: &str = "`sb service`";
-}
+/// The release that started warning.
+pub const SINCE: &str = "0.7.0";
+/// The release that removes the deprecated surface.
+pub const UNTIL: &str = "0.8.0";
 
 /// Items this process has already announced.
 static ANNOUNCED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();

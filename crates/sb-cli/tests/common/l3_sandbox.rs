@@ -6,7 +6,7 @@
 //!   3. A module adopted via `sb init` so `sb.module.yaml` exists.
 //!
 //! The helper does all three and exposes the module root + a `cmd_in()`
-//! that runs `sb` with cwd = module root (so bare `sb pub list` resolves
+//! that runs `sb` with cwd = module root (so bare `sb io list` resolves
 //! to the test module).
 
 #![allow(dead_code)]
@@ -61,7 +61,7 @@ impl L3Sandbox {
         let out = ws.cmd().args(["ws", "set", &workspace]).output().unwrap();
         assert!(out.status.success(), "ws set demo failed: {out:?}");
 
-        // Prepopulate the vault so `sb pub add` MsgType validation works
+        // Prepopulate the vault so `sb io add pub` MsgType validation works
         // without depending on `--all` codegen.
         let out = ws.cmd().args(["message", "list"]).output().unwrap();
         assert!(out.status.success(), "message list failed: {out:?}");
@@ -88,7 +88,7 @@ impl L3Sandbox {
         }
     }
 
-    /// Run `sb` with `cwd = module_root` (so bare `sb pub list` resolves).
+    /// Run `sb` with `cwd = module_root` (so bare `sb io list` resolves).
     pub fn cmd_in_module(&self) -> Command {
         let mut c = self.ws.cmd();
         c.current_dir(&self.module_root);

@@ -1,4 +1,4 @@
-//! L3 — conflict policy on `sb pub add` / `sb sub add`.
+//! L3 — conflict policy on `sb io add pub` / `sb io add sub`.
 //!
 //! Three knobs:
 //!   - default (no flag, non-TTY in tests) → error,
@@ -16,8 +16,9 @@ fn non_tty_default_still_errors_with_hint() {
     let _ = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/StringStamped",
             "hello",
@@ -29,8 +30,9 @@ fn non_tty_default_still_errors_with_hint() {
     let out = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/ImageStamped",
             "hello",

@@ -52,8 +52,8 @@ mkdir -p "$SB_HOME/ws"
 # fully-qualified topic so both ends land on the same iceoryx2 service.
 # `--key` is used verbatim.
 TOPIC_FULL="dev01/demo/pubber/iox2/frame"
-( cd "$PUBBER" && "$SB" pub add -m ros2/std/ImageStamped frame --iox2 --force )
-( cd "$SUBBER" && "$SB" sub add -m ros2/std/ImageStamped --key "$TOPIC_FULL" --iox2 --force )
+( cd "$PUBBER" && "$SB" io add pub -m ros2/std/ImageStamped frame --iox2 --force )
+( cd "$SUBBER" && "$SB" io add sub -m ros2/std/ImageStamped --key "$TOPIC_FULL" --iox2 --force )
 
 # Spawn subber first so the service is open before pubber starts spraying.
 SUB_LOG="$SB_HOME/subber.log"

@@ -1,6 +1,6 @@
 //! L3: CLI guard for a structurally impossible language/transport pair.
 //!
-//! Drives `sb pub add --iox2` in a Flutter module and asserts that it fails
+//! Drives `sb io add pub --iox2` in a Flutter module and asserts that it fails
 //! with the structural-impossibility message (Flutter runs on mobile and
 //! sandboxed runtimes with no shared memory, so there is no iceoryx2 path),
 //! not a "not yet implemented" one. The same guard covers Unity in
@@ -22,8 +22,9 @@ fn flutter_pub_add_iceoryx_errors_as_impossible() {
     let out = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/ImageStamped",
             "image_raw",

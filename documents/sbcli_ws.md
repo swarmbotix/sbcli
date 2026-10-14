@@ -3,7 +3,7 @@
 Official reference for workspaces: the repository `sb.flow.yaml` that
 defines one, the installed copy `sb` derives from it, the active
 marker, the `sb ws` subcommands, and the resolution rules that
-downstream verbs (`sb init`, `sb io`, `sb pub/sub *`, `sb up`) consult.
+downstream verbs (`sb init`, `sb io`, `sb up`) consult.
 
 This document is normative for behavior shipped at L2, extended by the
 repository-flow model of `sb 0.5.0+` (§4 onward).
@@ -27,9 +27,9 @@ together and whose topics share the `<workspace>` segment of every wire
 key.
 
 `sb 0.5.0+`: a workspace is defined by an **`sb.flow.yaml` at the root
-of a repository**, committed with the code (named `flow.yaml` before
-0.6.0, a name still read with a warning, §4.8). That file is the source
-of truth. `sb install` (or `sb ws install`) derives an **installed copy**
+of a repository**, committed with the code (the `sb 0.6.0+` name; since
+0.7.0 the pre-0.6.0 name is no longer read, §4.8). That file is the
+source of truth. `sb install` (or `sb ws install`) derives an **installed copy**
 from it at `<sb_home>/workspaces/<name>/sb.flow.yaml`, and every other
 verb reads the installed copy.
 
@@ -44,12 +44,14 @@ still read a single absolute registry without searching the filesystem.
 
 `sb` records **which workspace is active** in a one-line marker file at
 `<sb_home>/active`. Every downstream verb (`sb init`, `sb io`,
-`sb pub/sub *`, `sb up`, `sb topic *`) consults that marker to decide
+`sb up`, `sb topic *`) consults that marker to decide
 which installed `sb.flow.yaml` to read. Installing a workspace makes it the
 active one.
 
 A workspace made before 0.5.0 (by the old `sb ws create`, which wrote
-only the installed copy) keeps working: it has no `source:` block, a
+only the installed copy) keeps working, provided that copy has been
+brought to the 0.6.0 form (§4.5; required since 0.7.0): it has no
+`source:` block, a
 module adopted outside any repository flow is registered directly into
 it, and the repository commands (`sb ws update`, the stale check) do
 not apply to it.
@@ -181,8 +183,8 @@ cleared (overwritten with empty content, never deleted) by
 
 Lives at the root of your repository and is committed with it. Written
 by hand, by `sb ws create` (§5.1), and by `sb init` (§7.2); never by an
-install. `sb 0.6.0+` names it `sb.flow.yaml`; a repository still using
-the pre-0.6.0 name `flow.yaml` keeps working, with a warning (§4.8).
+install. `sb 0.6.0+` names it `sb.flow.yaml`, and `sb 0.7.0+` reads no
+other name (§4.8).
 
 ```yaml
 name: ws_ips                       # optional; default = the repo folder name
@@ -201,10 +203,10 @@ wires:                                              # sb 0.6.0+, §4.7
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | no | Workspace name. Default: the name of the directory holding this `sb.flow.yaml`. Must satisfy §1.2. |
-| `modules` | no | Module name to module location. The value is a path relative to this file, naming either the module directory (its manifest, `sb.module.yaml` or the deprecated `sb.dev.yml`, is looked up in it) or the manifest file itself. A path that does not exist yet is taken as a directory unless it ends in `.yml` / `.yaml`, so a module can be listed before `sb init` has run in it. The map form `{ path, up, instances }` adds `up: false` (§4.4) and, `sb 0.6.0+`, the module's instances (§4.6); `up` defaults to `true`. Module names follow §1.2 and are unique within the workspace. |
+| `modules` | no | Module name to module location. The value is a path relative to this file, naming either the module directory (its `sb.module.yaml` is looked up in it) or the manifest file itself. A path that does not exist yet is taken as a directory unless it ends in `.yml` / `.yaml`, so a module can be listed before `sb init` has run in it. The map form `{ path, up, instances }` adds `up: false` (§4.4) and, `sb 0.6.0+`, the module's instances (§4.6); `up` defaults to `true`. Module names follow §1.2 and are unique within the workspace. |
 | `messages` | no | List of `{ style, path, backends }`. Each `path` (relative to this file) is a directory of `.proto` files that `sb install` imports into the vault under `style` and then compiles. `backends` is optional, any of `proto`, `fb`, `iox2`. See [sbcli_messages.md](sbcli_messages.md) §4.7. |
 | `wires` | no | `sb 0.6.0+`. Which publisher feeds which subscriber: `<module>.<entry>: <module>[<selector>].<entry>` (§4.7). Validated by `sb ws check`; not yet read by code generation. |
-| `instances` | no | Deprecated top-level form: module name to its list of instances (§4.8). Write `instances` under the module entry instead. |
+| `instances` | not accepted | `sb 0.7.0+` refuses the pre-0.6.0 top-level form, a map of module name to instances (§4.8). Write `instances` under the module entry (§4.6). |
 
 Load rules:
 
@@ -217,8 +219,8 @@ Load rules:
 - `source:` belongs to the installed copy only (§4.3); do not write it
   in a repo copy.
 - The validation errors (bad `name:`, empty module path, bad `messages:`
-  entry, duplicate instance id, instances declared twice, a malformed
-  wire) are listed in §8. They fail the install before anything is
+  entry, duplicate instance id, a top-level `instances:` map, a
+  malformed wire) are listed in §8. They fail the install before anything is
   written.
 
 `sb.flow.yaml` stores modules, their locations, their instances, and,
@@ -273,11 +275,8 @@ source:
 
 - `name:` is always present.
 - Every path is absolute (canonical when it exists), and every module
-  path names the module's manifest file (`sb.module.yaml`, or the
-  deprecated `sb.dev.yml` where the module still has one).
-- `sb 0.6.0+`: `instances` and `wires` are copied as written. A
-  deprecated top-level `instances:` map is copied as is, not moved
-  under the module entries.
+  path names the module's `sb.module.yaml`.
+- `sb 0.6.0+`: `instances` and `wires` are copied as written.
 - `source.repo_flow` is the repo copy that was installed;
   `source.url` is the git URL it was cloned from (absent for a local
   path install); `source.installed_at` is the RFC 3339 UTC time of the
@@ -299,10 +298,16 @@ start command. See [sbcli_launch.md](sbcli_launch.md) §2.
 ### 4.5 Pre-0.5.0 installed copies
 
 An installed copy written before 0.5.0 holds only `modules:` (absolute
-paths) and optionally a top-level `instances:` map. It still loads: a
-bare path is a module with `up: true`, a missing `source:` marks a
-workspace that was not installed from a repository, and the
-`instances:` map is read as in §4.8.
+paths) and optionally a top-level `instances:` map. A bare path is a
+module with `up: true`, and a missing `source:` marks a workspace that
+was not installed from a repository. `sb 0.7.0+` refuses such a copy
+when it has the top-level map or is still stored under its pre-0.6.0
+file name (§4.8). There is no repository to reinstall from, so edit the
+file by hand as [sbcli_module.md](sbcli_module.md) §11 describes:
+rename it, and move each instance list under its module entry. A module
+path that still names a pre-0.6.0 manifest is read as the
+`sb.module.yaml` in the same directory, so renaming the manifests
+themselves (§11.1 there) is enough.
 
 ### 4.6 Instances (sb 0.6.0+)
 
@@ -331,7 +336,7 @@ string `"1"`) or a map:
 | `label` | no | Display string for the L6 graph editor; not used at runtime. |
 | `args` | no | Extra arguments for this instance, placed where the start command has `{args}`, before any passthrough args of `sb run` ([sbcli_module.md](sbcli_module.md) §9). |
 | `env` | no | Environment variables for this instance, over the manifest's `env:` ([sbcli_module.md](sbcli_module.md) §8). |
-| `docker` | no | Container settings `{ image, env, devices, mounts, gpus, network }`. Validated, and checked by `sb init --docker`. sb 0.6.0 does not start containers: `sb up` skips a natively launched module whose instances declare `docker:`, and `sb run` refuses it ([sbcli_module.md](sbcli_module.md) §11.6). |
+| `docker` | no | Container settings `{ image, env, devices, mounts, gpus, network }`. Validated, and checked by `sb init --docker`. `sb` does not start containers yet: `sb up` skips a module whose instances declare `docker:`, and `sb run` refuses it ([sbcli_module.md](sbcli_module.md) §11.6). |
 
 A module without instances runs as one process, in a window named after
 the module, with no `--id`. `sb up` and `sb run <module>` start every
@@ -367,7 +372,7 @@ entry, where the selector picks the publisher's instances:
 
 Values containing `[` or `{` must be quoted, as YAML requires.
 
-**What 0.6.0 does with them.** `sb install` copies them into the
+**What `sb` does with them today** (0.6.0 and 0.7.0). `sb install` copies them into the
 installed copy, a malformed one fails the install (§8), and
 `sb ws check` / `sb doctor` validate each against the modules'
 manifests in the `ws wires` row (§5.3): the subscriber and publisher
@@ -379,28 +384,11 @@ generates subscriber keys from `wires:`, subscribers still pair through
 `TopicOverrides` a module's `main()` builds. Declaring wires now costs
 nothing and documents the graph.
 
-### 4.8 Legacy names and top-level `instances:` (deprecated)
+### 4.8 Legacy names and top-level `instances:` (removed in 0.7.0)
 
-Deprecated since 0.6.0, removed in 0.7.0
-([sbcli_module.md](sbcli_module.md) §11):
-
-- **`flow.yaml`**, the pre-0.6.0 name of the repo copy, is read when no
-  `sb.flow.yaml` sits in the same directory, with a warning on stderr.
-  With both present, `sb.flow.yaml` is read. Installed copies written
-  by earlier versions under the old name are read the same way, and the
-  next install writes `sb.flow.yaml`.
-- **A top-level `instances:` map** (module name to its list of
-  instances) is read for every module that has no instances under its
-  own entry, with a warning. Declaring instances for one module in both
-  places is an error, and so is a top-level key that names no module.
-
-```yaml
-# before (deprecated)                  # after
-modules:                               modules:
-  ips_detect: modules/ips_detect         ips_detect: { path: modules/ips_detect, instances: [sb00, sb01] }
-instances:
-  ips_detect: [{ id: sb00 }, { id: sb01 }]
-```
+Not read since 0.7.0: the pre-0.6.0 flow file name and a top-level
+`instances:` map are refused with an error that names the fix (§8);
+[sbcli_module.md](sbcli_module.md) §11.2 and §11.5 migrate them.
 
 ---
 
@@ -433,7 +421,7 @@ sb ws create ws_ips
 **Effects (in order)** (sb 0.5.0+):
 
 1. Validates `<name>` against the identifier rule (§1.2).
-2. Refuses when `./sb.flow.yaml` (or a legacy `./flow.yaml`) already exists
+2. Refuses when `./sb.flow.yaml` already exists
    (``<path> already exists; install it with `sb install .`, or create the workspace in another folder``)
    or a workspace of that name is already installed
    (``workspace "<name>" already exists at <dir>; pick another name, or remove it with `sb ws uninstall <name>` ``).
@@ -466,9 +454,10 @@ source:
 | Root holds | Installs as |
 |---|---|
 | `sb.app.yml` | an app package, as before ([sbcli_app.md](sbcli_app.md) §4) |
-| `sb.flow.yaml` (or the deprecated `flow.yaml`) | a workspace (this section) |
+| `sb.flow.yaml` | a workspace (this section) |
 | both | error |
 | neither | error |
+| only the pre-0.6.0 flow file name (sb 0.7.0+) | error: `sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` |
 
 Source detection (git URL or local folder, `@<ref>` pinning) follows
 [sbcli_app.md](sbcli_app.md) §4.1. For a workspace:
@@ -529,9 +518,9 @@ done. next: sb up
 `created` becomes `updated` on a reinstall. The `rendered` line
 (sb 0.6.0+) appears once per service router that did not exist yet. A
 module listed before `sb init` ran in it shows
-`-- io: <module> skipped (no module manifest)`. Deprecation warnings (a
-legacy `flow.yaml` or `sb.dev.yml`, a top-level `instances:` map) go to
-stderr ([sbcli_module.md](sbcli_module.md) §11.9). **A message conflict fails
+`-- io: <module> skipped (no module manifest)`. `sb 0.7.0+` prints no
+deprecation warnings here: a pre-0.6.0 file name or a top-level
+`instances:` map fails the install instead (§4.8). **A message conflict fails
 the install**, after every step has run: the conflicting entry's line
 ends `; not compiled`, each conflict is named on stderr
 (`conflict: <style>/<ns>/<Leaf> differs from the vault copy at <path>`),
@@ -558,7 +547,7 @@ order:
 | Row | `[OK]` when | Otherwise | Fix |
 |---|---|---|---|
 | `workspace` | the installed copy reads; shows the module count and the source (URL or repo `sb.flow.yaml`) | `[FAIL]` (`cannot read <path>`) | reinstall |
-| `ws modules` | every module's manifest exists and parses | `[FAIL]` per module | `sb init` in the module; fix the YAML |
+| `ws modules` | every module's manifest exists and parses | `[FAIL]` per module | `sb init` in the module; fix the YAML; rename a pre-0.6.0 manifest ([sbcli_module.md](sbcli_module.md) §11.1) |
 | `ws types` | every `type:` of a proto / fb entry is in the vault (or is an `iox2_variants` name) | `[FAIL]` per entry | `sb message list`; reinstall to import `messages:` |
 | `ws instances` | no instance id appears twice for one module | `[FAIL]` per duplicate | edit `instances:` |
 | `ws encoding` | all publishers and subscribers on one wire key agree on `encoding`, across modules | `[FAIL]` per key, listing who uses what | `sb io edit <name> --proto\|--fb\|--raw` |
@@ -566,7 +555,7 @@ order:
 | `ws requires` (sb 0.6.0+) | every executable named by a module's `requires:` is on `PATH` (`all required tools present`) | `[FAIL]`: `<module>: missing <bin>[, <bin>]`, modules joined by `; ` | install the tool, or fix `PATH` |
 | `ws platforms` (sb 0.6.0+) | every module supports this host (`all modules support this host`) | `[WARN]`: `<module>: not supported on <os>-<arch> (declares: linux, windows)` | nothing, if the module does not target this host; else add it to `platforms:` |
 | `ws wires` (sb 0.6.0+) | every wire resolves (`<n> wire(s) resolve`, or `no wires`) | `[FAIL]`: `<lhs>: <reason>` per wire (§4.7) | fix `wires:` or the manifests |
-| `deprecated` (sb 0.6.0+) | nothing deprecated in use (`nothing deprecated in use`) | `[WARN]`, one line per item, each ending `-> see sbcli_module.md §Migrating` | [sbcli_module.md](sbcli_module.md) §11 |
+| `deprecated` (sb 0.6.0+) | nothing deprecated in use (`nothing deprecated in use`) | `[WARN]`, one line per leftover pre-0.6.0 file, each ending `is ignored since 0.7.0 (see sbcli_module.md §Migrating)` (sb 0.7.0+) | [sbcli_module.md](sbcli_module.md) §11 |
 | `ws source` | the installed copy is current with the repo `sb.flow.yaml` | `[WARN]` when the repo copy is newer; `[SKIP]` with no `source:` | `sb install <repo>` |
 
 The four `sb 0.6.0+` rows, their exact texts, and the reasons
@@ -806,7 +795,7 @@ sb ws uninstall nav --clean                # also deletes each module's swarmbot
 |---|---|
 | `sb install` / `sb ws install` / `sb ws create` / `sb ws update` | write the installed copy and the active marker (§5) |
 | `sb init` | registers the module in the nearest repo `sb.flow.yaml` and reinstalls; without one, in the active workspace's installed copy; **errors** when there is neither (§7.2) |
-| `sb io` / `sb pub/sub *` / `sb list` | the active installed copy, only when `--module <name>` falls through to it (§7.1); a bare invocation in a module dir needs no workspace |
+| `sb io` | the active installed copy, only when `--module <name>` falls through to it (§7.1); a bare invocation in a module dir needs no workspace (`sb io update` excepted: it always needs one) |
 | `sb up` / `sb run` / `sb stop` / `sb down` | the active installed copy; `sb up` skips `up: false` modules, and `sb up` / `sb run` warn when the repo copy is newer ([sbcli_launch.md](sbcli_launch.md) §2) |
 | `sb topic listen` / `sb topic list` | the active installed copy, to type frames from a module's manifest ([sbcli_messages.md](sbcli_messages.md) §1.1) |
 | `sb doctor` | the active installed copy, for the `topics` row and the `sb ws check` rows ([sbcli_doctor.md](sbcli_doctor.md) §4.10, §4.11); a `[FAIL]` there fails doctor |
@@ -816,12 +805,16 @@ sb ws uninstall nav --clean                # also deletes each module's swarmbot
 
 ### 7.1 Module resolution and `sb.flow.yaml`
 
-`sb io`, `sb pub/sub *`, and `sb service` resolve `--module <name>` in
-this order ([sbcli_pubsub.md](sbcli_pubsub.md) §3):
+`sb io` resolves `--module <name>` in this order
+([sbcli_pubsub.md](sbcli_pubsub.md) §3):
 
-1. `./<name>/sb.module.yaml` (or the deprecated `./<name>/sb.dev.yml`) under the current directory;
+1. `./<name>/sb.module.yaml` under the current directory;
 2. `<name>` in the active workspace's installed `sb.flow.yaml`;
-3. with no `--module`, `./sb.module.yaml` (or `./sb.dev.yml`) in the current directory.
+3. with no `--module`, `./sb.module.yaml` in the current directory.
+
+`sb 0.7.0+` looks for no other manifest name; a directory that holds
+only the pre-0.6.0 one stops the lookup with the error in
+[sbcli_module.md](sbcli_module.md) §12.
 
 If the installed copy lists `<name>` but its path no longer exists on
 disk, `sb` errors with every path it searched (including the dangling
@@ -896,8 +889,8 @@ Strings here are the canonical wording from the `sb_workspace::*` and
 | `sb ws update`: no git (sb 0.5.0+) | `running git (is it on PATH?)` |
 | `sb init`: duplicate module name in a repo flow (sb 0.5.0+) | `module "<m>" is already registered in <flow> for <other manifest>; module names must be unique within a workspace` |
 | `sb init`: nowhere to register (sb 0.5.0+) | ``no active workspace and no sb.flow.yaml above <root>; run `sb ws create <name> && sb ws set <name>` first, or add a sb.flow.yaml at the repository root`` |
-| instances declared both under the module entry and in the top-level map (sb 0.6.0+) | `module "<m>" declares instances both under its modules: entry and in the top-level instances: map; keep only the list under modules:` |
-| top-level `instances:` key that names no module (sb 0.6.0+) | `top-level instances: names module "<k>", which is not listed under modules:` |
+| a top-level `instances:` map (sb 0.7.0+) | `top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)` |
+| a directory with the pre-0.6.0 flow file name only (sb 0.7.0+) | `sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` |
 | malformed wire (sb 0.6.0+) | `wires.<lhs>: <reason>` |
 
 These are stable wordings; integration tests in `crates/sb-cli/tests`
@@ -971,9 +964,8 @@ Module manifests do not store the workspace name. Generated files do
 regenerates them under the new name.
 
 For a pre-0.5.0 workspace with no repository: create the new directory,
-move the installed flow file (`sb.flow.yaml`, or `flow.yaml` if an
-older `sb` wrote it) into it, `sb ws set new_name`, then `sb ws delete
-old_name`.
+move the installed `sb.flow.yaml` into it (migrated first, §4.5),
+`sb ws set new_name`, then `sb ws delete old_name`.
 
 ### 9.7 Two repositories, one workspace name
 

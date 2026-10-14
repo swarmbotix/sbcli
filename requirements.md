@@ -60,8 +60,8 @@ Optional:
 1. Enforces topic naming rules across apps
 2. Creates and manages the `swarmbotix_io/` IO folder structure per app
 3. Generates pub/sub files using raw Zenoh / Iceoryx2 APIs (no wrapper)
-4. Manages the workspace registry (`sb.flow.yaml`; `flow.yaml` before 0.6.0)
-5. Generates per-app config files (`sb.module.yaml`, `sb.prd.yml`; `sb.dev.yml` before 0.6.0)
+4. Manages the workspace registry (`sb.flow.yaml`; `flow.yaml` before 0.6.0, not read since 0.7.0)
+5. Generates per-app config files (`sb.module.yaml`, `sb.prd.yml`; `sb.dev.yml` before 0.6.0, not read since 0.7.0)
 6. Provides live topic introspection via raw Zenoh (`sb topic list/listen`)
 7. Builds and launches modules via tmux/psmux (`sb up`), natively from `sb.module.yaml` (`sb 0.6.0+`)
 
@@ -103,7 +103,7 @@ Example: `dev01/perception/camera/iox2/image_raw` (or `.../zenoh/image_raw`)
 - `device` — identifies the machine
 - `workspace` — the active swarmbotix workspace
 - `module` — the app/module name
-- `transport` — literal `iox2` or `zenoh`, picked from the `--iox2` / `--zenoh` flag at `sb pub/sub add` time
+- `transport` — literal `iox2` or `zenoh`, picked from the `--iox2` / `--zenoh` flag at `sb io add` time
 - `topic` — the pub/sub channel name
 
 The transport segment lets the same bare name (e.g. `image_raw`) coexist on both transports for the same module without collision, and makes the transport visible directly in the key. `sb` enforces this naming automatically. Users type the full path only to address a topic they do not own, with `--key`.
@@ -113,7 +113,7 @@ The transport segment lets the same bare name (e.g. `image_raw`) coexist on both
 - `topic: <bare>`: owned; codegen prefixes it with `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. Generated code has `is_owned = true`.
 - `key: <wire key>`: verbatim, used as is. Generated code has `is_owned = false`.
 
-A pre-0.5.0 `topic: /x/y` is read as `key: x/y` (the identical wire key); `sb doctor` warns about it (`topics` check) and the next `sb pub` / `sb sub` write rewrites it. A pre-0.5.0 `topic: a/b` (inner `/`, no leading one) is refused at load; the equivalent entry is `key: <device>/<ws>/<module>/<transport>/a/b`.
+A pre-0.5.0 `topic: /x/y` is read as `key: x/y` (the identical wire key); `sb doctor` warns about it (`topics` check) and the next `sb io` write (or `sb io update`) rewrites it. A pre-0.5.0 `topic: a/b` (inner `/`, no leading one) is refused at load; the equivalent entry is `key: <device>/<ws>/<module>/<transport>/a/b`.
 
 ---
 
@@ -142,7 +142,7 @@ A pre-0.5.0 `topic: /x/y` is read as `key: x/y` (the identical wire key); `sb do
   workspaces/            ← all workspaces live here
     <workspace_name>/    ← one directory per installed workspace
       sb.config.yml      ← optional per-workspace override
-      sb.flow.yaml       ← installed copy of a repo sb.flow.yaml: absolute paths + source: (sb 0.5.0+; named flow.yaml before 0.6.0); never hand-edited
+      sb.flow.yaml       ← installed copy of a repo sb.flow.yaml: absolute paths + source: (sb 0.5.0+; named flow.yaml before 0.6.0, not read since 0.7.0); never hand-edited
   repos/<name>/          ← default clone location for `sb install <git-url>` of a workspace (sb 0.5.0+)
   apps.yml               ← installed app packages: name → path, source, commit, version
   update-check.json      ← cache for the `sb --version` update notice: latest, checked_at
@@ -153,7 +153,7 @@ A pre-0.5.0 `topic: /x/y` is read as `key: x/y` (the identical wire key); `sb do
 
 ```
 ws_ips/                  ← a workspace repository, cloned anywhere
-  sb.flow.yaml           ← repo copy: the source of truth for the workspace; committed (`flow.yaml` before 0.6.0)
+  sb.flow.yaml           ← repo copy: the source of truth for the workspace; committed (`flow.yaml` before 0.6.0, not read since 0.7.0)
   messages/custom/       ← optional .proto sources, imported by `sb install` via `messages:`
   modules/<module>/      ← one module root per module (see below)
 ```
@@ -162,12 +162,12 @@ ws_ips/                  ← a workspace repository, cloned anywhere
 
 ```
 camera_app/
-  sb.module.yaml         ← module manifest: interface, build, launch (sb 0.6.0+; `sb.dev.yml` before); no host path, committed
+  sb.module.yaml         ← module manifest: interface, build, launch (sb 0.6.0+; `sb.dev.yml` before, not read since 0.7.0); no host path, committed
   sb.prd.yml             ← production interface (ships with binary)
   swarmbotix_io/         ← generated IO files (default io_dir)
 ```
 
-`sb 0.6.0+` reads the module manifest as `sb.module.yaml`, else the deprecated `sb.dev.yml` (`sb_core::module_file_candidates`, new name first), and the workspace flow as `sb.flow.yaml`, else `flow.yaml` (`flow_file_candidates`). New files are always written under the new names. A legacy name prints a deprecation warning (§Deprecations).
+`sb 0.7.0+` reads the module manifest as `sb.module.yaml` only and the workspace flow as `sb.flow.yaml` only (`sb_core::module_file_candidates` / `flow_file_candidates`, one name each). Where only the legacy name exists, a caller that needs the file fails with `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` or `sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` (§Deprecations). 0.6.0 read the legacy names as a fallback, with a deprecation warning.
 
 ### `sb.config.yml` schema
 
@@ -208,7 +208,7 @@ This repository (the forge) bundles the canonical `std/` message set under `mess
 
 Workspaces isolate projects. Analogous to Python virtual environments. Each installed workspace is a real directory at `~/.swarmbotix/workspaces/<name>/`. Shipped doc: `documents/sbcli_ws.md`.
 
-`sb 0.5.0+`: a workspace is defined by a **repo copy** of `sb.flow.yaml` (`flow.yaml` before 0.6.0) at the root of a repository, committed with the code. `sb install` derives an **installed copy** at `~/.swarmbotix/workspaces/<name>/sb.flow.yaml` (absolute paths plus `source:`); every other verb reads the installed copy, and nobody edits it by hand.
+`sb 0.5.0+`: a workspace is defined by a **repo copy** of `sb.flow.yaml` (`flow.yaml` before 0.6.0, not read since 0.7.0) at the root of a repository, committed with the code. `sb install` derives an **installed copy** at `~/.swarmbotix/workspaces/<name>/sb.flow.yaml` (absolute paths plus `source:`); every other verb reads the installed copy, and nobody edits it by hand.
 
 ```bash
 sb install https://github.com/acme/ws_ips.git --dir ~/ws_ips   # clone, install (or: cd clone && sb install .)
@@ -246,12 +246,12 @@ wires:                                           # subscriber <- publisher (sb 0
 
 - **`name:`** *(optional)*: the workspace name; default the name of the directory holding the file. Must pass `validate_identifier`, so a folder such as `ws-ips` needs an explicit `name:`.
 - **`modules:`**: module name → path relative to the file, naming the module directory (its manifest found by `module_file_candidates`) or the yaml itself; a path that does not exist yet is a directory unless it ends in `.yml` / `.yaml`. Map form `{ path, up, instances }`, `up` defaulting to `true` (`ModuleRef`); a bare path serialises back only when `up` is true and `instances` is empty. `up: false`: registered, io regenerated, `sb run` / `sb stop` work, `sb up` neither builds nor starts it.
-- **`instances`** under a module entry *(sb 0.6.0+)*: list of `ModuleInstance`, each a bare id (string or number) or a map `{ id, label?, args?, env?, docker? }`; serialised bare when only `id` is set. `id` passes `validate_instance_id` (`[A-Za-z0-9_-]+`) and is unique within the module. `args` go to `{args}` of the start command, `env` over the manifest's `env`. `docker` (`{ image?, env?, devices?, mounts?, gpus?, network? }`) is validated and preflighted by `sb init --docker`; native container launch is not in 0.6.0, so `plan_workspace` skips a native module whose instances declare `docker:` and `plan_run` refuses it (a legacy module keeps its docker `runscript.bash`). `WorkspaceFlow::instances_for(module)` returns the inline list, else the legacy top-level list.
+- **`instances`** under a module entry *(sb 0.6.0+)*: list of `ModuleInstance`, each a bare id (string or number) or a map `{ id, label?, args?, env?, docker? }`; serialised bare when only `id` is set. `id` passes `validate_instance_id` (`[A-Za-z0-9_-]+`) and is unique within the module. `args` go to `{args}` of the start command, `env` over the manifest's `env`. `docker` (`{ image?, env?, devices?, mounts?, gpus?, network? }`) is validated and preflighted by `sb init --docker`; native container launch is not in 0.7.0 either, so `plan_workspace` skips a module whose instances declare `docker:` and `plan_run` refuses it. `WorkspaceFlow::instances_for(module)` returns the inline list.
 - **`wires:`** *(optional, sb 0.6.0+)*: `<module>.<entry>: <module>[<selector>].<entry>`, subscriber on the left, publisher on the right, split on the first `.`; selector `{id}` (same id as the subscriber instance, `WireSelector::SameId`), `*` (`All`), a literal id (`Id`), or none (`None`). Parsed by `parse_wire` at load (`FlowValidationError::BadWire(lhs, reason)`); existence, transport, and type checks need manifests and run in `sb ws check` (`ws wires`). Copied to the installed copy; not read by codegen until phase 3 of the native-launch plan.
 - **`messages:`** *(optional)*: `{ style, path, backends? }` (`MessageSource`). `style` is `[A-Za-z0-9_]+`; `backends` is any of `proto`, `fb`, `iox2`. On install, `Vault::import_style_dir` copies `<path>/<ns>/<Leaf>.proto` to `<style>/<ns>/<Leaf>` and a flat `<path>/<Leaf>.proto` to `<style>/<dirname of path>/<Leaf>`; hidden entries and non-`.proto` files are ignored; identical content is unchanged, different content is a conflict left alone unless `--force`, `ros2/std/` is never overwritten; any file that cannot be named `<style>/<ns>/<Leaf>` aborts that entry with nothing written. The style is then compiled with `backends`, or the normal backend selection when absent.
-- **`instances:`** at the top level *(deprecated since 0.6.0, removed in 0.7.0)*: module name → list of instances, read for modules without inline instances, with a deprecation warning; copied as is (not normalized) into the installed copy. A module with both forms is `BothInstanceForms(module)`; a key naming no module is `InstancesForUnknownModule(key)`.
+- **`instances:`** at the top level *(deprecated in 0.6.0, removed in 0.7.0)*: not a field of `WorkspaceFlow`. `sb_core::probe_legacy_flow_keys` reads the raw YAML before the strict parse (`read_flow`, `install_flow`) and returns `FlowValidationError::LegacyTopLevelInstances`, `top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)`, so the user gets the hint rather than serde's `unknown field`.
 - `deny_unknown_fields` applies to the file, to the map form of a module entry, to each instance map, and to each `messages:` entry, so an `sb` older than the release that introduced a key cannot read a file using it (0.5.0: `name`, `messages`, `{ path, up }`; 0.6.0: inline `instances`, `wires`).
-- Load errors (`FlowValidationError`): `workspace name "<n>" is invalid: <reason>`, `module "<m>" has an empty path`, `messages[<i>]: style "<s>" is invalid (allowed: [A-Za-z0-9_])`, `messages[<i>]: path is empty`, `messages[<i>]: unknown backend "<b>" (expected one of: proto, fb, iox2)`, `module "<m>" declares instance id "<id>" more than once`, and (sb 0.6.0+) `BothInstanceForms`, `InstancesForUnknownModule`, `BadWire`.
+- Load errors (`FlowValidationError`): `workspace name "<n>" is invalid: <reason>`, `module "<m>" has an empty path`, `messages[<i>]: style "<s>" is invalid (allowed: [A-Za-z0-9_])`, `messages[<i>]: path is empty`, `messages[<i>]: unknown backend "<b>" (expected one of: proto, fb, iox2)`, `module "<m>" declares instance id "<id>" more than once`, `BadWire` (sb 0.6.0+), and `LegacyTopLevelInstances` (sb 0.7.0+; 0.6.0's `BothInstanceForms` and `InstancesForUnknownModule` are gone with the top-level map).
 
 **Installed copy** `~/.swarmbotix/workspaces/<name>/sb.flow.yaml`: `name:` always set; every path absolute (canonical when it exists) and every module path naming its manifest file; inline `instances` and `wires` copied; `source: { repo_flow, url, installed_at }` (`FlowSource`), where `url` is absent for a local-path install and `installed_at` is RFC 3339 UTC to the second. Written in full by every install (`sb_workspace::install_flow`), never by hand; the repo copy is never written by an install. An installed copy is refused as an install source. A workspace of the same name installed from a **different** repo flow that still exists is refused; one whose previous source no longer exists is replaced.
 
@@ -283,7 +283,7 @@ Without `wires:`, edges between modules are **derived** by matching publisher ke
 ## Per-App Config Files
 
 ### `sb.module.yaml` — development time
-Generated by `sb init` at the app's project root (`sb 0.6.0+`; `sb.dev.yml` before, still read with a deprecation warning until 0.7.0, adopted read-only by `sb init`). **Not shipped with binary.** Holds no host-specific path and is committed with the module; `sb install` and `sb io update` regenerate `swarmbotix_io/` from it, and `sb up` / `sb run` / `sb stop` build, start, and stop the module from it. Shipped doc: `documents/sbcli_module.md`.
+Generated by `sb init` at the app's project root (`sb 0.6.0+`; `sb.dev.yml` before, read with a deprecation warning in 0.6.0, not read since 0.7.0). **Not shipped with binary.** Holds no host-specific path and is committed with the module; `sb install` and `sb io update` regenerate `swarmbotix_io/` from it, and `sb up` / `sb run` / `sb stop` build, start, and stop the module from it. Shipped doc: `documents/sbcli_module.md`.
 
 ```yaml
 module: camera
@@ -392,10 +392,10 @@ Conventions used in every command spec below:
 ### Workspaces
 
 #### `sb install <git-url | path> [--dir <path>] [--force]` (workspace, `sb 0.5.0+`)
-`sb install` reads the manifest at the source's root (`package_kind`): `sb.app.yml` installs an app package (§App Packages), `sb.flow.yaml` (or the deprecated `flow.yaml`) installs a workspace. Both: `<source> has both sb.app.yml and sb.flow.yaml; a package is one or the other`; neither: `<source> has neither sb.app.yml (an app package) nor sb.flow.yaml (a workspace package) at its root`. For a workspace:
+`sb install` reads the manifest at the source's root (`package_kind`): `sb.app.yml` installs an app package (§App Packages), `sb.flow.yaml` installs a workspace (`sb 0.7.0+`: a root with only `flow.yaml` fails with `sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`). Both: `<source> has both sb.app.yml and sb.flow.yaml; a package is one or the other`; neither: `<source> has neither sb.app.yml (an app package) nor sb.flow.yaml (a workspace package) at its root`. For a workspace:
 - `<git-url>` (`@<ref>` pins): shallow clone into `--dir <path>`, else staged under `~/.swarmbotix/repos/` and moved to `~/.swarmbotix/repos/<name>/`, `<name>` being the flow's `name:` or else the URL's repository folder name. The same URL again (`source.url` match) fast-forwards that clone and reinstalls. `--dir` must be new, empty, or already a clone of the same URL (fast-forwarded); it is refused for a local folder and for an app. `<path>`: used in place, recording no URL; `sb install .` inside a clone is the common author form.
 - `--force`: overwrite vault messages that differ from the package's copies; the bundled `ros2/std` set is never overwritten.
-- Steps (`finish_workspace_install`), one stdout line each: `-- workspace <n>: created|updated, active`; `-- modules: <k> registered[, <j> with up: false (<names>)]` (a module without a manifest warns on stderr); per `messages:` entry `-- messages: <style> <- <path>: <i> imported, <u> unchanged, <c> conflicts; compiled [<backends>]` (`; not compiled` on a conflict), imported with `Vault::import_style_dir` into the configured vault (never a cwd-discovered one) and compiled with the entry's backends (or the style default); per module `-- io: <m> <w> written, <u> unchanged[, <s> skipped]` (`sb_pubsub::update_all` with `ServiceRender::IfMissing`: a service router is rendered only where its file does not exist, printing `  rendered services/<name> for <module>`; skipped entries warn; a module with no manifest yet prints `-- io: <m> skipped (no module manifest)`); then `done. next: sb up` (`sb init <module dir>` when no modules). Deprecations found (legacy flow name, legacy manifest names, top-level `instances:`) go to stderr, never stdout.
+- Steps (`finish_workspace_install`), one stdout line each: `-- workspace <n>: created|updated, active`; `-- modules: <k> registered[, <j> with up: false (<names>)]` (a module without a manifest warns on stderr); per `messages:` entry `-- messages: <style> <- <path>: <i> imported, <u> unchanged, <c> conflicts; compiled [<backends>]` (`; not compiled` on a conflict), imported with `Vault::import_style_dir` into the configured vault (never a cwd-discovered one) and compiled with the entry's backends (or the style default); per module `-- io: <m> <w> written, <u> unchanged[, <s> skipped]` (`sb_pubsub::update_all` with `ServiceRender::IfMissing`: a service router is rendered only where its file does not exist, printing `  rendered services/<name> for <module>`; skipped entries warn; a module with no manifest yet prints `-- io: <m> skipped (no module manifest)`); then `done. next: sb up` (`sb init <module dir>` when no modules). `sb 0.7.0+` warns about nothing here: a legacy flow name, a legacy manifest name, or a top-level `instances:` map fails the install with the §Deprecations errors.
 - Conflicts fail the command after every step has run: `<n> message(s) differ from the vault copies and were not imported (their styles were not compiled); re-run with --force to overwrite the vault copies`.
 - Idempotent; re-run after `git pull`.
 
@@ -407,7 +407,7 @@ Conventions used in every command spec below:
 The workspace-only form of `sb install` (default `.`); an app package is refused with ``<source> is an app package (sb.app.yml), not a workspace; install it with `sb install <source>` ``.
 
 #### `sb ws check [<name>]` (`sb 0.5.0+`)
-Validate an installed workspace (default: the active one) with `sb_doctor::check_workspace`, rows in order: `workspace` (summary: module count and source; `[FAIL]` if the installed copy cannot be read), `ws modules` (`[FAIL]` per missing or unparseable module manifest), `ws types` (`[FAIL]` per proto/fb `type:` not in the configured vault nor an `iox2_variants` name), `ws instances` (`[FAIL]` per duplicate id), `ws encoding` (`[FAIL]` per wire key whose entries disagree on `encoding:`), `ws io files` (`[WARN]` per module with generated files missing), then `sb 0.6.0+`: `ws requires` (`[FAIL]`, `<module>: missing <bin>[, <bin>]` per module joined by `; `, resolved with `which::which` after `ModuleDevConfig::resolve(host)`, skipping modules the host does not support; OK `all required tools present`), `ws platforms` (`[WARN]`, `<module>: not supported on <os>-<arch> (declares: linux, windows)`; OK `all modules support this host`), `ws wires` (`[FAIL]`, `<lhs>: <reason>`, reason one of `unknown subscriber module`, `no subscriber <entry> in <module>`, `unknown publisher module`, `no publisher <entry> in <module>`, `[*] on iceoryx2 is not supported`, `{id} but <module> has no instances`, `transport mismatch (<a> vs <b>)`, `type mismatch (<a> vs <b>)`; OK `<n> wire(s) resolve` or `no wires`), `deprecated` (`[WARN]`, one item per line: `sb.dev.yml at <path>`, `flow.yaml at <path>`, `runscript.bash at <path>`, `stopscript.bash at <path>`, `top-level instances: in <flow>`, each ending `-> see sbcli_module.md §Migrating`; OK `nothing deprecated in use`), and last `ws source` (`[WARN]` when the repo flow is newer than the installed copy, `[SKIP]` without `source:`). Exit 1 on any `[FAIL]`. The same rows, for the active workspace, are part of `sb doctor`.
+Validate an installed workspace (default: the active one) with `sb_doctor::check_workspace`, rows in order: `workspace` (summary: module count and source; `[FAIL]` if the installed copy cannot be read), `ws modules` (`[FAIL]` per missing or unparseable module manifest; a module dir with only `sb.dev.yml` fails with `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`), `ws types` (`[FAIL]` per proto/fb `type:` not in the configured vault nor an `iox2_variants` name), `ws instances` (`[FAIL]` per duplicate id), `ws encoding` (`[FAIL]` per wire key whose entries disagree on `encoding:`), `ws io files` (`[WARN]` per module with generated files missing), then `sb 0.6.0+`: `ws requires` (`[FAIL]`, `<module>: missing <bin>[, <bin>]` per module joined by `; `, resolved with `which::which` after `ModuleDevConfig::resolve(host)`, skipping modules the host does not support; OK `all required tools present`), `ws platforms` (`[WARN]`, `<module>: not supported on <os>-<arch> (declares: linux, windows)`; OK `all modules support this host`), `ws wires` (`[FAIL]`, `<lhs>: <reason>`, reason one of `unknown subscriber module`, `no subscriber <entry> in <module>`, `unknown publisher module`, `no publisher <entry> in <module>`, `[*] on iceoryx2 is not supported`, `{id} but <module> has no instances`, `transport mismatch (<a> vs <b>)`, `type mismatch (<a> vs <b>)`; OK `<n> wire(s) resolve` or `no wires`), `deprecated` (`[WARN]`, one leftover legacy file per line: `sb.dev.yml at <path>`, `flow.yaml at <path>`, `runscript.bash at <path>`, `stopscript.bash at <path>`, each ending `is ignored since 0.7.0 (see sbcli_module.md §Migrating)`; OK `nothing deprecated in use`), and last `ws source` (`[WARN]` when the repo flow is newer than the installed copy, `[SKIP]` without `source:`). Exit 1 on any `[FAIL]`. The same rows, for the active workspace, are part of `sb doctor`.
 
 #### `sb ws update <name> [--force]` (`sb 0.5.0+`)
 `git -C <repo dir> pull --ff-only` on the directory holding the installed copy's `source.repo_flow`, then reinstall (`sb_workspace::update_from_source`, then the remaining install steps). Requires `source.url`: a local-path install errors with `workspace "<n>" was installed from a local path (<flow>) with no URL; update that checkout yourself and install it again`; no `source:` errors with `workspace "<n>" was not installed from a repository flow`.
@@ -434,94 +434,52 @@ Remove `~/.swarmbotix/workspaces/<name>/`. If active, clears the `active` marker
 Adopt an existing project directory as a swarmbotix module. sb does **not** create the project itself — the user already has a Rust crate, a Python project, a C++ tree, a Flutter project, or a Unity project. `sb init` just drops swarmbotix's manifest in and registers the module with the active workspace.
 
 What sb writes into `<rootpath>` (only the missing pieces; existing files are preserved unless `--force`):
-- `sb.module.yaml` (sb 0.6.0+): `module: <basename of rootpath>`, `language: <lang>`, `io_dir: swarmbotix_io/` (or `Assets/Scripts/swarmbotix_io/` for Unity). No `scripts:`: the language defaults launch the module. An existing `sb.dev.yml` without `--force` is adopted read-only (nothing written, `InitOutcome.legacy_manifest`, a `Deprecation`), printing `  adopted existing sb.dev.yml (deprecated)` in place of `  wrote sb.module.yaml`.
+- `sb.module.yaml` (sb 0.6.0+): `module: <basename of rootpath>`, `language: <lang>`, `io_dir: swarmbotix_io/` (or `Assets/Scripts/swarmbotix_io/` for Unity). No `scripts:`: the language defaults launch the module. `sb 0.7.0+`: a directory with only `sb.dev.yml` fails before anything is written with `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)` (0.6.0 adopted it read-only).
 - `swarmbotix_io/` (or `Assets/Scripts/swarmbotix_io/` for Unity) — empty IO directory; L3 codegen fills it.
-- No launch script by default (sb 0.6.0+). `--runscript` (deprecated) writes the pre-0.6.0 `runscript.bash` stub and prints `  wrote runscript.bash (executable)`.
+- No launch script (sb 0.6.0+). The 0.6.0 `--runscript` flag and its stub template (`crates/sb-workspace/src/runscript.rs`) are removed in 0.7.0.
 
-stdout: `adopted module <m> (language: <l>, root: <abs>)`, then `  wrote sb.module.yaml` (or the adopted line), `  created IO directory`, `  registered in <flow>` or `  (already registered in <flow>)` (without a repository flow: `  registered in workspace <ws>` / `  (already registered in workspace <ws>)`), and under a repository flow `  installed workspace <ws> (active)`.
+stdout: `adopted module <m> (language: <l>, root: <abs>)`, then `  wrote sb.module.yaml`, `  created IO directory`, `  registered in <flow>` or `  (already registered in <flow>)` (without a repository flow: `  registered in workspace <ws>` / `  (already registered in workspace <ws>)`), and under a repository flow `  installed workspace <ws> (active)`.
 
-Then it registers the module. `sb 0.5.0+`: when a repo `sb.flow.yaml` (or legacy `flow.yaml`) sits at or above `<rootpath>` (`find_flow_upwards`; never an installed copy, never `$HOME` itself unless the search starts there), the module is added there as `<module>: <relative/path>`, appended as one line under `modules:` so comments survive (falling back to a full rewrite when `modules:` is a flow mapping), and the repo flow is reinstalled, keeping a previously recorded URL. A same-named entry pointing at another existing module is an error (`module "<m>" is already registered in <flow> for <path>; module names must be unique within a workspace`); one pointing at a missing module is repointed, keeping `up:`. Otherwise it inserts `module → /abs/path/<rootpath>/sb.module.yaml` into the active workspace's installed `sb.flow.yaml`, as before. Idempotent: re-running with the same rootpath does not duplicate the registration. The manifest is written without `root:` (sb 0.5.0+).
+Then it registers the module. `sb 0.5.0+`: when a repo `sb.flow.yaml` sits at or above `<rootpath>` (`find_flow_upwards`; never an installed copy, never `$HOME` itself unless the search starts there), the module is added there as `<module>: <relative/path>`, appended as one line under `modules:` so comments survive (falling back to a full rewrite when `modules:` is a flow mapping), and the repo flow is reinstalled, keeping a previously recorded URL. A same-named entry pointing at another existing module is an error (`module "<m>" is already registered in <flow> for <path>; module names must be unique within a workspace`); one pointing at a missing module is repointed, keeping `up:`. Otherwise it inserts `module → /abs/path/<rootpath>/sb.module.yaml` into the active workspace's installed `sb.flow.yaml`, as before. Idempotent: re-running with the same rootpath does not duplicate the registration. The manifest is written without `root:` (sb 0.5.0+).
 
 Arguments:
 - `<rootpath>` (default: `.`) — project root to adopt. For Unity, this is the project root that contains `Assets/`. Module name is `basename(rootpath)`.
 - `--rust | --python | --cpp | --flutter | --unity` — language tag written to `sb.module.yaml`. **Required** when no manifest exists yet at `<rootpath>`. **Optional** when one already exists; if given, must match the existing `language:` tag (else error).
 - A repo flow above `<rootpath>` or an active workspace (required): with neither, `sb init` errors (`no active workspace and no <flow> above <root>; ...`).
-- `--force` (default: refuse to overwrite) — overwrite an existing `sb.module.yaml` (and, with `--runscript`, `runscript.bash`) at `<rootpath>`; the rewritten manifest keeps only `module`, `language`, `io_dir`.
-- `--docker` (sb 0.6.0+ meaning): preflight the module's instances in the registry's flow (`instances_for(module)` non-empty, each with a `docker.image`) **before any file is written**, then write the manifest as usual. The docker bash template is gone (`render_docker` deleted); native container launch from `instances[].docker` is a later release, and until then `sb up` skips a native module whose instances declare `docker:`.
-- `--runscript` (sb 0.6.0+, deprecated): also write the stub `runscript.bash` (template kept in `crates/sb-workspace/src/runscript.rs`), which makes the module launch the legacy way. Removed in 0.7.0.
+- `--force` (default: refuse to overwrite) — overwrite an existing `sb.module.yaml` at `<rootpath>`; the rewritten manifest keeps only `module`, `language`, `io_dir`.
+- `--docker` (sb 0.6.0+ meaning): preflight the module's instances in the registry's flow (`instances_for(module)` non-empty, each with a `docker.image`) **before any file is written**, then write the manifest as usual. The docker bash template is gone (`render_docker` deleted); native container launch from `instances[].docker` is a later release, and until then `sb up` skips a module whose instances declare `docker:`.
 
 ---
 
 ### Pub/Sub
 
-`sb 0.5.0+`: `sb pub`, `sb sub`, and `sb list` are deprecated in favour of `sb io` (§Module IO); they keep working unchanged and receive no new features.
+`sb 0.7.0+`: `sb io` (§Module IO) is the only pub/sub and service surface; `sb pub`, `sb sub`, `sb list`, and `sb service` were removed (§Deprecations). This section holds the rules every `sb io` verb shares.
 
 `-m` is reserved for `MsgType`. Module selection uses the long-only flag `--module`.
 
 #### Module resolution (highest priority first)
-Shared by `sb io`, `sb pub`, `sb sub`, `sb list`, and `sb service` (`sb_pubsub::resolve_module`):
-1. `--module <name>` and `./<name>/` holds a manifest (`sb.module.yaml`, else `sb.dev.yml`) → that path
-2. `--module <name>` and the active workspace's installed `sb.flow.yaml` has it → that path (an explicit `.../sb.dev.yml` recorded by a 0.5 install keeps resolving)
-3. No `--module` → `./sb.module.yaml`, else `./sb.module.yaml`, in cwd
+Used by every `sb io` verb (`sb_pubsub::resolve_module`; `sb io update` takes the module as a positional):
+1. `--module <name>` and `./<name>/sb.module.yaml` exists → that path
+2. `--module <name>` and the active workspace's installed `sb.flow.yaml` has it → that path
+3. No `--module` → `./sb.module.yaml` in cwd
 4. Otherwise → error with the paths searched
+
+`sb 0.7.0+` probes the one name only; a directory with only `sb.dev.yml` fails with `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`.
 
 The module root is then `ModuleDevConfig::module_root` of that file (`root:` absent → the file's directory).
 
-After every mutation: updates `sb.module.yaml` **and** regenerates the language file under `<io_dir>/publishers/<name>.<ext>` (or `subscribers/`). `sb 0.5.0+`: a write also rewrites every legacy `topic: /...` entry in the file as `key:` and prints `  rewrote N legacy topic entry|entries as key: in <path>`.
+After every mutation: updates `sb.module.yaml` **and** regenerates the language file under `<io_dir>/publishers/<name>.<ext>` (or `subscribers/`, `services/`). `sb 0.5.0+`: a write also rewrites every legacy `topic: /...` entry in the file as `key:` and prints `  rewrote N legacy topic entry|entries as key: in <path>`.
 
-`sb 0.5.0+` load errors for an entry (prefixed `publishers[<i>]: ` or `subscribers[<i>]: `): `exactly one of topic: or key: is required (both given)`, `exactly one of topic: or key: is required (neither given)`, `topic "a/b" may not contain '/'; use key: for a verbatim wire key` (for a legacy `topic: a/b`, followed by a parenthetical naming `key: <device>/<ws>/<module>/<transport>/a/b`), `key: is empty`, and the encoding rules: `encoding: raw takes no type:`, `type: is required unless encoding: raw`, `mime: is only valid with encoding: raw`, `encoding: is only valid for transport: zenoh`.
+#### Conflict policy
+An add that collides with existing entries on name (any kind) or topic (publishers and subscribers) resolves a `ConflictPolicy`: `--force` removes every collider and its generated file, then adds (printing `  overwrote <role> <name>` per collider); `--skip-existing` writes nothing and exits 0 (`<role> skipped on module <m> (already exists)`); neither flag on a TTY prompts `[o]verwrite, [s]kip, [c]ancel?`; neither flag off a TTY is an error listing the colliders with their reason (`same name`, `same topic`, `same name + topic`) and the two flags (`sb_pubsub::apply_conflict_policy`).
 
-#### `sb list [--module <name>]`
-Render a table of all publishers and subscribers for the resolved module.
-- `--module <name>` (default: cwd) — target module.
-
-#### `sb pub list [--module <name>]`
-Same as `sb list` but filters to publishers only.
-
-#### `sb pub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
-Add a publisher.
-- `<topic>` (required unless `--key`): a bare name (`image_raw`), stored as `topic:`. `sb 0.5.0+`: may not contain `/`; a slashed value errors with `topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello`.
-- `--key <WIRE_KEY>` (`sb 0.5.0+`; conflicts with `<topic>`): a verbatim wire key (`dev01/ws/cam/iox2/image_raw`), stored as `key:` and used as is; a leading `/` is dropped. `sb` injects no `<transport>` segment, so the key must carry the one the flag implies.
-- `-m, --msg <MsgType>` (required) — message type from vault, e.g. `std/ImageStamped`.
-- `-n, --name <name>` (default: the bare `<topic>`, or the last segment of `--key`): identifier used in `sb.module.yaml` and as the generated filename.
-- `--iox2 | --zenoh` (default: from `sb.config.yml` — `transport_on_device` for same-device, `transport_cross_device` otherwise) — transport.
-- `--module <name>` (default: cwd) — target module.
-
-#### `sb pub edit <name> [OPTIONS]`
-Modify an existing publisher in-place. At least one of `-m` / `-t` / `--key` is required; with none, it errors `at least one of -m/--msg, -t/--topic, or --key is required`.
-- `<name>` (required) — existing publisher identifier.
-- `-m, --msg <MsgType>` (optional) — change message type.
-- `-t, --topic <topic>` (optional): change to an owned bare topic (`topic:`). `sb 0.5.0+`: bare only, may not contain `/`.
-- `--key <WIRE_KEY>` (optional, `sb 0.5.0+`; conflicts with `-t`): change to a verbatim wire key (`key:`); a leading `/` is dropped.
-- `--module <name>` (default: cwd) — target module.
-
-#### `sb pub rm <name> [--module <name>]`
-Remove a publisher and its generated file.
-- `<name>` (required)
-- `--module <name>` (default: cwd)
-
-#### `sb sub list [--module <name>]`
-List subscribers only.
-
-#### `sb sub add -m <MsgType> (<topic> | --key <WIRE_KEY>) [OPTIONS]`
-Add a subscriber.
-- `<topic>` (required unless `--key`): a bare name, as for `sb pub add` (`sb 0.5.0+`: may not contain `/`).
-- `--key <WIRE_KEY>` (`sb 0.5.0+`; conflicts with `<topic>`): a verbatim wire key, as for `sb pub add`. The way to subscribe to another module's publisher.
-- `-m, --msg <MsgType>` (required) — message type from vault, e.g. `std/StringStamped`. Mirrors `pub add` for consistency.
-- `--iox2 | --zenoh` (default: from `sb.config.yml`) — transport.
-- `--module <name>` (default: cwd) — target module.
-
-#### `sb sub edit <topic-or-key> [--module <name>]`
-Re-render the subscriber whose `topic:` or `key:` equals `<topic-or-key>` from current `sb.module.yaml` (useful after `sb.config.yml` defaults change). `sb 0.5.0+`: a leading `/` in the argument is ignored; a miss errors with `subscriber for topic/key "<x>" not found on module "<m>"`.
-
-#### `sb sub rm <topic-or-key> [--module <name>]`
-Remove a subscriber and its generated file. Matches `<topic-or-key>` as `sb sub edit` does.
+`sb 0.5.0+` load errors for an entry (prefixed `publishers[<i>]: ` or `subscribers[<i>]: `): `exactly one of topic: or key: is required (both given)`, `topic "a/b" may not contain '/'; use key: for a verbatim wire key` (for a legacy `topic: a/b`, followed by a parenthetical naming `key: <device>/<ws>/<module>/<transport>/a/b`), `key: is empty`, and the encoding rules: `encoding: raw takes no type:`, `type: is required unless encoding: raw`, `mime: is only valid with encoding: raw`, `encoding: is only valid for transport: zenoh`. `sb 0.6.0+`: an entry with neither `topic:` nor `key:` reads as `topic: <name>`.
 
 ---
 
 ### Module IO (`sb io`, `sb 0.5.0+`)
 
-Replaces `sb pub`, `sb sub`, `sb list`, and `sb service init`. Same `sb.module.yaml`, same templates, same module resolution (above); publishers, subscribers, and services share one name space per module. Shipped doc: `documents/sbcli_pubsub.md` §14.
+The only pub/sub and service surface since 0.7.0 (it replaced `sb pub`, `sb sub`, `sb list`, and `sb service init`, removed in 0.7.0). Module resolution and conflict policy as in §Pub/Sub; publishers, subscribers, and services share one name space per module. Shipped doc: `documents/sbcli_pubsub.md` §14.
 
 #### `sb io add pub (<topic> | --key <WIRE_KEY>) -m <Type> [--zenoh | --iox2] [--proto | --fb] [-n <name>] [--force | --skip-existing] [--module <name>]`
 #### `sb io add pub (<topic> | --key <WIRE_KEY>) --raw [<mime>] [--zenoh] ...`
@@ -533,15 +491,16 @@ Add a publisher / subscriber and render `<io_dir>/{publishers,subscribers}/<name
 - `--proto` (default, not written to disk) / `--fb` / `--raw [<mime>]` set `encoding:` (and `mime:`); `--raw [<mime>]` goes after the topic. `--raw --iox2`: `iceoryx2 payloads are typed; use a message with a bytes field and --iox2`; `--fb --iox2`: refused by `sb_pubsub`. `--fb` requires `<message_targets>/fb/<ns>/<Leaf>/` to exist: `flatbuffers backend not compiled for style <s>; run sb message compile <type> --fb`. `<mime>` must be `type/subtype` (`;` parameters allowed, no whitespace); `application/protobuf` and `application/flatbuffers` are refused for raw.
 - `-n, --name` default: the bare topic or the key's last segment; refused when already used by any publisher, subscriber, or service on the module: `name "<n>" is already used by <kind> "<n>" on module "<m>"; publishers, subscribers, and services share one name space`.
 - `--force` / `--skip-existing` / TTY prompt: the §Pub/Sub conflict policy (same name, or same topic among publishers and subscribers).
+- stdout: `added publisher|subscriber on module <m>`, then `  wrote <file>` and `  updated <manifest>`.
 
 #### `sb io add service <name>`
 Append `{ name }` to `services:` and render `<io_dir>/services/<name>.<ext>` (Rust, Python). Base key `<device>/<workspace>/<module>/zenoh/service/<name>`; a service named `service` uses the bare `.../zenoh/service` base (the default service).
 
 #### `sb io edit <name> [-m <Type>] [-t <topic> | --key <WIRE_KEY>] [--proto | --fb | --raw [<mime>]] [--module <name>]`
-Edit a publisher or subscriber by name; with no flag, only regenerate its file. Switching to raw drops `type:`; switching away from raw drops `mime:` and needs `-m`. No transport change (rm + add). Re-renders the file, writes `sb.module.yaml`. A service: `services have no editable fields; edit the file in <io_dir>/services`. Unknown name: `no publisher, subscriber, or service named "<n>" on module "<m>"`.
+Edit a publisher or subscriber by name; with no flag, only regenerate its file. Switching to raw drops `type:`; switching away from raw drops `mime:` and needs `-m`. No transport change (rm + add). Re-renders the file, writes `sb.module.yaml`. stdout: `edited publisher on module <m>` / `regenerated subscriber on module <m>` (a change), `regenerated on module <m>` (no flags; the manifest is written only to rewrite legacy `topic: /...` entries), then the file lines. A service: `services have no editable fields; edit the file in <io_dir>/services`. Unknown name: `no publisher, subscriber, or service named "<n>" on module "<m>"`.
 
 #### `sb io rm <name> [--module <name>]` / `sb io list [--module <name>]` (alias `ls`)
-`rm`: remove the entry of any kind and delete its generated file. `list`: the `sb list` table over publishers, subscribers, and services; read-only.
+`rm`: remove the entry of any kind and delete its generated file. `list`: a table with columns `role`, `name`, `type`, `topic`, `transport`, `encoding` over publishers, subscribers, and services (`(no publishers or subscribers)` when empty); read-only.
 
 #### `sb io update [<module> | --all] [--services]`
 Regenerate `swarmbotix_io/` from `sb.module.yaml` without changing it (`sb_pubsub::update_all`). Targets `<module>` (resolved as `--module`), else the cwd module when `./sb.module.yaml` exists, else (or with `--all`) every module of the active workspace's installed `sb.flow.yaml`, `up: false` included; an active workspace is required in every form. One line per module, `<module>: <w> written, <u> unchanged, <s> skipped[ (<entry>: <why>; ...)]`. A file whose rendered bytes match is `unchanged` and untouched; an entry that cannot render is `skipped` with its reason and the rest continue; any skip or module failure exits 1 (`<n> entr(y/ies) or module(s) could not be updated`). Services only with `--services` (their files are user-edited). The only `sb.module.yaml` write is rewriting legacy `topic: /...` entries as `key:`.
@@ -555,15 +514,9 @@ Regenerate `swarmbotix_io/` from `sb.module.yaml` without changing it (`sb_pubsu
 REST/FastAPI-style request-response over Zenoh queryables, JSON payloads only.
 Independent of pub/sub. Full reference: [documents/sbcli_reqres.md](documents/sbcli_reqres.md).
 
-`sb 0.5.0+`: a service is a `services:` entry in `sb.module.yaml` (`sb io add service <name>`), rendered to `<io_dir>/services/<name>.<ext>` and served under `<device>/<workspace>/<module>/zenoh/service/<name>/<route>`. `sb service init` below is deprecated in its favour.
+`sb 0.5.0+`: a service is a `services:` entry in `sb.module.yaml` (`sb io add service <name>`), rendered to `<io_dir>/services/<name>.<ext>` and served under `<device>/<workspace>/<module>/zenoh/service/<name>/<route>`; a service named `service` is the default service, served under `<device>/<workspace>/<module>/zenoh/service/<route>`. Since 0.7.0 that is the only way to add one. The user defines routes against the rendered router (`@app.get("/path")` / `app.get("/path", handler)`); clients call a route with a plain Zenoh `get` (no codegen).
 
-#### `sb service init [--module <name>]` (deprecated, `sb 0.5.0+`)
-Copy the static service router into the resolved module's io dir as
-`service.<ext>` (Rust/Python only), with the module's `device`/`workspace`/`module`
-namespace filled in. Re-run to refresh; overwrites the file. The user then
-defines routes against it (`@app.get("/path")` / `app.get("/path", handler)`),
-served on `<device>/<workspace>/<module>/zenoh/service/<route>`. Clients call a
-route with a plain Zenoh `get` (no codegen).
+`sb service init` (deprecated 0.5.0, removed 0.7.0) wrote the default router to `<io_dir>/service.<ext>` with no `services:` entry. A file it wrote keeps working as user code; nothing regenerates it.
 
 ---
 
@@ -654,7 +607,7 @@ Type resolution, per frame, first hit wins:
 3. The Header probe (`metadata.msg_type`, either Header layout `sb 0.4.2+`, see `sb topic list`) → `"header"`.
 4. The topic's entry in the module's `sb.module.yaml` → `"config"` (`sb 0.4.1+`; `ResolveOutcome::schema`). The entry's `type` is used verbatim. Bare topic: the cwd module's matched entry. Fully-qualified: `<module>` is looked up in the active workspace's `sb.flow.yaml` (`active_module_registry`), as written, then without its `-<instance>` suffix (everything from the first `-`; `ips_track-sb00` → `ips_track`); publishers then subscribers, the first entry whose transport equals the path's and whose `topic:` equals the path's last segment or whose `key:` equals the whole path (`sb_discover::config_schema`). Only the five-segment form is looked up, so a four-segment legacy key such as `dev01/demo/pubber/hello` never matches. The cwd `sb.module.yaml` is never consulted for a fully-qualified path. Any miss (no active workspace, unregistered module, unreadable `sb.module.yaml`, no entry, path not in the five-segment form) skips the source silently. On iceoryx2 a typed service always supplies a wire type first, so the source matters only for an untyped `[u8]` service; there, as with `--type`, the name matches no iox2 layout (the element is one byte), so the bytes are tried as protobuf, else hex with `schema` kept.
 
-No hit: hex, `schema: null`, and a one-time stderr hint to re-render the publisher (`sb pub edit <name> -m <type>`) or pass `--type`. A resolved type that does not decode prints hex with `schema` kept. `--raw` skips resolution entirely.
+No hit: hex, `schema: null`, and a one-time stderr hint to re-render the publisher (`sb io edit <name> -m <type>`) or pass `--type`. A resolved type that does not decode prints hex with `schema` kept. `--raw` skips resolution entirely.
 
 iceoryx2: the service is opened with its own registered payload type (read via `Service::list`, opened over `CustomPayloadMarker`), so typed sb-generated publishers are readable. The pre-0.4.0 `[u8]`-only open and its `IncompatibleTypes` failure are gone. The listener never creates the service; until it exists it waits, printing `waiting for iox2 service <name>...` once on stderr. Bodies decode against layouts flattened from the same per-style descriptor sets with the `sb.config.yml` caps (`string_array_cap`, `string_array_caps`, `bytes_caps`, `vec_caps`, `iox2_variants`), natural layout first, then packed. `schema` is the vault name (the base message for an `iox2_variants` type).
 
@@ -680,12 +633,12 @@ Human output: one `Pruned <N> dead iceoryx2 node(s):` block listing the cleaned 
 
 `sb 0.6.0+` (native launch): `sb` reads the installed flow, resolves each module's manifest for the host (`ModuleDevConfig::resolve(Host::current())`), runs every module's `build` inline (inherited stdio, in order, fail fast) **before any tmux call**, then opens one tmux/psmux window per instance in session `sb-<active_workspace>`. Window name: `instance_module(module, id)`, i.e. `<module>-<id>`, or `<module>` without instances. Each window runs the expanded `start` argv directly (no shell), with `-c <module root>`, one `-e KEY=VAL` per env entry (merged `env`, instance `env`, then `SB_WORKSPACE`, `SB_MODULE`, `SB_MODULE_ROOT`, and `SB_INSTANCE_ID` for an instance), and `--id <id>` appended after expansion for an instance; `remain-on-exit on`. Targets are exact: sessions as `=<session>`, windows by `#{window_id}`. Shipped docs: `documents/sbcli_launch.md`, `documents/sbcli_module.md`.
 
-Mode per module (`plan_*`): `scripts` declared anywhere, or no `runscript.bash` at the root → native; `runscript.bash` and no `scripts` → legacy (pre-0.6.0 behavior: `cd <root> && ./runscript.bash [args]` in one window per module, `stopscript.bash` on stop) with a `Deprecation`; both → native, the script ignored, with a `Deprecation`.
+`sb 0.7.0+`: every module is native. `runscript.bash` and `stopscript.bash` at a module root are never probed by `sb-launch` and never run; `sb ws check` / `sb doctor` list them in the `deprecated` row. 0.6.0 also had a legacy mode (`runscript.bash` and no `scripts` → `cd <root> && ./runscript.bash [args]` in one window per module, `stopscript.bash` on stop, with a `Deprecation`), removed in 0.7.0 with `PaneCmd::Legacy` and `StopPlan.legacy`.
 
 Before each build step stdout prints `building <module>: <argv joined by spaces>`.
 
 #### `sb up`
-Build and launch every module in the active workspace. Requires an active workspace. No passthrough args; instance `args` apply. Skips `up: false` modules (sb 0.5.0+), erroring with ``workspace "<ws>" has no modules to launch: every module in its flow has `up: false` (use `sb run <module>` to start one)`` when that leaves none (an empty flow: ``workspace "<ws>" has no modules in its flow; run `sb init` to adopt one``). Skips, printing `skipped <module>: <reason>` before any build, a module whose `platforms:` exclude the host (`not supported on <os>-<arch> (declares: <keys>)`), a Unity module (`unity modules have no start command (launch them from their editor)`), and a native module whose instances declare `docker:`; when everything left is skipped it errors with `workspace "<ws>" has nothing to launch on <os>-<arch>: <module>: <reason>; ...`. The session check (`ensure_no_session`) runs before the builds. Refuses an existing session. Warns on stderr (and continues) when the repo flow is newer than the installed copy (`sb_workspace::is_stale`). stdout:
+Build and launch every module in the active workspace. Requires an active workspace. No passthrough args; instance `args` apply. Skips `up: false` modules (sb 0.5.0+), erroring with ``workspace "<ws>" has no modules to launch: every module in its flow has `up: false` (use `sb run <module>` to start one)`` when that leaves none (an empty flow: ``workspace "<ws>" has no modules in its flow; run `sb init` to adopt one``). Skips, printing `skipped <module>: <reason>` before any build, a module whose `platforms:` exclude the host (`not supported on <os>-<arch> (declares: <keys>)`), a Unity module (`unity modules have no start command (launch them from their editor)`), and a module whose instances declare `docker:`; when everything left is skipped it errors with `workspace "<ws>" has nothing to launch on <os>-<arch>: <module>: <reason>; ...`. The session check (`ensure_no_session`) runs before the builds. Refuses an existing session. Warns on stderr (and continues) when the repo flow is newer than the installed copy (`sb_workspace::is_stale`). stdout:
 
 ```
 launched <n> window(s) in tmux session "<session>"
@@ -694,7 +647,7 @@ attach with: tmux attach -t <session>
 ```
 
 #### `sb run [--fg] <module>[:<id>] [args...]`
-Build one module, then start every instance (`<module>`) or one (`<module>:<id>`) in `sb-<workspace>`, creating the session on demand; windows that exist are respawned (`respawn-window -k`), the rest created, then windows named `<module>` / `<module>-*` not in the plan are closed. Ignores `up:`. Args after the target fill `{args}` after the instance's own `args`; `--` disambiguates from `sb`'s flags. No `--id` flag (a passthrough `--id` is just an arg). stdout, one line per window: `launched <window> in tmux session "<session>"` or `restarted <window> ...`, with ` (args: a b)` when args were given. Unsupported platform: refused. `--fg`: exactly one native pane; builds, then runs it in the foreground with inherited stdio (Unix `exec`, Windows spawn-and-wait) and exits with its code; replaces `SB_NO_TMUX=1`.
+Build one module, then start every instance (`<module>`) or one (`<module>:<id>`) in `sb-<workspace>`, creating the session on demand; windows that exist are respawned (`respawn-window -k`), the rest created, then windows named `<module>` / `<module>-*` not in the plan are closed. Ignores `up:`. Args after the target fill `{args}` after the instance's own `args`; `--` disambiguates from `sb`'s flags. No `--id` flag (a passthrough `--id` is just an arg). stdout, one line per window: `launched <window> in tmux session "<session>"` or `restarted <window> ...`, with ` (args: a b)` when args were given. Unsupported platform: refused. `--fg`: exactly one native pane; builds, then runs it in the foreground with inherited stdio (Unix `exec`, Windows spawn-and-wait) and exits with its code (the replacement for the 0.5 launch scripts' `SB_NO_TMUX=1`).
 
 ```bash
 sb run cam_gige_ht                    # all instances
@@ -704,7 +657,7 @@ sb run --fg ips_viz                   # foreground, no tmux
 ```
 
 #### `sb stop <module> [args...]`
-Native: kill every window named `<module>` or `<module>-<anything>` by window id, then run `scripts.stop` inline (module root, module env, `{args}` from the args) when declared. stdout: `stopped <module>: closed <k> window(s) [<w1>, <w2>]`, then `ran scripts.stop for <module>` when it ran. If that empties the session, tmux ends it. Legacy modules with a `stopscript.bash` keep the pre-0.6.0 respawn path and output; a legacy module without one has its window closed like a native module (no longer an error). `sb stop <module>:<id>` is refused.
+Native: kill every window named `<module>` or `<module>-<anything>` by window id, then run `scripts.stop` inline (module root, module env, `{args}` from the args) when declared. stdout: `stopped <module>: closed <k> window(s) [<w1>, <w2>]`, then `ran scripts.stop for <module>` when it ran. If that empties the session, tmux ends it. `sb 0.7.0+` never runs a `stopscript.bash` (0.6.0 still ran it, by respawning the window, for a legacy module). `sb stop <module>:<id>` is refused.
 
 #### `sb down`
 Kill `sb-<workspace>` (exact target) and all its windows. No arguments. Coarser than `sb stop`: runs no `scripts.stop`.
@@ -732,7 +685,7 @@ An **app package** is a folder with an `sb.app.yml` at its root. It is not a mod
 Write a fully commented `sb.app.yml` into `path` (default cwd) plus executable stubs for a missing entry and, for `--kind host`, a missing `install.bash`. Prompts for name / entry / kind / image on a TTY when `--kind` is absent; otherwise kind defaults to `none` (or `docker` when `--image` is given). Name defaults to the sanitised folder name and must pass `validate_identifier` and not be an `sb` built-in. The manifest is validated before being written. Existing scripts are never overwritten; `sb.app.yml` only with `--force`.
 
 #### `sb install <url|path> [--prefetch]` (alias `sb app install`)
-- `sb 0.5.0+`: the source's root manifest decides: `sb.app.yml` → app (below); `sb.flow.yaml` (or legacy `flow.yaml`) → workspace (§Workspaces, `sb install`); both or neither → error.
+- `sb 0.5.0+`: the source's root manifest decides: `sb.app.yml` → app (below); `sb.flow.yaml` → workspace (§Workspaces, `sb install`); both or neither → error (`sb 0.7.0+`: a root with only `flow.yaml` fails with the §Deprecations flow error).
 - Source: git URL (`https://`, `http://`, `ssh://`, `git://`, `file://`, `git@…`, or anything ending in `.git`), optionally `@<branch-or-tag>`; else a local folder, tilde-expanded and canonicalised.
 - Git sources are shallow-cloned into `<sb_home>/apps/<manifest.name>/`; the same URL again fast-forwards, a different `@ref` replaces the clone. Local folders are registered in place: never copied, never deleted.
 - Steps: resolve source → load + validate `sb.app.yml` → claim name (built-in or taken by another folder = error) → kind step (`none`: nothing; `docker`: `docker pull <image>` only if `prefetch: true` or `--prefetch`; `host`: `bash <host.install>` from the package root, non-zero aborts) → check `requires` on PATH (warnings) → write `<sb_home>/apps.yml`.
@@ -794,7 +747,7 @@ Print `sb <version>`, then read merged `sb.config.yml` and run twelve checks, in
 8. `unity targets` — stale generated C# inside a Unity project (see §Generated-code language levels). **Warns**, never fails.
 9. `config keys` — the dead `message_style` / `message_definitions` / `message_targets` keys, if still present.
 10. `std vault` — `~/.swarmbotix/messages/ros2/message_definitions/std/` populated; names `sb message list` as the re-install path.
-11. `topics` (`sb 0.5.0+`): legacy `topic: /...` entries in the modules of the active workspace. `` [OK]   topics       no legacy `topic: /...` entries in the active workspace ``; `[SKIP] topics       no active workspace`; otherwise one `[WARN] topics` row per offending module, naming the module, then a continuation line per entry with both forms, then the rewrite command. **Warns**, never fails.
+11. `topics` (`sb 0.5.0+`): legacy `topic: /...` entries in the modules of the active workspace. `` [OK]   topics       no legacy `topic: /...` entries in the active workspace ``; `[SKIP] topics       no active workspace`; otherwise one `[WARN] topics` row per offending module, naming the module, then a continuation line per entry with both forms, then the rewrite command (`sb 0.7.0+`: ``rewrite: `sb io edit <first entry> --module <module>` ``). **Warns**, never fails.
 12. `workspace` and `ws *` (`sb 0.5.0+`): the `sb ws check` rows for the active workspace (`workspace`, `ws modules`, `ws types`, `ws instances`, `ws encoding`, `ws io files`, and `sb 0.6.0+` `ws requires`, `ws platforms`, `ws wires`, `deprecated`, then `ws source`; see §Workspaces). `WorkspaceView` carries the `Host`. `[SKIP] workspace no active workspace` without one. A `[FAIL]` here **counts toward the exit code** (it breaks `sb up` or codegen); `ws io files`, `ws platforms`, `deprecated`, and `ws source` only warn.
 
 No Python-package check exists, so a `pip`-installed transport is never compared against check 3. An unset path field is `[SKIP]`, not `[FAIL]`.
@@ -942,30 +895,41 @@ Three surfaces, one core:
 | Linux / macOS | tmux | `apt/brew install tmux` |
 | Windows | psmux | `winget install psmux` |
 
-psmux is tmux-compatible — ships as the `tmux` command on Windows. `sb` calls `tmux` on all platforms; on Windows `resolve_tmux` also falls back to `psmux` on `PATH`. `sb 0.6.0+` hands tmux the start argv as separate trailing arguments (two or more are executed directly, without a shell, from tmux 3.0; a single-token argv is passed as one quoted string), which is what lets psmux run native modules; legacy `runscript.bash` panes remain a POSIX command line psmux cannot run. psmux's handling of `-e`, multi-argument exec, and `remain-on-exit` is to be verified on a Windows box.
+psmux is tmux-compatible — ships as the `tmux` command on Windows. `sb` calls `tmux` on all platforms; on Windows `resolve_tmux` also falls back to `psmux` on `PATH`. `sb 0.6.0+` hands tmux the start argv as separate trailing arguments (two or more are executed directly, without a shell, from tmux 3.0; a single-token argv is passed as one quoted string), which is what lets psmux run native modules (0.6.0's legacy `runscript.bash` panes were a POSIX command line psmux could not run; they are gone in 0.7.0). psmux's handling of `-e`, multi-argument exec, and `remain-on-exit` is to be verified on a Windows box.
 
 ---
 
-## Deprecations (sb 0.6.0)
+## Deprecations (sb 0.6.0) and removals (sb 0.7.0)
 
-| item | since | removed | replacement |
+`sb 0.7.0+` has no active deprecations: every item below is removed in the release named in the table.
+
+| item | deprecated since | removed in | replacement |
 |---|---|---|---|
 | `sb pub`, `sb sub`, `sb list`, `sb service` | 0.5.0 (help only), 0.6.0 (warning) | 0.7.0 | `sb io` |
 | `sb.dev.yml` | 0.6.0 | 0.7.0 | `sb.module.yaml` |
 | `flow.yaml` | 0.6.0 | 0.7.0 | `sb.flow.yaml` |
 | `runscript.bash` | 0.6.0 | 0.7.0 | `scripts:` in `sb.module.yaml` |
 | `stopscript.bash` | 0.6.0 | 0.7.0 | `scripts.stop`, or nothing |
+| `sb init --runscript` and its stub template | 0.6.0 | 0.7.0 | none (`runscript.rs` deleted) |
 | top-level `instances:` in the flow | 0.6.0 | 0.7.0 | `instances` under the module entry |
-| `sb init --docker` bash template | 0.6.0 | 0.6.0 | `instances[].docker`, launched natively (later release); meanwhile keep the module's existing docker `runscript.bash` (legacy path), or drop `docker:` and start the container from `scripts.start` |
+| `sb init --docker` bash template | 0.6.0 | 0.6.0 | `instances[].docker`, launched natively (later release); meanwhile drop `docker:` and start the container from `scripts.start` (`sb init --docker` stays, as an instance preflight) |
 | `SB_NO_TMUX=1` | 0.6.0 | 0.7.0 | `sb run --fg` |
 
-Warning format (`crates/sb-cli/src/deprecation.rs`, `warn_deprecated` / `warn_all`), stderr, once per item per process, never on stdout:
+What 0.7.0 does with each (the errors name the replacement for one minor version):
+
+- The four verbs: gone from `Cmd`, with no hidden alias. The name falls through to the app launcher, which answers ``error: `<verb>` is not an sb command or an installed app.`` (with a spelling guess when one is close) and exits 1.
+- `sb.dev.yml` with no `sb.module.yaml` (`sb install`, `sb init`, `sb io`, `sb doctor`): `module manifest sb.module.yaml not found at <dir>; sb.dev.yml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`.
+- `flow.yaml` with no `sb.flow.yaml` (`sb install`, `find_flow_upwards`, `read_flow`): `sb.flow.yaml not found at <dir>; flow.yaml is no longer read since 0.7.0, rename it (see sbcli_module.md §Migrating)`.
+- A top-level `instances:` map: `top-level instances: is no longer read since 0.7.0; move each list under modules.<name>.instances (see sbcli_module.md §Migrating)` (`probe_legacy_flow_keys`, before the strict parse).
+- `runscript.bash` / `stopscript.bash`: no error; ignored, and listed by the doctor `deprecated` row as `runscript.bash at <path> is ignored since 0.7.0 (see sbcli_module.md §Migrating)` (likewise `sb.dev.yml at`, `flow.yaml at`, `stopscript.bash at` for any leftover file). OK text unchanged: `nothing deprecated in use`.
+
+Kept for future deprecations, with no item using them in 0.7.0: `sb_core::Deprecation`, `deprecation::warn_deprecated` / `warn_all` (`crates/sb-cli/src/deprecation.rs`), and the warning format, stderr, once per item per process, never on stdout:
 
 ```
-warning: <item> is deprecated since 0.6.0 and will be removed in 0.7.0; <hint>
+warning: <item> is deprecated since <SINCE> and will be removed in <UNTIL>; <hint>
 ```
 
-Help strings of the four verbs: `Deprecated since 0.5.0, removed in 0.7.0: use ...`. From 0.7.0 the legacy names are no longer read and, for one minor version, the error names the replacement. Shipped migration guide: `documents/sbcli_module.md` §11.
+Shipped table: `documents/sbcli.md` §10. Shipped migration guide: `documents/sbcli_module.md` §11 ("Migrating from 0.5 (required since 0.7.0)").
 
 ---
 

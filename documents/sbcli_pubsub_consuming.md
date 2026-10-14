@@ -1,6 +1,6 @@
 # Consuming `sb io` Codegen: Per-Language Integration
 
-`sb io add` (sb 0.5.0+; the deprecated `sb pub add` / `sb sub add` generate the same files) produces files under `<module>/<io_dir>/{publishers,subscribers,services}/<name>.<ext>`. It does **not** produce the entry-point (`main.cpp`, `main.py`, `src/main.rs`) or the build glue (`CMakeLists.txt`, `pyproject.toml`, `Cargo.toml`). This doc covers the hand-off: how to write your entry-point + build files so they correctly consume the generated structure and, crucially, how to refer to topics so your code doesn't drift the moment the user renames a workspace, flips a transport, or runs multiple instances.
+`sb io add` (sb 0.5.0+) produces files under `<module>/<io_dir>/{publishers,subscribers,services}/<name>.<ext>`. It does **not** produce the entry-point (`main.cpp`, `main.py`, `src/main.rs`) or the build glue (`CMakeLists.txt`, `pyproject.toml`, `Cargo.toml`). This doc covers the hand-off: how to write your entry-point + build files so they correctly consume the generated structure and, crucially, how to refer to topics so your code doesn't drift the moment the user renames a workspace, flips a transport, or runs multiple instances.
 
 The worked examples in §5 to §7 use iceoryx2. For Zenoh entries, and the typed protobuf API they get (sb 0.5.0+), see §8.1.
 

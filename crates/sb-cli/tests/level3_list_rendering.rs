@@ -1,16 +1,17 @@
-//! L3 TDD #8 — `sb list` / `sb pub list` / `sb sub list` rendering.
+//! L3 TDD #8 — `sb io list` rendering.
 
 mod common;
 use common::L3Sandbox;
 
 #[test]
-fn sb_list_shows_both_publishers_and_subscribers() {
+fn sb_io_list_shows_both_publishers_and_subscribers() {
     let s = L3Sandbox::rust("dual");
     let _ = s
         .cmd_in_module()
         .args([
-            "pub",
+            "io",
             "add",
+            "pub",
             "-m",
             "ros2/std/StringStamped",
             "hello",
@@ -21,8 +22,9 @@ fn sb_list_shows_both_publishers_and_subscribers() {
     let _ = s
         .cmd_in_module()
         .args([
-            "sub",
+            "io",
             "add",
+            "sub",
             "-m",
             "ros2/std/ImageStamped",
             "image_raw",
@@ -31,8 +33,8 @@ fn sb_list_shows_both_publishers_and_subscribers() {
         .output()
         .unwrap();
 
-    let out = s.cmd_in_module().args(["list"]).output().unwrap();
-    assert!(out.status.success(), "sb list failed: {out:?}");
+    let out = s.cmd_in_module().args(["io", "list"]).output().unwrap();
+    assert!(out.status.success(), "sb io list failed: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("role"), "header missing: {stdout}");
     assert!(stdout.contains("hello"), "pub missing: {stdout}");

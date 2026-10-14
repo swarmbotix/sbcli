@@ -18,9 +18,8 @@
 //! ([`find_entry`]); adding an entry whose name is taken by any of the
 //! three is refused.
 //!
-//! The manifest is `sb.module.yaml`, or a legacy `sb.dev.yml` when that
-//! is the file the module has; it is always written back to the file it
-//! was read from.
+//! The manifest is `sb.module.yaml`; it is always written back to the
+//! file it was read from. A 0.5 `sb.dev.yml` is not read since 0.7.0.
 //!
 //! Filesystem state owned by this crate (per module):
 //!
@@ -40,10 +39,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use sb_codegen::{CodegenInput, Kind, Rendered};
 use sb_core::{
     Encoding, EntryKind, Language, LegacyTopic, ModuleDevConfig, PubSpec, SbCliConfig, ServiceSpec,
-    SubSpec, TopicRef, Transport, legacy_topics_in, module_file_candidates,
+    SubSpec, TopicRef, Transport, current_manifest_path, legacy_topics_in,
 };
 use sb_vault::{MessageName, Vault};
-use sb_workspace::{MODULE_FILE, SbHome, active_workspace, find_module_file, read_flow};
+use sb_workspace::{
+    MODULE_FILE, SbHome, active_workspace, find_module_file, new_module_file, read_flow,
+    refuse_removed_module_file,
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Module resolution — the three lookup rules from level3.html
@@ -53,7 +55,7 @@ use sb_workspace::{MODULE_FILE, SbHome, active_workspace, find_module_file, read
 /// disk + the parsed config. Created by [`resolve_module`].
 #[derive(Debug, Clone)]
 pub struct ModuleHandle {
-    /// The manifest file: `sb.module.yaml`, or a legacy `sb.dev.yml`.
+    /// The manifest file (`sb.module.yaml`).
     pub dev_yml_path: PathBuf,
     /// [`ModuleDevConfig::module_root`] of `config` for `dev_yml_path`.
     pub module_root: PathBuf,
@@ -71,9 +73,9 @@ impl ModuleHandle {
     }
 }
 
-/// Resolve which module manifest `sb pub/sub *` should operate on. A
-/// module directory is probed for `sb.module.yaml`, then the legacy
-/// `sb.dev.yml`.
+/// Resolve which module manifest `sb io *` should operate on. A module
+/// directory is probed for `sb.module.yaml` only; one that holds just a
+/// 0.5 `sb.dev.yml` is refused with the 0.7.0 rename hint.
 ///
 /// Order (highest priority first), per level3.html §"Module resolution":
 ///   1. `explicit = Some(name)` AND `./<name>/` holds a manifest in `cwd`.
@@ -89,22 +91,26 @@ pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Resu
             if let Some(found) = find_module_file(&child) {
                 return load_handle(&found);
             }
-            let mut tried: Vec<PathBuf> = module_file_candidates()
-                .into_iter()
-                .map(|file| child.join(file))
-                .collect();
-            // Rule 2 — active workspace's flow.
+            let mut tried: Vec<PathBuf> = vec![new_module_file(&child)];
+            // Rule 2 — active workspace's flow. An installed copy written
+            // before 0.7.0 may record `.../sb.dev.yml`; that stands for
+            // the `sb.module.yaml` beside it.
             if let Some(ws) = active_workspace(home)? {
                 let flow = read_flow(home, &ws)?;
                 if let Some(m) = flow.modules.get(name) {
-                    tried.push(m.path.clone());
-                    if m.path.exists() {
-                        return load_handle(&m.path);
+                    let manifest = current_manifest_path(&m.path);
+                    tried.push(manifest.clone());
+                    if manifest.is_file() {
+                        return load_handle(&manifest);
+                    }
+                    if let Some(dir) = manifest.parent() {
+                        refuse_removed_module_file(dir)?;
                     }
                 } else {
                     tried.push(home.flow_path(&ws));
                 }
             }
+            refuse_removed_module_file(&child)?;
             bail!(
                 "module {name:?} not found. Searched:\n  - {}",
                 tried
@@ -119,6 +125,7 @@ pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Resu
             if let Some(found) = find_module_file(cwd) {
                 return load_handle(&found);
             }
+            refuse_removed_module_file(cwd)?;
             bail!(
                 "no module manifest ({MODULE_FILE}) in cwd ({}). Pass --module <name> or `cd` \
                  into a module dir.",
@@ -707,7 +714,7 @@ pub fn pub_add(
     // across publishers, subscribers, and services (a topic can only have
     // one role per module; a name only one entry).
     let colliders = find_pub_colliders(&handle.config, &name, args.topic, transport);
-    let Some(overwrote) = apply_conflict_policy(handle, colliders, args.policy, "sb pub add")?
+    let Some(overwrote) = apply_conflict_policy(handle, colliders, args.policy, "sb io add pub")?
     else {
         return Ok(MutationOutcome::skipped(Action::PubAdd));
     };
@@ -921,7 +928,7 @@ pub fn sub_add(
     })?;
 
     let colliders = find_sub_colliders(&handle.config, &name, args.topic, transport);
-    let Some(overwrote) = apply_conflict_policy(handle, colliders, args.policy, "sb sub add")?
+    let Some(overwrote) = apply_conflict_policy(handle, colliders, args.policy, "sb io add sub")?
     else {
         return Ok(MutationOutcome::skipped(Action::SubAdd));
     };

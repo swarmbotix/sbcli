@@ -12,7 +12,7 @@ use sb_core::ModulePrdConfig;
 #[test]
 fn gopro_preserves_full_pub_sub_lists() {
     let mut sb = L5Sandbox::empty();
-    let m = sb.adopt("camera", Some("#!/usr/bin/env bash\nexit 0\n"));
+    let m = sb.adopt("camera");
 
     // Three publishers, two subscribers, mixed transports. Use --force so
     // we don't need to inspect colliders.
@@ -24,12 +24,12 @@ fn gopro_preserves_full_pub_sub_lists() {
         let out = sb
             .cmd()
             .current_dir(&m.root)
-            .args(["pub", "add", "-m", msg, topic, tr, "--force"])
+            .args(["io", "add", "pub", "-m", msg, topic, tr, "--force"])
             .output()
             .unwrap();
         assert!(
             out.status.success(),
-            "sb pub add {topic} failed: {}\n{}",
+            "sb io add pub {topic} failed: {}\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );
@@ -41,12 +41,12 @@ fn gopro_preserves_full_pub_sub_lists() {
         let out = sb
             .cmd()
             .current_dir(&m.root)
-            .args(["sub", "add", "-m", msg, topic, tr, "--force"])
+            .args(["io", "add", "sub", "-m", msg, topic, tr, "--force"])
             .output()
             .unwrap();
         assert!(
             out.status.success(),
-            "sb sub add {topic} failed: {}\n{}",
+            "sb io add sub {topic} failed: {}\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );

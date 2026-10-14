@@ -1,22 +1,17 @@
 //! L5: launch modules in a tmux/psmux session.
 //!
 //! `sb up` reads the active workspace's installed flow, loads every module
-//! manifest (`sb.module.yaml`, or the deprecated `sb.dev.yml`), merges it
-//! for the host ([`ModuleDevConfig::resolve`]), runs each module's build
-//! inline, and then creates a tmux session named `sb-<workspace>` with one
-//! window per instance: `<module>-<id>`, or `<module>` for a module without
-//! instances.
+//! manifest (`sb.module.yaml`), merges it for the host
+//! ([`ModuleDevConfig::resolve`]), runs each module's build inline, and then
+//! creates a tmux session named `sb-<workspace>` with one window per
+//! instance: `<module>-<id>`, or `<module>` for a module without instances.
 //!
-//! Each module launches in one of two modes:
-//!
-//! - **Native**: the manifest declares `scripts:` (top level or under a
-//!   platform), or the module root has no `runscript.bash`. sb runs the
-//!   resolved `start` argv itself, with tmux `-c <root>`, one `-e` per
-//!   environment variable, the argv as separate arguments (no shell), and
-//!   `--id <id>` appended per instance.
-//! - **Legacy** (deprecated since 0.6.0): `runscript.bash` present and no
-//!   `scripts:`. The pane runs `cd <root> && <root>/runscript.bash <args>`,
-//!   exactly as before 0.6.
+//! Every module launches natively: sb runs the resolved `start` argv itself,
+//! with tmux `-c <root>`, one `-e` per environment variable, the argv as
+//! separate arguments (no shell), and `--id <id>` appended per instance.
+//! Since 0.7.0 a `runscript.bash` or `stopscript.bash` at the module root is
+//! ignored (`sb doctor` lists it), and a module directory that holds only
+//! the pre-0.6 `sb.dev.yml` is refused with a rename hint.
 //!
 //! Plan, then execute: the `plan_*` functions check every precondition
 //! (flow, manifests, platform support, placeholder expansion) and
@@ -40,27 +35,22 @@ use anyhow::{Context, Result, anyhow, bail};
 use sb_core::expand::{ExpandCtx, ExpandError, expand_argv, expand_str};
 use sb_core::topic::instance_module;
 use sb_core::{
-    Deprecation, FLOW_FILE, Host, LEGACY_MODULE_FILE, MODULE_FILE, ManifestError,
-    ModuleDevConfig, ModuleInstance, Resolved, WorkspaceFlow, is_legacy_module_file,
-    python_fallback, python_venv_relpath,
+    Deprecation, Host, MODULE_FILE, ManifestError, ModuleDevConfig, ModuleInstance, Resolved,
+    WorkspaceFlow, current_manifest_path, python_fallback, python_venv_relpath,
 };
-use sb_workspace::{SbHome, find_module_file, read_flow};
+use sb_workspace::{SbHome, find_module_file, read_flow, refuse_removed_module_file};
 
 /// One argv, already split (the same type as `sb_core::Argv`).
 type Argv = Vec<String>;
 
-/// Workspace name, exported to every native pane and build.
+/// Workspace name, exported to every pane and build.
 pub const ENV_WORKSPACE: &str = "SB_WORKSPACE";
-/// Manifest `module:` name, exported to every native pane and build.
+/// Manifest `module:` name, exported to every pane and build.
 pub const ENV_MODULE: &str = "SB_MODULE";
-/// Instance id, exported to a native pane that runs one instance.
+/// Instance id, exported to a pane that runs one instance.
 pub const ENV_INSTANCE_ID: &str = "SB_INSTANCE_ID";
-/// Absolute module root (forward slashes), exported to every native pane and build.
+/// Absolute module root (forward slashes), exported to every pane and build.
 pub const ENV_MODULE_ROOT: &str = "SB_MODULE_ROOT";
-
-const RUNSCRIPT: &str = "runscript.bash";
-const STOPSCRIPT: &str = "stopscript.bash";
-const MIGRATING: &str = "see sbcli_module.md §Migrating";
 
 // ─────────────────────────────────────────────────────────────────────
 // Session name + plan types
@@ -73,18 +63,7 @@ pub fn session_name(workspace: &str) -> String {
     format!("sb-{workspace}")
 }
 
-/// What a pane runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaneCmd {
-    /// Deprecated: `cd <cwd> && <script> <args>` through the pane's shell.
-    Legacy { script: PathBuf, args: Vec<String> },
-    /// The module's process itself. `argv` is fully expanded (instance
-    /// args, passthrough args and `--id <id>` included); `env` is fully
-    /// merged, `SB_*` variables included.
-    Native { argv: Argv, env: BTreeMap<String, String> },
-}
-
-/// One tmux window in a launch plan.
+/// One tmux window in a launch plan: the module's process itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pane {
     /// The manifest's `module:` name.
@@ -95,44 +74,11 @@ pub struct Pane {
     pub instance: Option<String>,
     /// Module root; the pane starts here (tmux `-c`).
     pub cwd: PathBuf,
-    pub cmd: PaneCmd,
-}
-
-impl Pane {
-    /// True for a [`PaneCmd::Native`] pane.
-    pub fn is_native(&self) -> bool {
-        matches!(self.cmd, PaneCmd::Native { .. })
-    }
-
-    /// The pane's command as one POSIX shell line, every word
-    /// single-quoted.
-    ///
-    /// Legacy: `cd '<cwd>' && '<script>' '<arg>'...`, the string tmux hands
-    /// to the pane's shell, so the script's relative paths resolve from the
-    /// module root and an arg like `"foo bar"` survives both layers of shell
-    /// parsing. Native: the argv, quoted word by word (for display, and for
-    /// the one-word case where tmux would otherwise run a shell anyway).
-    pub fn shell_command(&self) -> String {
-        match &self.cmd {
-            PaneCmd::Legacy { script, args } => {
-                let mut cmd = format!(
-                    "cd {} && {}",
-                    shell_quote(&self.cwd.display().to_string()),
-                    shell_quote(&script.display().to_string()),
-                );
-                for arg in args {
-                    cmd.push(' ');
-                    cmd.push_str(&shell_quote(arg));
-                }
-                cmd
-            }
-            PaneCmd::Native { argv, .. } => argv
-                .iter()
-                .map(|a| shell_quote(a))
-                .collect::<Vec<_>>()
-                .join(" "),
-        }
-    }
+    /// Fully expanded: instance args, passthrough args and `--id <id>`
+    /// included.
+    pub argv: Argv,
+    /// Fully merged, `SB_*` variables included.
+    pub env: BTreeMap<String, String>,
 }
 
 /// One module's inline commands (`scripts.build`, or `scripts.stop`), run
@@ -153,16 +99,18 @@ pub struct BuildStep {
 pub struct LaunchPlan {
     pub workspace: String,
     pub session: String,
-    /// One per native module that has build commands, in pane order.
+    /// One per module that has build commands, in pane order.
     pub builds: Vec<BuildStep>,
     pub panes: Vec<Pane>,
     /// `(module, reason)` for modules `sb up` leaves out on this host.
     pub skipped: Vec<(String, String)>,
+    /// Deprecated input found while planning, for the CLI to announce.
+    /// Nothing sb-launch reads is deprecated in 0.7.0, so this is empty;
+    /// it stays so the next deprecation reaches the CLI the same way.
     pub deprecations: Vec<Deprecation>,
     /// Modules whose every instance is in this plan. [`run`] closes their
     /// `<module>` / `<module>-*` windows that the plan no longer names
-    /// (instances removed from the flow). Empty for `<module>:<id>` targets
-    /// and for legacy modules.
+    /// (instances removed from the flow). Empty for `<module>:<id>` targets.
     pub prune: Vec<String>,
 }
 
@@ -187,11 +135,9 @@ pub struct StopPlan {
     /// The manifest's `module:` name; every `<module>` and `<module>-*`
     /// window belongs to it.
     pub module: String,
-    /// Some: a legacy module with a `stopscript.bash`, run in the module's
-    /// window as before 0.6.
-    pub legacy: Option<Pane>,
     /// Some: `scripts.stop`, run inline after the windows are closed.
     pub stop: Option<BuildStep>,
+    /// As [`LaunchPlan::deprecations`]: empty in 0.7.0.
     pub deprecations: Vec<Deprecation>,
 }
 
@@ -211,16 +157,10 @@ pub fn plan_workspace(home: &SbHome, workspace: &str, host: &Host) -> Result<Lau
         bail!("workspace {workspace:?} has no modules in its flow; run `sb init` to adopt one");
     }
     let mut plan = LaunchPlan::new(workspace);
-    flow_deprecations(&flow, &mut plan.deprecations);
     for (key, entry) in flow.modules.iter().filter(|(_, m)| m.up) {
         let lm = load_module(key, &entry.path)?;
-        push_unique(&mut plan.deprecations, &lm.deprecations);
         if !lm.dev.supports_host(host) {
             plan.skipped.push((key.clone(), unsupported_reason(&lm.dev, host)));
-            continue;
-        }
-        if lm.mode == Mode::Legacy {
-            plan.panes.push(legacy_pane(&lm, RUNSCRIPT, &[]));
             continue;
         }
         let resolved = match lm.dev.resolve(host) {
@@ -275,10 +215,9 @@ pub fn plan_workspace(home: &SbHome, workspace: &str, host: &Host) -> Result<Lau
 /// Plan `sb run <target> [args...]`.
 ///
 /// `target` is `<module>` (every instance) or `<module>:<id>` (one
-/// instance). `args` are appended after each instance's own `args` (or
-/// forwarded verbatim to a legacy `runscript.bash`). `up: false` is
-/// ignored here: it only keeps a module out of `sb up`. An unsupported
-/// platform is an error that names the supported ones.
+/// instance). `args` are appended after each instance's own `args`.
+/// `up: false` is ignored here: it only keeps a module out of `sb up`. An
+/// unsupported platform is an error that names the supported ones.
 pub fn plan_run(
     home: &SbHome,
     workspace: &str,
@@ -291,21 +230,8 @@ pub fn plan_run(
     let entry = registered(&flow, workspace, key)?;
     let lm = load_module(key, &entry.path)?;
     let mut plan = LaunchPlan::new(workspace);
-    flow_deprecations(&flow, &mut plan.deprecations);
-    push_unique(&mut plan.deprecations, &lm.deprecations);
     if !lm.dev.supports_host(host) {
         bail!("module {key:?} is {}", unsupported_reason(&lm.dev, host));
-    }
-    if lm.mode == Mode::Legacy {
-        if let Some(id) = id {
-            bail!(
-                "module {key:?} still launches through {RUNSCRIPT}, which has no instance \
-                 targets; declare scripts: in its {MODULE_FILE} to run {key}:{id}, or pass \
-                 --id {id} to the script (`sb run {key} --id {id}`)"
-            );
-        }
-        plan.panes.push(legacy_pane(&lm, RUNSCRIPT, args));
-        return Ok(plan);
     }
     let resolved = lm.dev.resolve(host).map_err(|e| resolve_error(&lm, e))?;
     let instances = flow.instances_for(key);
@@ -345,13 +271,9 @@ pub fn plan_run(
     Ok(plan)
 }
 
-/// Plan `sb stop <module> [args...]`.
-///
-/// Native: close every `<module>` / `<module>-*` window, then run
-/// `scripts.stop` (with `args` available as `{args}`) if the manifest
-/// declares one. Legacy with a `stopscript.bash`: run it in the module's
-/// window with `args`, as before 0.6. Legacy without one: close the
-/// windows.
+/// Plan `sb stop <module> [args...]`: close every `<module>` /
+/// `<module>-*` window, then run `scripts.stop` (with `args` available as
+/// `{args}`) if the manifest declares one.
 pub fn plan_stop(
     home: &SbHome,
     workspace: &str,
@@ -371,33 +293,9 @@ pub fn plan_stop(
     let mut plan = StopPlan {
         session: session_name(workspace),
         module: lm.dev.module.clone(),
-        legacy: None,
         stop: None,
-        deprecations: lm.deprecations.clone(),
+        deprecations: Vec::new(),
     };
-    let has_stopscript = lm.root.join(STOPSCRIPT).is_file();
-    if lm.mode == Mode::Legacy {
-        if has_stopscript {
-            plan.deprecations.push(Deprecation {
-                item: STOPSCRIPT.to_string(),
-                hint: format!(
-                    "declare scripts.stop in {MODULE_FILE}, or nothing (sb closes the \
-                     windows itself); {MIGRATING}"
-                ),
-            });
-            plan.legacy = Some(legacy_pane(&lm, STOPSCRIPT, args));
-        }
-        return Ok(plan);
-    }
-    if has_stopscript {
-        plan.deprecations.push(Deprecation {
-            item: STOPSCRIPT.to_string(),
-            hint: format!(
-                "{module} launches natively, so its {STOPSCRIPT} is ignored; use \
-                 scripts.stop in {MODULE_FILE}, or nothing ({MIGRATING})"
-            ),
-        });
-    }
     match lm.dev.resolve(host) {
         Ok(resolved) => {
             plan.stop = Native::new(&lm, resolved, workspace, host)?.stop_step(args)?;
@@ -436,14 +334,7 @@ fn parse_target(target: &str) -> Result<(&str, Option<&str>)> {
     }
 }
 
-/// How a module launches; see the crate docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Native,
-    Legacy,
-}
-
-/// A module manifest read from disk, with its launch mode decided.
+/// A module manifest read from disk.
 struct LoadedModule {
     /// Key in the flow's `modules:` map.
     key: String,
@@ -451,9 +342,6 @@ struct LoadedModule {
     dev: ModuleDevConfig,
     /// Absolute module root.
     root: PathBuf,
-    mode: Mode,
-    /// Legacy manifest name, legacy or ignored `runscript.bash`.
-    deprecations: Vec<Deprecation>,
 }
 
 fn load_module(key: &str, entry: &Path) -> Result<LoadedModule> {
@@ -466,49 +354,24 @@ fn load_module(key: &str, entry: &Path) -> Result<LoadedModule> {
         .validate()
         .with_context(|| format!("validating {}", manifest.display()))?;
     let root = plain_path(absolute(&dev.module_root(&manifest)));
-
-    let mut deprecations = Vec::new();
-    if is_legacy_module_file(&manifest) {
-        deprecations.push(Deprecation {
-            item: LEGACY_MODULE_FILE.to_string(),
-            hint: format!("rename it to {MODULE_FILE}; {MIGRATING}"),
-        });
-    }
-    let declares_scripts = !dev.scripts.is_empty()
-        || dev.platforms.0.values().any(|o| !o.scripts.is_empty());
-    let has_runscript = root.join(RUNSCRIPT).is_file();
-    let mode = if declares_scripts || !has_runscript {
-        Mode::Native
-    } else {
-        Mode::Legacy
-    };
-    if has_runscript {
-        let hint = if mode == Mode::Legacy {
-            format!("declare scripts: in {MODULE_FILE}; {MIGRATING}")
-        } else {
-            format!(
-                "{key} declares scripts:, so its {RUNSCRIPT} is ignored; delete it ({MIGRATING})"
-            )
-        };
-        deprecations.push(Deprecation {
-            item: RUNSCRIPT.to_string(),
-            hint,
-        });
-    }
     Ok(LoadedModule {
         key: key.to_string(),
         manifest,
         dev,
         root,
-        mode,
-        deprecations,
     })
 }
 
 /// The manifest a flow entry points at. Installed flows record the file
-/// itself; a directory is probed for `sb.module.yaml`, then `sb.dev.yml`.
+/// itself; a directory is probed for `sb.module.yaml`.
+///
+/// An install made before 0.7.0 may have recorded `.../sb.dev.yml`. That
+/// entry stands for the `sb.module.yaml` beside it
+/// ([`current_manifest_path`]); a directory that still holds only the old
+/// file is refused with the rename hint. The old file is never read.
 fn locate_manifest(key: &str, entry: &Path) -> Result<PathBuf> {
     if entry.is_dir() {
+        refuse_removed_module_file(entry)?;
         return find_module_file(entry).ok_or_else(|| {
             anyhow!(
                 "module {key:?}: no module manifest ({MODULE_FILE}) in {}",
@@ -516,51 +379,23 @@ fn locate_manifest(key: &str, entry: &Path) -> Result<PathBuf> {
             )
         });
     }
+    let entry = current_manifest_path(entry);
     if entry.is_file() {
-        return Ok(entry.to_path_buf());
+        return Ok(entry);
     }
-    // The recorded file is gone, but the module may only have been migrated
-    // (`sb.dev.yml` renamed to `sb.module.yaml`) without a re-install.
-    if let Some(found) = entry.parent().and_then(find_module_file) {
-        return Ok(found);
+    if let Some(dir) = entry.parent() {
+        refuse_removed_module_file(dir)?;
+        // The recorded file is gone, but the module may only have been
+        // renamed to `sb.module.yaml` without a re-install.
+        if let Some(found) = find_module_file(dir) {
+            return Ok(found);
+        }
     }
     bail!(
         "module {key:?}: module manifest not found at {} (registered in the workspace \
          flow, but the file is missing; did the module directory move? run `sb install` again)",
         entry.display()
     )
-}
-
-fn legacy_pane(lm: &LoadedModule, script: &str, args: &[String]) -> Pane {
-    Pane {
-        module: lm.dev.module.clone(),
-        window: instance_module(&lm.dev.module, None),
-        instance: None,
-        cwd: lm.root.clone(),
-        cmd: PaneCmd::Legacy {
-            script: lm.root.join(script),
-            args: args.to_vec(),
-        },
-    }
-}
-
-fn flow_deprecations(flow: &WorkspaceFlow, out: &mut Vec<Deprecation>) {
-    if flow.has_legacy_instances() {
-        out.push(Deprecation {
-            item: "top-level `instances:`".to_string(),
-            hint: format!(
-                "move each list under modules.<name>.instances in {FLOW_FILE}; {MIGRATING}"
-            ),
-        });
-    }
-}
-
-fn push_unique(out: &mut Vec<Deprecation>, items: &[Deprecation]) {
-    for item in items {
-        if !out.contains(item) {
-            out.push(item.clone());
-        }
-    }
 }
 
 fn push_build(builds: &mut Vec<BuildStep>, step: BuildStep) {
@@ -601,17 +436,14 @@ fn docker_instance<'f>(instances: impl IntoIterator<Item = &'f ModuleInstance>) 
 }
 
 fn docker_reason(id: &str) -> String {
-    format!(
-        "instance {id} declares docker:, which native launch does not run yet \
-         (keep its {RUNSCRIPT} and no scripts: until it does)"
-    )
+    format!("instance {id} declares docker:, which native launch does not run yet")
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Native assembly: placeholders, env, argv
 // ─────────────────────────────────────────────────────────────────────
 
-/// One native module resolved for this host, with the per-module values
+/// One module resolved for this host, with the per-module values
 /// every placeholder expansion shares.
 struct Native<'m> {
     lm: &'m LoadedModule,
@@ -768,7 +600,8 @@ impl<'m> Native<'m> {
             window: instance_module(&self.lm.dev.module, id),
             instance: id.map(str::to_string),
             cwd: self.lm.root.clone(),
-            cmd: PaneCmd::Native { argv, env },
+            argv,
+            env,
         })
     }
 }
@@ -866,8 +699,8 @@ fn run_inline(step: &BuildStep, argv: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `sb run --fg`: build, then run the plan's single native pane in this
-/// terminal with no tmux.
+/// `sb run --fg`: build, then run the plan's single pane in this terminal
+/// with no tmux.
 ///
 /// Unix: this process is replaced by the module (exec), so on success the
 /// function does not return. Windows: the module is spawned and waited for,
@@ -883,21 +716,15 @@ pub fn run_foreground(plan: &LaunchPlan) -> Result<i32> {
         ),
         [] => bail!("nothing to run: the plan has no panes"),
     };
-    let PaneCmd::Native { argv, env } = &pane.cmd else {
-        bail!(
-            "`sb run --fg` needs a native module, but {:?} still launches through \
-             {RUNSCRIPT}; declare scripts: in its {MODULE_FILE}",
-            pane.module
-        );
-    };
     run_builds(plan)?;
-    let (program, rest) = argv
+    let (program, rest) = pane
+        .argv
         .split_first()
         .ok_or_else(|| anyhow!("module {:?}: empty start command", pane.module))?;
     let mut cmd = Command::new(program);
-    cmd.args(rest).current_dir(&pane.cwd).envs(env);
+    cmd.args(rest).current_dir(&pane.cwd).envs(&pane.env);
     exec_foreground(&mut cmd)
-        .with_context(|| format!("running `{}` in {}", argv.join(" "), pane.cwd.display()))
+        .with_context(|| format!("running `{}` in {}", pane.argv.join(" "), pane.cwd.display()))
 }
 
 #[cfg(unix)]
@@ -1073,43 +900,16 @@ pub fn run(plan: &LaunchPlan, tmux: &Path) -> Result<RunOutcome> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StopOutcome {
     pub session: String,
-    /// Native: the windows closed. Legacy: the window whose running
-    /// command was killed to run the stopscript in its place, if any.
+    /// The windows closed.
     pub killed: Vec<String>,
-    /// `scripts.stop` ran inline (native only).
+    /// `scripts.stop` ran inline.
     pub ran_stop: bool,
-    /// The legacy `stopscript.bash` path was taken.
-    pub legacy: bool,
 }
 
-/// `sb stop <module> [args...]`.
-///
-/// Native: close every window named `<module>` or `<module>-<anything>`
-/// by window id (if that empties the session, tmux ends it), then run
-/// `scripts.stop` inline. Legacy: run `stopscript.bash` in the module's
-/// window (respawned if it exists, created otherwise), as before 0.6.
+/// `sb stop <module> [args...]`: close every window named `<module>` or
+/// `<module>-<anything>` by window id (if that empties the session, tmux
+/// ends it), then run `scripts.stop` inline.
 pub fn stop(plan: &StopPlan, tmux: &Path) -> Result<StopOutcome> {
-    if let Some(pane) = &plan.legacy {
-        let mut killed = Vec::new();
-        if has_session(tmux, &plan.session) {
-            let list = list_windows(tmux, &plan.session)?;
-            if let Some((id, _)) = list.iter().find(|(_, name)| *name == pane.window) {
-                respawn_window(tmux, id, pane)?;
-                killed.push(pane.window.clone());
-            } else {
-                new_window(tmux, &plan.session, pane)?;
-            }
-        } else {
-            new_session(tmux, &plan.session, pane)?;
-        }
-        return Ok(StopOutcome {
-            session: plan.session.clone(),
-            killed,
-            ran_stop: false,
-            legacy: true,
-        });
-    }
-
     let mut killed = Vec::new();
     if has_session(tmux, &plan.session) {
         for (id, name) in list_windows(tmux, &plan.session)? {
@@ -1136,7 +936,6 @@ pub fn stop(plan: &StopPlan, tmux: &Path) -> Result<StopOutcome> {
         session: plan.session.clone(),
         killed,
         ran_stop,
-        legacy: false,
     })
 }
 
@@ -1217,25 +1016,20 @@ fn tmux_exec(tmux: &Path, args: &[OsString], what: &str) -> Result<String> {
 fn push_spawn_args(args: &mut Vec<OsString>, pane: &Pane) {
     args.push("-c".into());
     args.push(tmux_cwd(&pane.cwd));
-    match &pane.cmd {
-        PaneCmd::Native { argv, env } => {
-            for (key, value) in env {
-                args.push("-e".into());
-                args.push(tmux_escape(&format!("{key}={value}")).into());
-            }
-            if let [only] = argv.as_slice() {
-                // tmux runs a single trailing argument through the shell.
-                args.push(tmux_escape(&shell_quote(only)).into());
-            } else {
-                args.extend(argv.iter().map(|a| OsString::from(tmux_escape(a))));
-            }
-        }
-        PaneCmd::Legacy { .. } => args.push(tmux_escape(&pane.shell_command()).into()),
+    for (key, value) in &pane.env {
+        args.push("-e".into());
+        args.push(tmux_escape(&format!("{key}={value}")).into());
+    }
+    if let [only] = pane.argv.as_slice() {
+        // tmux runs a single trailing argument through the shell.
+        args.push(tmux_escape(&shell_quote(only)).into());
+    } else {
+        args.extend(pane.argv.iter().map(|a| OsString::from(tmux_escape(a))));
     }
 }
 
-/// `; set-option -w -t <target> remain-on-exit on`, so a native process
-/// that exits leaves its window, and its output, readable. Chained in the
+/// `; set-option -w -t <target> remain-on-exit on`, so a process that
+/// exits leaves its window, and its output, readable. Chained in the
 /// same invocation as the spawn, before tmux can notice the exit.
 fn push_remain_on_exit(args: &mut Vec<OsString>, target: &str) {
     args.extend(
@@ -1255,19 +1049,17 @@ fn new_session(tmux: &Path, session: &str, pane: &Pane) -> Result<()> {
         (&pane.window).into(),
     ];
     push_spawn_args(&mut args, pane);
-    if let PaneCmd::Native { env, .. } = &pane.cmd {
-        // The session's only window is its current one.
-        push_remain_on_exit(&mut args, &format!("={session}:"));
-        // new-session's `-e` lands in the session environment, which every
-        // later window would inherit (a singleton would see the first
-        // pane's SB_INSTANCE_ID). The first process already has it.
-        let target = format!("={session}");
-        for key in env.keys() {
-            args.extend(
-                [";", "set-environment", "-t", target.as_str(), "-u", key.as_str()]
-                    .map(OsString::from),
-            );
-        }
+    // The session's only window is its current one.
+    push_remain_on_exit(&mut args, &format!("={session}:"));
+    // new-session's `-e` lands in the session environment, which every
+    // later window would inherit (a singleton would see the first pane's
+    // SB_INSTANCE_ID). The first process already has it.
+    let target = format!("={session}");
+    for key in pane.env.keys() {
+        args.extend(
+            [";", "set-environment", "-t", target.as_str(), "-u", key.as_str()]
+                .map(OsString::from),
+        );
     }
     tmux_exec(tmux, &args, "new-session").with_context(|| {
         format!("creating tmux session {session:?} with window {:?}", pane.window)
@@ -1289,9 +1081,7 @@ fn new_window(tmux: &Path, session: &str, pane: &Pane) -> Result<()> {
         (&pane.window).into(),
     ];
     push_spawn_args(&mut args, pane);
-    if pane.is_native() {
-        push_remain_on_exit(&mut args, &target);
-    }
+    push_remain_on_exit(&mut args, &target);
     tmux_exec(tmux, &args, "new-window")
         .with_context(|| format!("adding window {:?} to tmux session {session:?}", pane.window))?;
     Ok(())
@@ -1300,12 +1090,10 @@ fn new_window(tmux: &Path, session: &str, pane: &Pane) -> Result<()> {
 /// `tmux respawn-window -k -t @<id> ...`: kill whatever runs in the window
 /// and start the pane's command in its place.
 fn respawn_window(tmux: &Path, window_id: &str, pane: &Pane) -> Result<()> {
-    let mut args: Vec<OsString> = Vec::new();
-    if pane.is_native() {
-        args.extend(
-            ["set-option", "-w", "-t", window_id, "remain-on-exit", "on", ";"].map(OsString::from),
-        );
-    }
+    let mut args: Vec<OsString> =
+        ["set-option", "-w", "-t", window_id, "remain-on-exit", "on", ";"]
+            .map(OsString::from)
+            .into();
     args.extend(["respawn-window", "-k", "-t", window_id].map(OsString::from));
     push_spawn_args(&mut args, pane);
     tmux_exec(tmux, &args, "respawn-window")
@@ -1382,7 +1170,7 @@ fn tmux_escape(arg: &str) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// shell quoting: single source of truth, used by Pane::shell_command.
+// shell quoting: a one-token argv, which tmux would hand to a shell.
 // ─────────────────────────────────────────────────────────────────────
 
 /// Single-quote `s` for safe inclusion in a POSIX shell command: no
@@ -1410,18 +1198,17 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
+    use sb_core::FLOW_FILE;
     use tempfile::TempDir;
 
-    /// `<root>/<name>/sb.module.yaml` with no `scripts:`, plus a
-    /// `runscript.bash` when asked (which makes the module legacy).
-    fn write_module(root: &Path, name: &str, with_runscript: bool) -> PathBuf {
+    /// `<root>/<name>/sb.module.yaml` for a python module with no
+    /// `scripts:`: it starts with the language default (`{python} main.py`)
+    /// and has nothing to build.
+    fn write_module(root: &Path, name: &str) -> PathBuf {
         let dir = root.join(name);
         fs::create_dir_all(&dir).unwrap();
         let manifest = dir.join(MODULE_FILE);
-        fs::write(&manifest, format!("module: {name}\nlanguage: rust\n")).unwrap();
-        if with_runscript {
-            fs::write(dir.join(RUNSCRIPT), "#!/usr/bin/env bash\nexit 0\n").unwrap();
-        }
+        fs::write(&manifest, format!("module: {name}\nlanguage: python\n")).unwrap();
         manifest
     }
 
@@ -1438,22 +1225,20 @@ mod tests {
     }
 
     #[test]
-    fn pane_shell_command_quotes_safely() {
+    fn pane_command_quotes_safely() {
         let p = Pane {
             module: "m".into(),
             window: "m".into(),
             instance: None,
             cwd: PathBuf::from("/tmp/with space"),
-            cmd: PaneCmd::Legacy {
-                script: PathBuf::from("/tmp/with space/runscript.bash"),
-                args: vec![],
-            },
+            argv: vec!["/tmp/with space/app".into()],
+            env: BTreeMap::new(),
         };
-        let cmd = p.shell_command();
-        // Each quoted segment survives the embedded space.
-        assert!(cmd.contains("'/tmp/with space'"));
-        assert!(cmd.contains("'/tmp/with space/runscript.bash'"));
-        assert!(cmd.starts_with("cd '"));
+        let mut args = Vec::new();
+        push_spawn_args(&mut args, &p);
+        // tmux runs a lone trailing argument through the shell, so the
+        // embedded space must survive as one quoted word.
+        assert_eq!(args.last().unwrap(), "'/tmp/with space/app'");
     }
 
     #[test]
@@ -1464,8 +1249,8 @@ mod tests {
         fs::create_dir_all(&ws_dir).unwrap();
         let projects = home.root().join("projects");
         fs::create_dir_all(&projects).unwrap();
-        let dev_a = write_module(&projects, "alpha", true);
-        let dev_b = write_module(&projects, "beta", true);
+        let dev_a = write_module(&projects, "alpha");
+        let dev_b = write_module(&projects, "beta");
         let flow = format!(
             "modules:\n  alpha: {}\n  beta:\n    path: {}\n    up: false\n",
             yaml_path(&dev_a),
@@ -1477,12 +1262,12 @@ mod tests {
         let plan = plan_workspace(&home, ws, &host).unwrap();
         let names: Vec<&str> = plan.panes.iter().map(|p| p.window.as_str()).collect();
         assert_eq!(names, ["alpha"]);
-        assert!(plan.builds.is_empty(), "legacy modules build nothing");
+        assert!(plan.builds.is_empty(), "python modules build nothing");
 
         let plan = plan_run(&home, ws, "beta", &[], &host).unwrap();
         let pane = &plan.panes[0];
         assert_eq!(pane.module, "beta");
         assert_eq!(pane.cwd, projects.join("beta"));
-        assert!(matches!(pane.cmd, PaneCmd::Legacy { .. }));
+        assert_eq!(pane.argv, [python_fallback(&host), "main.py"]);
     }
 }

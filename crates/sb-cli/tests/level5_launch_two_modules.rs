@@ -1,10 +1,11 @@
 //! L5 TDD #1 — `sb up` launches expected panes.
 //!
-//! 2-module workspace, both with valid runscripts. `sb up` → tmux
-//! list-windows reports 2 windows, one per module. `sb down` → tmux
-//! has-session returns non-zero.
+//! 2-module workspace, both native modules whose start command sleeps.
+//! `sb up` → tmux list-windows reports 2 windows, one per module.
+//! `sb down` → tmux has-session returns non-zero.
 
 mod common;
+use common::l5_sandbox::yaml_path;
 use common::{L5Sandbox, has_session, list_windows, tmux_launch_supported};
 
 #[test]
@@ -16,10 +17,21 @@ fn level5_up_two_modules_then_down() {
         return;
     }
     let mut sb = L5Sandbox::empty();
-    // Both runscripts are no-ops that just sleep, so tmux keeps the
-    // pane alive long enough for has-session / list-windows to observe it.
-    sb.adopt("alpha", Some("#!/usr/bin/env bash\nsleep 30\n"));
-    sb.adopt("beta", Some("#!/usr/bin/env bash\nsleep 30\n"));
+    // Both modules just sleep, so tmux keeps the pane alive long enough
+    // for has-session / list-windows to observe it.
+    let alpha = sb.native(
+        "alpha",
+        "module: alpha\nlanguage: python\nscripts:\n  start: sleep 30\n",
+    );
+    let beta = sb.native(
+        "beta",
+        "module: beta\nlanguage: python\nscripts:\n  start: sleep 30\n",
+    );
+    sb.write_installed_flow(&format!(
+        "modules:\n  alpha: {}\n  beta: {}\n",
+        yaml_path(&alpha.manifest()),
+        yaml_path(&beta.manifest())
+    ));
 
     let session = format!("sb-{}", sb.workspace);
     // Make sure no leftover from a previous run.

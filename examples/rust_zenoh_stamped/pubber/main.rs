@@ -1,13 +1,13 @@
 //! Example pubber driven by `examples/rust_zenoh_stamped/run.sh`.
 //!
 //! Uses the L3-scaffolded zenoh publisher (lives under
-//! `swarmbotix_io/publishers/chatter.rs` after `sb pub add`) and
+//! `swarmbotix_io/publishers/chatter.rs` after `sb io add pub`) and
 //! publishes a REAL protobuf-encoded `std/StringStamped` — Header at
 //! field 1 with `metadata.msg_type` and `metadata.msg_freq_desired`
 //! filled in, payload at field 2 (`data`).
 //!
 //! Run via [run.sh](../run.sh) (the L4 end-to-end gate); standalone
-//! invocations from inside this dir also work once `sb pub add` has
+//! invocations from inside this dir also work once `sb io add pub` has
 //! scaffolded `swarmbotix_io/publishers/chatter.rs` for you.
 
 #[path = "swarmbotix_io/publishers/chatter.rs"]
@@ -25,7 +25,7 @@ use swarmbotix_std::{
 };
 use zenoh::Wait;
 
-/// Match the topic `run.sh` passes to `sb pub add` so the L4 discovery
+/// Match the topic `run.sh` passes to `sb io add pub` so the L4 discovery
 /// observes us under the fully-qualified path the user expects.
 const TOPIC_FULL: &str = "dev01/demo/pubber/zenoh/chatter";
 /// What `sb topic list` should report in the rate column for this

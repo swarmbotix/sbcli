@@ -1,6 +1,6 @@
 """Example subber driven by examples/rust_python_zenoh/run.sh.
 
-Reads the subscriber class scaffolded by `sb sub add` (lives under
+Reads the subscriber class scaffolded by `sb io add sub` (lives under
 swarmbotix_io/subscribers/hello.py), polls for samples, prints the
 payload, and exits 0 on first hit.
 """
