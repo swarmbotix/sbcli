@@ -43,7 +43,10 @@ fn workspace_lifecycle_round_trip() {
         .current_dir(&ws1_repo)
         .output()
         .unwrap();
-    assert!(!out.status.success(), "create over an existing flow must fail");
+    assert!(
+        !out.status.success(),
+        "create over an existing flow must fail"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("already exists"),
         "{out:?}"

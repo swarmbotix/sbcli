@@ -160,7 +160,8 @@ pub fn plan_workspace(home: &SbHome, workspace: &str, host: &Host) -> Result<Lau
     for (key, entry) in flow.modules.iter().filter(|(_, m)| m.up) {
         let lm = load_module(key, &entry.path)?;
         if !lm.dev.supports_host(host) {
-            plan.skipped.push((key.clone(), unsupported_reason(&lm.dev, host)));
+            plan.skipped
+                .push((key.clone(), unsupported_reason(&lm.dev, host)));
             continue;
         }
         let resolved = match lm.dev.resolve(host) {
@@ -346,10 +347,10 @@ struct LoadedModule {
 
 fn load_module(key: &str, entry: &Path) -> Result<LoadedModule> {
     let manifest = locate_manifest(key, entry)?;
-    let body = fs::read_to_string(&manifest)
-        .with_context(|| format!("reading {}", manifest.display()))?;
-    let dev: ModuleDevConfig = serde_yaml::from_str(&body)
-        .with_context(|| format!("parsing {}", manifest.display()))?;
+    let body =
+        fs::read_to_string(&manifest).with_context(|| format!("reading {}", manifest.display()))?;
+    let dev: ModuleDevConfig =
+        serde_yaml::from_str(&body).with_context(|| format!("parsing {}", manifest.display()))?;
     dev.platforms
         .validate()
         .with_context(|| format!("validating {}", manifest.display()))?;
@@ -544,7 +545,10 @@ impl<'m> Native<'m> {
             let mut expanded =
                 expand_argv(argv, &ctx, &env_var).map_err(|e| self.expand_error(e, what))?;
             if expanded.is_empty() {
-                bail!("module {:?}: {what} expands to an empty command", self.lm.key);
+                bail!(
+                    "module {:?}: {what} expands to an empty command",
+                    self.lm.key
+                );
             }
             absolutize_program(&mut expanded, &self.lm.root);
             steps.push(expanded);
@@ -684,9 +688,7 @@ pub fn run_builds(plan: &LaunchPlan) -> Result<()> {
 }
 
 fn run_inline(step: &BuildStep, argv: &[String]) -> Result<()> {
-    let (program, rest) = argv
-        .split_first()
-        .ok_or_else(|| anyhow!("empty command"))?;
+    let (program, rest) = argv.split_first().ok_or_else(|| anyhow!("empty command"))?;
     let status = Command::new(program)
         .args(rest)
         .current_dir(&step.cwd)
@@ -723,8 +725,13 @@ pub fn run_foreground(plan: &LaunchPlan) -> Result<i32> {
         .ok_or_else(|| anyhow!("module {:?}: empty start command", pane.module))?;
     let mut cmd = Command::new(program);
     cmd.args(rest).current_dir(&pane.cwd).envs(&pane.env);
-    exec_foreground(&mut cmd)
-        .with_context(|| format!("running `{}` in {}", pane.argv.join(" "), pane.cwd.display()))
+    exec_foreground(&mut cmd).with_context(|| {
+        format!(
+            "running `{}` in {}",
+            pane.argv.join(" "),
+            pane.cwd.display()
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -1033,7 +1040,16 @@ fn push_spawn_args(args: &mut Vec<OsString>, pane: &Pane) {
 /// same invocation as the spawn, before tmux can notice the exit.
 fn push_remain_on_exit(args: &mut Vec<OsString>, target: &str) {
     args.extend(
-        [";", "set-option", "-w", "-t", target, "remain-on-exit", "on"].map(OsString::from),
+        [
+            ";",
+            "set-option",
+            "-w",
+            "-t",
+            target,
+            "remain-on-exit",
+            "on",
+        ]
+        .map(OsString::from),
     );
 }
 
@@ -1057,12 +1073,22 @@ fn new_session(tmux: &Path, session: &str, pane: &Pane) -> Result<()> {
     let target = format!("={session}");
     for key in pane.env.keys() {
         args.extend(
-            [";", "set-environment", "-t", target.as_str(), "-u", key.as_str()]
-                .map(OsString::from),
+            [
+                ";",
+                "set-environment",
+                "-t",
+                target.as_str(),
+                "-u",
+                key.as_str(),
+            ]
+            .map(OsString::from),
         );
     }
     tmux_exec(tmux, &args, "new-session").with_context(|| {
-        format!("creating tmux session {session:?} with window {:?}", pane.window)
+        format!(
+            "creating tmux session {session:?} with window {:?}",
+            pane.window
+        )
     })?;
     Ok(())
 }
@@ -1082,18 +1108,29 @@ fn new_window(tmux: &Path, session: &str, pane: &Pane) -> Result<()> {
     ];
     push_spawn_args(&mut args, pane);
     push_remain_on_exit(&mut args, &target);
-    tmux_exec(tmux, &args, "new-window")
-        .with_context(|| format!("adding window {:?} to tmux session {session:?}", pane.window))?;
+    tmux_exec(tmux, &args, "new-window").with_context(|| {
+        format!(
+            "adding window {:?} to tmux session {session:?}",
+            pane.window
+        )
+    })?;
     Ok(())
 }
 
 /// `tmux respawn-window -k -t @<id> ...`: kill whatever runs in the window
 /// and start the pane's command in its place.
 fn respawn_window(tmux: &Path, window_id: &str, pane: &Pane) -> Result<()> {
-    let mut args: Vec<OsString> =
-        ["set-option", "-w", "-t", window_id, "remain-on-exit", "on", ";"]
-            .map(OsString::from)
-            .into();
+    let mut args: Vec<OsString> = [
+        "set-option",
+        "-w",
+        "-t",
+        window_id,
+        "remain-on-exit",
+        "on",
+        ";",
+    ]
+    .map(OsString::from)
+    .into();
     args.extend(["respawn-window", "-k", "-t", window_id].map(OsString::from));
     push_spawn_args(&mut args, pane);
     tmux_exec(tmux, &args, "respawn-window")
@@ -1106,8 +1143,14 @@ fn list_windows(tmux: &Path, session: &str) -> Result<Vec<(String, String)>> {
     let target = format!("={session}");
     let out = tmux_exec(
         tmux,
-        &["list-windows", "-t", target.as_str(), "-F", "#{window_id}\t#{window_name}"]
-            .map(OsString::from),
+        &[
+            "list-windows",
+            "-t",
+            target.as_str(),
+            "-F",
+            "#{window_id}\t#{window_name}",
+        ]
+        .map(OsString::from),
         "list-windows",
     )?;
     Ok(out
@@ -1120,7 +1163,11 @@ fn list_windows(tmux: &Path, session: &str) -> Result<Vec<(String, String)>> {
 /// `tmux kill-window -t @<id>`. A window that is already gone counts as
 /// closed.
 fn close_window(tmux: &Path, session: &str, window_id: &str) -> Result<()> {
-    match tmux_exec(tmux, &["kill-window", "-t", window_id].map(OsString::from), "kill-window") {
+    match tmux_exec(
+        tmux,
+        &["kill-window", "-t", window_id].map(OsString::from),
+        "kill-window",
+    ) {
         Ok(_) => Ok(()),
         Err(err) => {
             let alive = has_session(tmux, session)

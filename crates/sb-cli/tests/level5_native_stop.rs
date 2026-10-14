@@ -58,7 +58,10 @@ fn level5_native_stop_closes_instances_and_runs_stop_script() {
         stdout.contains("stopped m: closed 2 window(s)"),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("ran scripts.stop for m"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("ran scripts.stop for m"),
+        "stdout: {stdout}"
+    );
 
     assert_eq!(
         list_windows(&session),

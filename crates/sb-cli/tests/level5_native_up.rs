@@ -48,7 +48,9 @@ fn level5_native_up_opens_one_window_per_instance() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        stdout.contains(&format!("launched 2 window(s) in tmux session \"{session}\"")),
+        stdout.contains(&format!(
+            "launched 2 window(s) in tmux session \"{session}\""
+        )),
         "stdout: {stdout}"
     );
 
@@ -65,7 +67,10 @@ fn level5_native_up_opens_one_window_per_instance() {
 
     let out = sb.cmd().arg("down").output().unwrap();
     assert!(out.status.success(), "sb down failed: {out:?}");
-    assert!(!has_session(&session), "session still present after sb down");
+    assert!(
+        !has_session(&session),
+        "session still present after sb down"
+    );
 }
 
 #[test]

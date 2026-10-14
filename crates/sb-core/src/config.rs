@@ -2459,10 +2459,7 @@ mod tests {
         let y = "modules:\n  cam: apps/cam\ninstances:\n  cam: [left]\n";
         let e = probe_legacy_flow_keys(y).unwrap();
         assert_eq!(e, FlowValidationError::LegacyTopLevelInstances);
-        assert!(
-            e.to_string().contains("no longer read since 0.7.0"),
-            "{e}"
-        );
+        assert!(e.to_string().contains("no longer read since 0.7.0"), "{e}");
         assert!(serde_yaml::from_str::<WorkspaceFlow>(y).is_err());
     }
 

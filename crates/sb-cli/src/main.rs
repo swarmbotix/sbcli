@@ -1512,7 +1512,8 @@ fn edit_subscriber(
     next.config.subscribers[idx] = spec;
     let mut outcome = sb_pubsub::regenerate_entry(&mut next, &name, ctx)?;
     if !outcome.dev_yml_written {
-        let body = serde_yaml::to_string(&next.config).context("serializing the module manifest")?;
+        let body =
+            serde_yaml::to_string(&next.config).context("serializing the module manifest")?;
         std::fs::write(&next.dev_yml_path, body)
             .with_context(|| format!("writing {}", next.dev_yml_path.display()))?;
         outcome.dev_yml_written = true;
@@ -1584,8 +1585,7 @@ fn cmd_io_update(module: Option<&str>, services: bool, all: bool) -> Result<()> 
     };
     let mut problems = 0usize;
     for (label, handle) in targets {
-        let report =
-            handle.and_then(|mut h| sb_pubsub::update_all(&mut h, &ctx, service_render));
+        let report = handle.and_then(|mut h| sb_pubsub::update_all(&mut h, &ctx, service_render));
         match report {
             Ok(r) => {
                 let mut line = format!(
@@ -4903,17 +4903,15 @@ fn resolve_topic_for_runtime(
     let cfg = load_config()?;
     let home = sb_workspace::SbHome::from_config(&cfg)?;
     let cwd = std::env::current_dir().context("getting cwd")?;
-    let cwd_module: Option<sb_core::ModuleDevConfig> =
-        if let Some(dev_yml) = sb_workspace::find_module_file(&cwd) {
-            let s = std::fs::read_to_string(&dev_yml)
-                .with_context(|| format!("reading {}", dev_yml.display()))?;
-            Some(
-                serde_yaml::from_str(&s)
-                    .with_context(|| format!("parsing {}", dev_yml.display()))?,
-            )
-        } else {
-            None
-        };
+    let cwd_module: Option<sb_core::ModuleDevConfig> = if let Some(dev_yml) =
+        sb_workspace::find_module_file(&cwd)
+    {
+        let s = std::fs::read_to_string(&dev_yml)
+            .with_context(|| format!("reading {}", dev_yml.display()))?;
+        Some(serde_yaml::from_str(&s).with_context(|| format!("parsing {}", dev_yml.display()))?)
+    } else {
+        None
+    };
     let workspace = sb_workspace::active_workspace(&home)?.unwrap_or_default();
     let device = cfg.device.clone().unwrap_or_else(|| "dev01".to_string());
     sb_discover::resolve_bare_topic(input, cwd_module.as_ref(), &device, &workspace, None)
@@ -4938,9 +4936,10 @@ fn require_active_workspace() -> Result<(SbCliConfig, SbHome, String)> {
 /// `sb stop` use the installed copy.
 fn warn_if_stale(home: &SbHome, ws: &str) {
     if let Ok(Some((repo_flow, _))) = sb_workspace::is_stale(home, ws) {
-        let file = repo_flow
-            .file_name()
-            .map_or_else(|| repo_flow.display().to_string(), |f| f.to_string_lossy().into_owned());
+        let file = repo_flow.file_name().map_or_else(
+            || repo_flow.display().to_string(),
+            |f| f.to_string_lossy().into_owned(),
+        );
         let repo = repo_flow.parent().unwrap_or(&repo_flow);
         eprintln!(
             "warning: {file} at {} is newer than the installed copy; run sb install",

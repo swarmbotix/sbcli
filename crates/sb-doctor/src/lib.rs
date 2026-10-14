@@ -1127,7 +1127,12 @@ fn check_ws_deprecated(
             found.push(dir.join(sb_core::REMOVED_MODULE_FILE));
         }
     }
-    if let Some(dir) = ws.flow.source.as_ref().and_then(|src| src.repo_flow.parent()) {
+    if let Some(dir) = ws
+        .flow
+        .source
+        .as_ref()
+        .and_then(|src| src.repo_flow.parent())
+    {
         found.push(dir.join(sb_core::REMOVED_FLOW_FILE));
     }
     for script in ["runscript.bash", "stopscript.bash"] {

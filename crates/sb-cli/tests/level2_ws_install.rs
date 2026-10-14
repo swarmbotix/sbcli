@@ -72,8 +72,8 @@ fn ok(out: &Output, what: &str) -> String {
 }
 
 fn installed(s: &WsSandbox, name: &str) -> WorkspaceFlow {
-    let body = std::fs::read_to_string(s.sb_home().join("workspaces").join(name).join(FLOW_FILE))
-        .unwrap();
+    let body =
+        std::fs::read_to_string(s.sb_home().join("workspaces").join(name).join(FLOW_FILE)).unwrap();
     serde_yaml::from_str(&body).unwrap()
 }
 

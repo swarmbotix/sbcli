@@ -7,8 +7,8 @@
 
 /// Every top-level `sb` subcommand, plus clap's generated `help`.
 pub const BUILTIN_NAMES: &[&str] = &[
-    "doctor", "message", "config", "ws", "init", "io", "topic",
-    "up", "run", "stop", "down", "attach", "gopro", "install", "app", "update", "help",
+    "doctor", "message", "config", "ws", "init", "io", "topic", "up", "run", "stop", "down",
+    "attach", "gopro", "install", "app", "update", "help",
 ];
 
 /// True if `name` is a built-in `sb` subcommand.

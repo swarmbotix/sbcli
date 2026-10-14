@@ -61,10 +61,5 @@ fn legacy_names_are_refused() {
     // Nothing in the repo is renamed or added, and nothing is installed.
     assert!(module.join(REMOVED_MODULE_FILE).is_file());
     assert!(!module.join(MODULE_FILE).exists());
-    assert!(
-        !s.sb_home()
-            .join("workspaces")
-            .join("ws_legacy")
-            .exists()
-    );
+    assert!(!s.sb_home().join("workspaces").join("ws_legacy").exists());
 }

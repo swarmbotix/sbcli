@@ -702,9 +702,8 @@ pub fn is_stale(home: &SbHome, name: &str) -> Result<Option<(PathBuf, PathBuf)>>
 /// Runs `git -C <repo flow dir> pull --ff-only`. The report's `name` can
 /// differ from `name` if the pulled flow changed its `name:`.
 pub fn update_from_source(home: &SbHome, name: &str) -> Result<InstallReport> {
-    let src = installed_source(home, name)?.ok_or_else(|| {
-        anyhow!("workspace {name:?} was not installed from a repository flow")
-    })?;
+    let src = installed_source(home, name)?
+        .ok_or_else(|| anyhow!("workspace {name:?} was not installed from a repository flow"))?;
     let url = src.url.as_deref().ok_or_else(|| {
         anyhow!(
             "workspace {name:?} was installed from a local path ({}) with no URL; \

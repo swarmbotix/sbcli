@@ -527,7 +527,8 @@ wires:
   ips_track.markers:   "ips_detect[*].markers"
   ips_calib.markers:   "ips_detect[*].markers"
   ips_viz.cube_poses:  ips_track.cube_poses
-  ips_viz.debug_image: "ips_detect[*].debug_image"
+  # ips_viz.debug_image is iceoryx2, which has no wildcard: main() opens one
+  # subscriber per camera itself, so it is not wired.
 ```
 
 No module declares `scripts:`: every binary is named after its module,
