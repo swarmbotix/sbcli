@@ -1,6 +1,6 @@
 //! L5 TDD #7 — `sb gopro` round-trip.
 //!
-//! Non-trivial sb.dev.yml (3 pubs, 2 subs, mixed transports) → gopro
+//! Non-trivial sb.module.yaml (3 pubs, 2 subs, mixed transports) → gopro
 //! → parse sb.prd.yml → publishers + subscribers identical to dev
 //! (ignoring host-only fields).
 
@@ -67,7 +67,7 @@ fn gopro_preserves_full_pub_sub_lists() {
     );
 
     // Parse both and compare pub/sub lists.
-    let dev_body = std::fs::read_to_string(m.root.join("sb.dev.yml")).unwrap();
+    let dev_body = std::fs::read_to_string(m.root.join(sb_core::MODULE_FILE)).unwrap();
     let dev: sb_core::ModuleDevConfig = serde_yaml::from_str(&dev_body).unwrap();
     let prd_body = std::fs::read_to_string(m.root.join("sb.prd.yml")).unwrap();
     let prd: ModulePrdConfig = serde_yaml::from_str(&prd_body).unwrap();

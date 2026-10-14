@@ -1,4 +1,4 @@
-//! `sb install <folder|url>` on a workspace package (a root `flow.yaml`),
+//! `sb install <folder|url>` on a workspace package (a root `sb.flow.yaml`),
 //! `sb ws uninstall`, and the package-kind detection errors.
 
 mod common;
@@ -7,7 +7,7 @@ use common::WsSandbox;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use sb_core::WorkspaceFlow;
+use sb_core::{FLOW_FILE, MODULE_FILE, WorkspaceFlow};
 
 const FLOW: &str = "\
 name: ws_fix
@@ -27,13 +27,18 @@ const PING_V1: &str = "syntax = \"proto3\";\n\npackage swarmbotix.custom;\n\n\
 /// `up: false`) and one message source holding `custom/Ping.proto`.
 fn fixture_repo(s: &WsSandbox, dir: &str) -> PathBuf {
     let repo = s.tempdir().join(dir);
-    for (rel, body) in [
-        ("flow.yaml", FLOW),
-        ("pubber/sb.dev.yml", "module: pubber\nlanguage: rust\n"),
-        ("calib/sb.dev.yml", "module: calib\nlanguage: python\n"),
-        ("messages/custom/Ping.proto", PING_V1),
+    for (path, body) in [
+        (repo.join(FLOW_FILE), FLOW),
+        (
+            repo.join("pubber").join(MODULE_FILE),
+            "module: pubber\nlanguage: rust\n",
+        ),
+        (
+            repo.join("calib").join(MODULE_FILE),
+            "module: calib\nlanguage: python\n",
+        ),
+        (repo.join("messages/custom/Ping.proto"), PING_V1),
     ] {
-        let path = repo.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     }
@@ -67,7 +72,7 @@ fn ok(out: &Output, what: &str) -> String {
 }
 
 fn installed(s: &WsSandbox, name: &str) -> WorkspaceFlow {
-    let body = std::fs::read_to_string(s.sb_home().join("workspaces").join(name).join("flow.yaml"))
+    let body = std::fs::read_to_string(s.sb_home().join("workspaces").join(name).join(FLOW_FILE))
         .unwrap();
     serde_yaml::from_str(&body).unwrap()
 }
@@ -100,15 +105,21 @@ fn install_workspace_folder_then_reinstall_then_uninstall_clean() {
     assert_eq!(flow.name.as_deref(), Some("ws_fix"));
     assert_eq!(
         flow.modules["pubber"].path,
-        canon.join("pubber").join("sb.dev.yml")
+        canon.join("pubber").join(MODULE_FILE)
     );
     assert!(flow.modules["pubber"].up);
     assert!(!flow.modules["calib"].up);
     assert!(flow.modules.values().all(|m| m.path.is_absolute()));
     assert_eq!(flow.messages[0].path, canon.join("messages").join("custom"));
     let src = flow.source.expect("installed copy records its source");
-    assert_eq!(src.repo_flow, canon.join("flow.yaml"));
+    assert_eq!(src.repo_flow, canon.join(FLOW_FILE));
     assert_eq!(src.url, None);
+    // Nothing deprecated in this repo, so nothing is announced.
+    assert!(
+        !text(&out.stderr).contains("is deprecated since"),
+        "{}",
+        text(&out.stderr)
+    );
 
     // Active, and the message is in the configured vault.
     let active = std::fs::read_to_string(s.sb_home().join("active")).unwrap();
@@ -179,7 +190,7 @@ fn install_workspace_folder_then_reinstall_then_uninstall_clean() {
     );
     assert!(!s.sb_home().join("workspaces").join("ws_fix").exists());
     assert!(!repo.join("pubber/swarmbotix_io").exists());
-    assert!(repo.join("flow.yaml").is_file());
+    assert!(repo.join(FLOW_FILE).is_file());
     let active = std::fs::read_to_string(s.sb_home().join("active")).unwrap();
     assert!(active.trim().is_empty(), "{active:?}");
 }
@@ -215,7 +226,7 @@ fn install_from_git_url_clones_into_repos_and_updates_in_place() {
     );
     let clone = s.sb_home().join("repos").join("ws_fix");
     assert!(
-        clone.join("flow.yaml").is_file(),
+        clone.join(FLOW_FILE).is_file(),
         "no clone at {}",
         clone.display()
     );
@@ -241,7 +252,7 @@ fn install_from_git_url_clones_into_repos_and_updates_in_place() {
     assert!(stdout.contains("removed clone"), "{stdout}");
     assert!(!clone.exists());
     assert!(
-        repo.join("flow.yaml").is_file(),
+        repo.join(FLOW_FILE).is_file(),
         "the upstream repo is untouched"
     );
 }

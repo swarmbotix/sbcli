@@ -42,10 +42,10 @@ fn bare_init_preserves_existing_files_but_registers() {
         .sb_home()
         .join("workspaces")
         .join("demo")
-        .join("flow.yaml");
+        .join(sb_core::FLOW_FILE);
     let flow_body = std::fs::read_to_string(&flow).unwrap();
     assert!(
         flow_body.contains("pubber"),
-        "flow.yaml missing pubber: {flow_body}"
+        "installed flow missing pubber: {flow_body}"
     );
 }

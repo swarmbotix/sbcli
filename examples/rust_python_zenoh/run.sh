@@ -34,11 +34,15 @@ PUBBER="$EXAMPLE_DIR/pubber_rust"
 SUBBER="$EXAMPLE_DIR/subber_python"
 
 # 1. Workspace + adopt both modules.
-# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+# `sb ws create` writes ./sb.flow.yaml; keep it in the scratch home, not here.
 mkdir -p "$SB_HOME/ws"
 ( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
-"$SB" init --rust   "$PUBBER" --force >/dev/null
+# No --force on the Rust module: its committed sb.module.yaml carries a
+# scripts.start (the binary is not named after the module), and --force
+# would rewrite the manifest without it. `sb pub/sub add --force` below
+# still resets the entries, so the example stays re-runnable.
+"$SB" init --rust   "$PUBBER" >/dev/null
 "$SB" init --python "$SUBBER" --force >/dev/null
 
 # 2. Add the publisher / subscriber. Use --force so the example is

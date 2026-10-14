@@ -25,8 +25,12 @@ fn assert_files_unchanged(originals: &[(std::path::PathBuf, Vec<u8>)]) {
 }
 
 fn assert_artifacts_present(project: &Path, io_subpath: &str) {
-    assert!(project.join("sb.dev.yml").exists(), "sb.dev.yml missing");
-    assert!(project.join("runscript.bash").exists(), "runscript missing");
+    let manifest = sb_core::MODULE_FILE;
+    assert!(project.join(manifest).exists(), "{manifest} missing");
+    assert!(
+        !project.join("runscript.bash").exists(),
+        "runscript written without --runscript"
+    );
     assert!(project.join(io_subpath).is_dir(), "{io_subpath} missing");
 }
 

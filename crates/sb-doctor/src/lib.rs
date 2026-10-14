@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sb_core::{
-    Encoding, Language, ModuleDevConfig, SbCliConfig, TopicRef, Transport, WorkspaceFlow,
+    Encoding, Host, Language, ModuleDevConfig, SbCliConfig, TopicRef, Transport, Wire,
+    WireSelector, WorkspaceFlow,
 };
 
 /// The zenoh crate compiled into this binary, from `Cargo.lock` at build time
@@ -411,15 +412,16 @@ fn check_deprecated_keys(cfg: &SbCliConfig) -> CheckResult {
     )
 }
 
-/// Check: `topics`. Reports modules whose `sb.dev.yml` still writes a
+/// Check: `topics`. Reports modules whose module manifest still writes a
 /// fully-qualified topic as `topic: /...`.
 ///
 /// sb 0.5.0 reads such an entry as `key:` with the leading `/` dropped,
 /// which is the same wire key, so nothing breaks; the warning only says
 /// how to store it in the canonical form. `modules` yields
 /// `(module name, path)` pairs as the workspace registry records them; the
-/// path is the module's `sb.dev.yml` or its directory. A file that cannot
-/// be read is skipped silently (other checks own that failure).
+/// path is the module's manifest or its directory, which is probed for
+/// `sb.module.yaml` then the legacy `sb.dev.yml`. A file that cannot be
+/// read is skipped silently (other checks own that failure).
 ///
 /// One `[WARN]` per offending module. When none offend and at least one
 /// file was scanned, a single `[OK]`; when nothing was scanned, no result.
@@ -429,12 +431,8 @@ pub fn check_module_topics<'a>(
     let mut out = Vec::new();
     let mut scanned = 0usize;
     for (module, path) in modules {
-        let dev_yml = if path.is_dir() {
-            path.join("sb.dev.yml")
-        } else {
-            path.to_path_buf()
-        };
-        let Ok(text) = std::fs::read_to_string(&dev_yml) else {
+        let manifest = manifest_path(path);
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
             continue;
         };
         scanned += 1;
@@ -452,7 +450,7 @@ pub fn check_module_topics<'a>(
         };
         let mut msg = format!(
             "{module}: {count} in {} (sb 0.5.0 reads {pronoun} as `key:`; same wire key)",
-            dev_yml.display()
+            manifest.display()
         );
         for lt in &legacy {
             msg.push_str(&format!(
@@ -460,7 +458,7 @@ pub fn check_module_topics<'a>(
                 lt.role, lt.name, lt.topic, lt.key
             ));
         }
-        // Any write of sb.dev.yml stores every legacy entry as `key:`.
+        // Any write of the manifest stores every legacy entry as `key:`.
         // `sb sub edit` rewrites the file without changing the entry; a
         // module with only legacy publishers needs `sb pub edit --key`.
         if let Some(sub) = legacy.iter().find(|lt| lt.role == "sub") {
@@ -495,21 +493,26 @@ pub fn check_module_topics<'a>(
 pub struct WorkspaceView<'a> {
     /// Workspace name; the `<ws>` segment of every owned wire key.
     pub name: &'a str,
-    /// The installed copy (`<sb_home>/workspaces/<name>/flow.yaml`).
+    /// The installed copy (`<sb_home>/workspaces/<name>/sb.flow.yaml`, or
+    /// `flow.yaml` from a pre-0.6 install).
     pub flow: &'a WorkspaceFlow,
     /// Root of the vault `type:` names resolve in (the configured
     /// `messages_root`, the one `sb install` imports into).
     pub vault_root: &'a Path,
-    /// The repo `flow.yaml` when it was modified after the installed copy
+    /// The repo flow file when it was modified after the installed copy
     /// was written (`sb_workspace::is_stale`); `None` when current or when
     /// the workspace has no source.
     pub stale_repo_flow: Option<&'a Path>,
+    /// The host the workspace is checked for: decides `platforms:` support
+    /// and which overlays merge into `requires`.
+    pub host: Host,
 }
 
-/// A module of the workspace whose `sb.dev.yml` parsed.
+/// A module of the workspace whose manifest parsed and validated.
 struct LoadedModule<'a> {
     name: &'a str,
-    dev_yml: &'a Path,
+    /// The manifest file (`sb.module.yaml`, or the legacy `sb.dev.yml`).
+    manifest: &'a Path,
     dev: ModuleDevConfig,
 }
 
@@ -546,8 +549,8 @@ fn entries_of(dev: &ModuleDevConfig) -> Vec<EntryRef<'_>> {
 /// Validate one installed workspace. Rows, in order:
 ///
 /// - `workspace`: the name, module count, and where it was installed from.
-/// - `ws modules`: `[FAIL]` per module whose `sb.dev.yml` is missing or does
-///   not parse; one `[OK]` otherwise.
+/// - `ws modules`: `[FAIL]` per module whose module manifest is missing,
+///   does not parse, or fails validation; one `[OK]` otherwise.
 /// - `ws types`: `[FAIL]` per proto/fb entry whose `type:` is not a vault
 ///   message (nor an `iox2_variants` variant); raw entries carry no type.
 /// - `ws instances`: `[FAIL]` per instance id listed twice for one module.
@@ -555,12 +558,29 @@ fn entries_of(dev: &ModuleDevConfig) -> Vec<EntryRef<'_>> {
 ///   module, disagree on `encoding:`.
 /// - `ws io files`: `[WARN]` per module with generated files missing under
 ///   its io dir (`publishers/`, `subscribers/`, `services/<name>.<ext>`).
-/// - `ws source`: `[WARN]` when the repo `flow.yaml` is newer than the
+/// - `ws requires`: one `[FAIL]` naming, per module, the `requires:`
+///   executables missing from PATH; modules the host does not support are
+///   skipped.
+/// - `ws platforms`: `[WARN]` per module whose `platforms:` block does not
+///   list this host.
+/// - `ws wires`: `[FAIL]` per problem with a `wires:` entry, checked against
+///   the module manifests and instance lists.
+/// - `deprecated`: one `[WARN]` listing every pre-0.6 file or form the
+///   workspace still uses, one per line.
+/// - `ws source`: `[WARN]` when the repo flow file is newer than the
 ///   installed copy; `[SKIP]` for a workspace with no `source:`.
 ///
 /// Rows for modules that failed `ws modules` are not repeated further down.
 pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckResult> {
-    let paths = ws.flow.module_paths();
+    let manifests: Vec<(String, PathBuf)> = ws
+        .flow
+        .module_paths()
+        .into_iter()
+        .map(|(name, path)| {
+            let manifest = manifest_path(&path);
+            (name, manifest)
+        })
+        .collect();
     let origin = match &ws.flow.source {
         Some(src) => match &src.url {
             Some(url) => format!("installed from {url}"),
@@ -570,21 +590,25 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
     };
     let mut out = vec![ok(
         "workspace",
-        format!("{}: {} module(s), {origin}", ws.name, paths.len()),
+        format!("{}: {} module(s), {origin}", ws.name, manifests.len()),
     )];
 
     let mut loaded: Vec<LoadedModule<'_>> = Vec::new();
     let mut module_fails = Vec::new();
-    for (name, dev_yml) in &paths {
-        match load_dev_yml(dev_yml) {
-            Ok(dev) => loaded.push(LoadedModule { name, dev_yml, dev }),
+    for (name, manifest) in &manifests {
+        match load_manifest(manifest) {
+            Ok(dev) => loaded.push(LoadedModule {
+                name,
+                manifest,
+                dev,
+            }),
             Err(e) => module_fails.push(fail("ws modules", format!("{name}: {e}"))),
         }
     }
     if module_fails.is_empty() {
         out.push(ok(
             "ws modules",
-            format!("{} module(s), every sb.dev.yml parses", loaded.len()),
+            format!("{} module(s), every module manifest parses", loaded.len()),
         ));
     }
     out.extend(module_fails);
@@ -593,6 +617,10 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
     out.extend(check_ws_instances(ws.flow));
     out.extend(check_ws_encoding(cfg, ws.name, &loaded));
     out.extend(check_ws_io_files(&loaded));
+    out.push(check_ws_requires(&ws.host, &loaded));
+    out.extend(check_ws_platforms(&ws.host, &loaded));
+    out.extend(check_ws_wires(ws.flow, &loaded));
+    out.push(check_ws_deprecated(ws, &loaded));
     out.push(match (&ws.flow.source, ws.stale_repo_flow) {
         (None, _) => skip("ws source", "no repo flow.yaml to compare with"),
         (Some(_), Some(repo)) => warn(
@@ -610,20 +638,42 @@ pub fn check_workspace(cfg: &SbCliConfig, ws: &WorkspaceView<'_>) -> Vec<CheckRe
     out
 }
 
-/// Read and parse one module's `sb.dev.yml`; the error is the row text.
-fn load_dev_yml(dev_yml: &Path) -> Result<ModuleDevConfig, String> {
-    if !dev_yml.is_file() {
+/// Read, parse and validate one module manifest; the error is the row text.
+fn load_manifest(manifest: &Path) -> Result<ModuleDevConfig, String> {
+    if !manifest.is_file() {
         return Err(format!(
-            "no sb.dev.yml at {} (run `sb init` in the module)",
-            dev_yml.display()
+            "no module manifest at {} (run `sb init` in the module)",
+            manifest.display()
         ));
     }
-    let text = std::fs::read_to_string(dev_yml)
-        .map_err(|e| format!("cannot read {}: {e}", dev_yml.display()))?;
+    let text = std::fs::read_to_string(manifest)
+        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
     if text.trim().is_empty() {
-        return Err(format!("{} is empty", dev_yml.display()));
+        return Err(format!("{} is empty", manifest.display()));
     }
-    serde_yaml::from_str(&text).map_err(|e| format!("{} does not parse: {e}", dev_yml.display()))
+    let dev: ModuleDevConfig = serde_yaml::from_str(&text)
+        .map_err(|e| format!("{} does not parse: {e}", manifest.display()))?;
+    // Parsing alone checks neither the `platforms:` keys nor the
+    // one-command rule for `scripts.start`; launch refuses such a file, so
+    // the check says so first.
+    dev.validate()
+        .map_err(|e| format!("{} is invalid: {e}", manifest.display()))?;
+    Ok(dev)
+}
+
+/// The manifest file a flow or registry path names. A directory is probed
+/// for [`sb_core::module_file_candidates`] in order (new name first) and
+/// falls back to the new name when neither exists; a file path is used as
+/// is, so a 0.5 install that recorded `.../sb.dev.yml` keeps resolving.
+fn manifest_path(path: &Path) -> PathBuf {
+    if !path.is_dir() {
+        return path.to_path_buf();
+    }
+    sb_core::module_file_candidates()
+        .into_iter()
+        .map(|name| path.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| path.join(sb_core::MODULE_FILE))
 }
 
 fn check_ws_types(
@@ -686,9 +736,11 @@ fn is_iox2_variant(cfg: &SbCliConfig, name: &sb_vault::MessageName) -> bool {
 fn check_ws_instances(flow: &WorkspaceFlow) -> Vec<CheckResult> {
     let mut out = Vec::new();
     let mut total = 0usize;
-    for (module, list) in &flow.instances {
+    // `instances_for` is the inline list under the module entry, else the
+    // legacy top-level one, which is what launch fans out.
+    for module in flow.modules.keys() {
         let mut seen = std::collections::BTreeSet::new();
-        for inst in list {
+        for inst in flow.instances_for(module) {
             total += 1;
             if !seen.insert(inst.id.as_str()) {
                 out.push(fail(
@@ -811,7 +863,7 @@ fn check_ws_io_files(modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
     let mut out = Vec::new();
     let mut expected = 0usize;
     for m in modules {
-        let io = m.dev.module_root(m.dev_yml).join(&m.dev.io_dir);
+        let io = m.dev.module_root(m.manifest).join(&m.dev.io_dir);
         let files = expected_io_files(&m.dev);
         expected += files.len();
         let missing: Vec<String> = files
@@ -840,6 +892,264 @@ fn check_ws_io_files(modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
         ));
     }
     out
+}
+
+/// `<os>-<arch>` of `host`, as `ws platforms` names it.
+fn host_label(host: &Host) -> String {
+    format!("{}-{}", host.os, host.arch)
+}
+
+/// `ws requires`: every executable in a module's merged `requires:` must
+/// be on PATH. Modules the host does not support are skipped; `ws
+/// platforms` reports them. One row: `[FAIL]` naming each module's missing
+/// tools, joined by `; `, or `[OK]`.
+fn check_ws_requires(host: &Host, modules: &[LoadedModule<'_>]) -> CheckResult {
+    let mut problems: Vec<String> = Vec::new();
+    for m in modules {
+        if !m.dev.supports_host(host) {
+            continue;
+        }
+        let missing: Vec<String> = merged_requires(&m.dev, host)
+            .into_iter()
+            .filter(|bin| which::which(bin).is_err())
+            .collect();
+        if !missing.is_empty() {
+            problems.push(format!("{}: missing {}", m.name, missing.join(", ")));
+        }
+    }
+    if problems.is_empty() {
+        ok("ws requires", "all required tools present")
+    } else {
+        fail("ws requires", problems.join("; "))
+    }
+}
+
+/// A module's `requires:` after the platform merge for `host`, taken from
+/// [`ModuleDevConfig::resolve`]. When `resolve` refuses (a unity module has
+/// no start command) the same merge, top level then each overlay, appended
+/// and deduplicated, is done here so those `requires` are still checked.
+fn merged_requires(dev: &ModuleDevConfig, host: &Host) -> Vec<String> {
+    if let Ok(resolved) = dev.resolve(host) {
+        return resolved.requires;
+    }
+    let overlays = dev.platforms.overlays_for(host);
+    let lists = std::iter::once(&dev.requires).chain(overlays.iter().map(|o| &o.requires));
+    let mut out: Vec<String> = Vec::new();
+    for req in lists.flatten() {
+        if !out.contains(req) {
+            out.push(req.clone());
+        }
+    }
+    out
+}
+
+/// `ws platforms`: `[WARN]` per module whose `platforms:` block does not
+/// list this host (`sb up` skips it, `sb run` refuses it). A module with no
+/// `platforms:` block supports every host.
+fn check_ws_platforms(host: &Host, modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
+    let here = host_label(host);
+    let mut out = Vec::new();
+    for m in modules {
+        if m.dev.supports_host(host) {
+            continue;
+        }
+        let declares: Vec<&str> = m.dev.platforms.0.keys().map(String::as_str).collect();
+        out.push(warn(
+            "ws platforms",
+            format!(
+                "{}: not supported on {here} (declares: {})",
+                m.name,
+                declares.join(", ")
+            ),
+        ));
+    }
+    if out.is_empty() {
+        out.push(ok("ws platforms", "all modules support this host"));
+    }
+    out
+}
+
+/// `ws wires`: `[FAIL]` per problem, as `<lhs>: <reason>`, for every
+/// `wires:` entry. Grammar errors come from [`WorkspaceFlow::wires`];
+/// existence, instance, transport and type checks run against the loaded
+/// manifests and the flow's instance lists. A wire with an end in a module
+/// whose manifest did not load is skipped (`ws modules` already failed it).
+fn check_ws_wires(flow: &WorkspaceFlow, modules: &[LoadedModule<'_>]) -> Vec<CheckResult> {
+    let wires = match flow.wires() {
+        Ok(wires) => wires,
+        Err(e) => return vec![fail("ws wires", e.to_string())],
+    };
+    if wires.is_empty() {
+        return vec![ok("ws wires", "no wires")];
+    }
+    let mut out = Vec::new();
+    let mut resolved = 0usize;
+    for wire in &wires {
+        let Some(problems) = wire_problems(flow, modules, wire) else {
+            continue;
+        };
+        if problems.is_empty() {
+            resolved += 1;
+            continue;
+        }
+        let lhs = format!("{}.{}", wire.sub.module, wire.sub.entry);
+        out.extend(
+            problems
+                .into_iter()
+                .map(|reason| fail("ws wires", format!("{lhs}: {reason}"))),
+        );
+    }
+    if out.is_empty() {
+        out.push(ok("ws wires", format!("{resolved} wire(s) resolve")));
+    }
+    out
+}
+
+/// Every reason `wire` does not resolve; empty when it does. `None` when an
+/// end names a module that is in the flow but whose manifest failed to
+/// load, so it is not misreported as unknown.
+///
+/// A missing module or entry stops the check at that point. Past it, the
+/// selector, transport and type checks are independent and all reported.
+fn wire_problems(
+    flow: &WorkspaceFlow,
+    modules: &[LoadedModule<'_>],
+    wire: &Wire,
+) -> Option<Vec<String>> {
+    let (sub_end, pub_end) = (&wire.sub, &wire.pub_);
+
+    let Some(sub_module) = find_loaded(modules, &sub_end.module) else {
+        return (!flow.modules.contains_key(&sub_end.module))
+            .then(|| vec!["unknown subscriber module".to_owned()]);
+    };
+    let Some(sub) = sub_module
+        .dev
+        .subscribers
+        .iter()
+        .find(|s| s.name == sub_end.entry)
+    else {
+        return Some(vec![format!(
+            "no subscriber {} in {}",
+            sub_end.entry, sub_end.module
+        )]);
+    };
+    let Some(pub_module) = find_loaded(modules, &pub_end.module) else {
+        return (!flow.modules.contains_key(&pub_end.module))
+            .then(|| vec!["unknown publisher module".to_owned()]);
+    };
+    let Some(publ) = pub_module
+        .dev
+        .publishers
+        .iter()
+        .find(|p| p.name == pub_end.entry)
+    else {
+        return Some(vec![format!(
+            "no publisher {} in {}",
+            pub_end.entry, pub_end.module
+        )]);
+    };
+
+    let mut problems = Vec::new();
+    let pub_ids = flow.instances_for(&pub_end.module);
+    match &pub_end.selector {
+        WireSelector::None => {}
+        WireSelector::All => {
+            if sub.transport == Transport::Iceoryx2 || publ.transport == Transport::Iceoryx2 {
+                problems.push("[*] on iceoryx2 is not supported".to_owned());
+            }
+        }
+        WireSelector::SameId => {
+            let sub_ids = flow.instances_for(&sub_end.module);
+            if sub_ids.is_empty() {
+                problems.push(format!("{{id}} but {} has no instances", sub_end.module));
+            }
+            if pub_ids.is_empty() {
+                problems.push(format!("{{id}} but {} has no instances", pub_end.module));
+            } else {
+                // Each subscriber instance reads the publisher instance with
+                // its own id, so every one of them needs a counterpart.
+                for inst in sub_ids {
+                    if !pub_ids.iter().any(|p| p.id == inst.id) {
+                        problems.push(format!("no instance {} in {}", inst.id, pub_end.module));
+                    }
+                }
+            }
+        }
+        WireSelector::Id(id) => {
+            if !pub_ids.iter().any(|p| p.id == *id) {
+                problems.push(format!("no instance {id} in {}", pub_end.module));
+            }
+        }
+    }
+    if sub.transport != publ.transport {
+        problems.push(format!(
+            "transport mismatch ({} vs {})",
+            sub.transport.as_str(),
+            publ.transport.as_str()
+        ));
+    }
+    if sub.msg_type != publ.msg_type {
+        // `type:` is absent only on raw entries.
+        problems.push(format!(
+            "type mismatch ({} vs {})",
+            sub.msg_type.as_deref().unwrap_or("raw"),
+            publ.msg_type.as_deref().unwrap_or("raw")
+        ));
+    }
+    Some(problems)
+}
+
+/// The loaded module the flow calls `name`, if its manifest loaded.
+fn find_loaded<'m, 'a>(
+    modules: &'m [LoadedModule<'a>],
+    name: &str,
+) -> Option<&'m LoadedModule<'a>> {
+    modules.iter().find(|m| m.name == name)
+}
+
+/// Suffix of every `deprecated` line: where the migration steps live.
+const MIGRATING: &str = "-> see sbcli_module.md §Migrating";
+
+/// `deprecated`: one `[WARN]` listing every pre-0.6 file or form the
+/// workspace still relies on, one per line, each pointing at the migration
+/// guide. All of them still work in 0.6 and are removed in 0.7.0. Only
+/// modules whose manifest loaded are inspected.
+fn check_ws_deprecated(ws: &WorkspaceView<'_>, modules: &[LoadedModule<'_>]) -> CheckResult {
+    let mut items: Vec<String> = Vec::new();
+    for m in modules {
+        if sb_core::is_legacy_module_file(m.manifest) {
+            items.push(format!("sb.dev.yml at {}", m.manifest.display()));
+        }
+    }
+    let repo_flow = ws.flow.source.as_ref().map(|src| src.repo_flow.as_path());
+    if let Some(repo) = repo_flow {
+        if sb_core::is_legacy_flow_file(repo) && repo.is_file() {
+            items.push(format!("flow.yaml at {}", repo.display()));
+        }
+    }
+    for script in ["runscript.bash", "stopscript.bash"] {
+        for m in modules {
+            let path = m.dev.module_root(m.manifest).join(script);
+            if path.is_file() {
+                items.push(format!("{script} at {}", path.display()));
+            }
+        }
+    }
+    if ws.flow.has_legacy_instances() {
+        let flow = match repo_flow {
+            Some(repo) => repo.display().to_string(),
+            None => format!("the installed flow of workspace {}", ws.name),
+        };
+        items.push(format!("top-level instances: in {flow}"));
+    }
+    if items.is_empty() {
+        return ok("deprecated", "nothing deprecated in use");
+    }
+    let lines: Vec<String> = items
+        .into_iter()
+        .map(|item| format!("{item} {MIGRATING}"))
+        .collect();
+    warn("deprecated", lines.join(&format!("\n{MSG_COL}")))
 }
 
 /// Count files with `ext` anywhere under `dir`. 0 if absent.

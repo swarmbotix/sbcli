@@ -1,13 +1,18 @@
-//! L5 test sandbox — workspace + N adopted modules with runscripts.
+//! L5 test sandbox: a workspace plus N modules.
 //!
-//! Builds on [`WsSandbox`] (L2 primitives). Each module gets an empty
-//! Rust project root, an `sb.dev.yml` (via `sb init --rust`), and a
-//! caller-supplied runscript body (or no runscript at all, to drive
-//! TDD #2 "missing runscript" cases).
+//! Builds on [`WsSandbox`] (L2 primitives). Two ways to add a module:
+//!
+//! - [`L5Sandbox::adopt`]: an empty Rust project root, `sb init --rust`,
+//!   and a caller-supplied `runscript.bash` body. A runscript with no
+//!   `scripts:` in the manifest makes the module **legacy** (deprecated
+//!   launch path, still supported).
+//! - [`L5Sandbox::native`]: a root holding only a caller-written
+//!   `sb.module.yaml`. Register it with [`L5Sandbox::write_installed_flow`],
+//!   which is also how a test lists instances.
 //!
 //! Tmux is required for any test that actually launches a session.
-//! Use [`tmux_available`] to skip in environments without it (CI
-//! sandboxes, headless boxes without a tmux package).
+//! Use [`tmux_launch_supported`] to skip in environments without it (CI
+//! sandboxes, headless boxes without a tmux package, Windows).
 
 #![allow(dead_code)]
 
@@ -16,7 +21,7 @@ use std::process::Command;
 
 use super::WsSandbox;
 
-/// L2 workspace sandbox + a list of adopted modules.
+/// L2 workspace sandbox + a list of modules.
 pub struct L5Sandbox {
     pub ws: WsSandbox,
     pub workspace: String,
@@ -29,16 +34,23 @@ pub struct L5Module {
     pub root: PathBuf,
 }
 
+impl L5Module {
+    /// `<root>/sb.module.yaml`.
+    pub fn manifest(&self) -> PathBuf {
+        self.root.join("sb.module.yaml")
+    }
+}
+
 impl L5Sandbox {
     /// Build a workspace named `demo` with no modules. Tests then call
-    /// [`Self::adopt`] for each module they need.
+    /// [`Self::adopt`] or [`Self::native`] for each module they need.
     pub fn empty() -> Self {
         Self::with_workspace("demo")
     }
 
     /// Like [`Self::empty`] but lets the caller pick the workspace name.
     /// Tests that touch a real tmux session **and** run in parallel
-    /// within the same test binary should use unique workspace names —
+    /// within the same test binary should use unique workspace names:
     /// the tmux session is named `sb-<workspace>` and is global to the
     /// dev box's tmux server, so two tests with the same workspace name
     /// will collide on `tmux new-session`.
@@ -64,7 +76,9 @@ impl L5Sandbox {
     }
 
     /// Create a Rust project root `<tempdir>/<name>/`, `sb init` it,
-    /// then write the runscript body (or skip if `runscript = None`).
+    /// then write the runscript body. `runscript = None` leaves no
+    /// runscript on disk, which makes the module launch natively with the
+    /// rust defaults (`cargo build --release` first).
     pub fn adopt(&mut self, name: &str, runscript: Option<&str>) -> L5Module {
         let root = self.ws.tempdir().join(name);
         std::fs::create_dir_all(&root).unwrap();
@@ -83,17 +97,11 @@ impl L5Sandbox {
         match runscript {
             Some(body) => {
                 std::fs::write(&runscript_path, body).unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&runscript_path).unwrap().permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&runscript_path, perms).unwrap();
-                }
+                make_executable(&runscript_path);
             }
             None => {
-                // `sb init` writes a runscript stub; tests that want
-                // "no runscript on disk" must delete it explicitly.
+                // `sb init` writes a runscript stub only with
+                // `--runscript`; remove one if it is there anyway.
                 if runscript_path.exists() {
                     std::fs::remove_file(&runscript_path).unwrap();
                 }
@@ -107,9 +115,25 @@ impl L5Sandbox {
         m
     }
 
+    /// Create `<tempdir>/<name>/` holding only `sb.module.yaml` with
+    /// `manifest` as its body. No `sb init`, no runscript: the module
+    /// launches natively. It is not registered anywhere; list it in
+    /// [`Self::write_installed_flow`].
+    pub fn native(&mut self, name: &str, manifest: &str) -> L5Module {
+        let root = self.ws.tempdir().join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        let m = L5Module {
+            name: name.to_string(),
+            root,
+        };
+        std::fs::write(m.manifest(), manifest).unwrap();
+        self.modules.push(m.clone());
+        m
+    }
+
     /// Write an executable `stopscript.bash` into an already-adopted
-    /// module's root. Mirror of [`Self::adopt`] for the runscript half;
-    /// `sb stop` requires this to be present (no `sb init` stub exists).
+    /// module's root. Mirror of [`Self::adopt`] for the runscript half
+    /// (legacy modules only; a native module uses `scripts.stop`).
     pub fn write_stopscript(&self, module: &str, body: &str) {
         let m = self
             .modules
@@ -118,13 +142,24 @@ impl L5Sandbox {
             .unwrap_or_else(|| panic!("module {module:?} not adopted"));
         let path = m.root.join("stopscript.bash");
         std::fs::write(&path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap();
-        }
+        make_executable(&path);
+    }
+
+    /// The active workspace's installed flow: `sb.flow.yaml`, or the
+    /// pre-0.6 `flow.yaml` if that is the one on disk.
+    pub fn installed_flow_path(&self) -> PathBuf {
+        let dir = self.sb_home().join("workspaces").join(&self.workspace);
+        ["sb.flow.yaml", "flow.yaml"]
+            .iter()
+            .map(|f| dir.join(f))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| dir.join("sb.flow.yaml"))
+    }
+
+    /// Replace the active workspace's installed flow with `body`, the way
+    /// a test registers native modules and their instances.
+    pub fn write_installed_flow(&self, body: &str) {
+        std::fs::write(self.installed_flow_path(), body).unwrap();
     }
 
     pub fn cmd(&self) -> Command {
@@ -140,12 +175,12 @@ impl L5Sandbox {
     }
 
     /// Tear down the workspace's tmux session if any tests left it running.
-    /// Idempotent — safe to call multiple times.
+    /// Idempotent: safe to call multiple times.
     pub fn tmux_down(&self) {
         if let Some(tmux) = which_tmux() {
             let _ = Command::new(&tmux)
                 .args(["kill-session", "-t"])
-                .arg(format!("sb-{}", self.workspace))
+                .arg(format!("=sb-{}", self.workspace))
                 .output();
         }
     }
@@ -153,9 +188,43 @@ impl L5Sandbox {
 
 impl Drop for L5Sandbox {
     fn drop(&mut self) {
-        // Safety net — kill any orphan tmux session from a failed test.
+        // Safety net: kill any orphan tmux session from a failed test.
         self.tmux_down();
     }
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) {}
+
+/// `path` as a YAML single-quoted scalar (no escape sequences inside),
+/// for a module entry's `path:` in [`L5Sandbox::write_installed_flow`].
+pub fn yaml_path(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
+/// Poll `path` until it holds something or `max_ms` passes. tmux starts
+/// panes asynchronously, so a sentinel written by a pane must be awaited.
+pub fn wait_for_file(path: &Path, max_ms: u64) -> Option<String> {
+    let step_ms = 50u64;
+    let mut waited = 0u64;
+    while waited < max_ms {
+        if let Ok(body) = std::fs::read_to_string(path) {
+            if !body.is_empty() {
+                return Some(body);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(step_ms));
+        waited += step_ms;
+    }
+    None
 }
 
 /// Is tmux on PATH? Tests that touch a real tmux session call this
@@ -165,20 +234,18 @@ pub fn tmux_available() -> bool {
     which_tmux().is_some()
 }
 
-/// True if the multiplexer can actually *execute* a launch pane.
+/// True if the multiplexer can run the panes these tests launch.
 ///
-/// `sb up` / `sb run` hand tmux a POSIX command line — `cd '<dir>' &&
-/// '<dir>/runscript.bash'` (see `sb_launch::Pane::shell_command`) — and the
-/// script itself is bash (`#!/usr/bin/env bash`, `${BASH_SOURCE[0]}`,
-/// `printf %q`). On Windows the `tmux` on PATH is psmux, which dispatches
-/// pane commands through PowerShell, so that command line is not
-/// interpretable no matter which bash is installed.
+/// Legacy panes are a POSIX command line (`cd '<dir>' &&
+/// '<dir>/runscript.bash'`, see `sb_launch::Pane::shell_command`) around a
+/// bash script, and the native fixtures start `sh -c ...` directly. On
+/// Windows the `tmux` on PATH is psmux, whose pane semantics (direct exec,
+/// `-c`, `-e`, exact targets) are not verified yet, so these tests skip
+/// there; see installguide_windows.md §9.5.
 ///
 /// Tests that only build a plan or assert preconditions can keep using
 /// [`tmux_available`]; tests that expect a pane to run something must use
-/// this. Porting the launch path to Windows (a `runscript.ps1` variant, or
-/// routing panes through bash explicitly) is tracked as §9.5 in
-/// installguide_windows.md.
+/// this.
 pub fn tmux_launch_supported() -> bool {
     tmux_available() && !cfg!(windows)
 }
@@ -187,27 +254,27 @@ fn which_tmux() -> Option<PathBuf> {
     which::which("tmux").ok()
 }
 
-/// `tmux has-session -t <session>` — true if the session exists.
+/// `tmux has-session -t =<session>`: true if exactly that session exists.
 pub fn has_session(session: &str) -> bool {
     let Some(tmux) = which_tmux() else {
         return false;
     };
     Command::new(&tmux)
         .args(["has-session", "-t"])
-        .arg(session)
+        .arg(format!("={session}"))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// `tmux list-windows -t <session> -F #{window_name}` → vector of window names.
+/// `tmux list-windows -t =<session> -F #{window_name}`: window names.
 pub fn list_windows(session: &str) -> Vec<String> {
     let Some(tmux) = which_tmux() else {
         return Vec::new();
     };
     let Ok(out) = Command::new(&tmux)
         .args(["list-windows", "-t"])
-        .arg(session)
+        .arg(format!("={session}"))
         .arg("-F")
         .arg("#{window_name}")
         .output()

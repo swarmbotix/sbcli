@@ -1,8 +1,14 @@
 //! L5 — `sb gopro`: freeze a module for production.
 //!
-//! Reads the module's `sb.dev.yml`, walks `<module_root>/<io_dir>/` to
-//! confirm every declared pub/sub has its generated file on disk, then
-//! writes a sanitized `sb.prd.yml` next to `sb.dev.yml`.
+//! Reads the module manifest (`sb.module.yaml`, or a legacy `sb.dev.yml`),
+//! walks `<module_root>/<io_dir>/` to confirm every declared pub/sub has
+//! its generated file on disk, then writes a sanitized `sb.prd.yml` next
+//! to the manifest.
+//!
+//! Only the published interface reaches `sb.prd.yml`; the 0.6 launch keys
+//! (`scripts`, `env`, `requires`, `platforms`, `version`, `sb`,
+//! `description`) are development-time facts and are dropped with the
+//! rest.
 //!
 //! What gets stripped (host-specific, must not leak into a binary that
 //! ships to other machines):
@@ -255,28 +261,29 @@ pub struct GoproOutcome {
     pub missing_files: Vec<MissingFile>,
 }
 
-/// Run gopro on a single module given its `sb.dev.yml` on disk.
+/// Run gopro on a single module given its manifest on disk
+/// (`sb.module.yaml`, or a legacy `sb.dev.yml`).
 ///
 /// Steps:
-///   1. Parse `sb.dev.yml`.
+///   1. Parse the manifest.
 ///   2. Walk `io_dir/` and record any missing files (non-fatal).
 ///   3. Transform → `ModulePrdConfig`.
 ///   4. Serialize to YAML.
 ///   5. Sanitization lint — abort if any leak.
-///   6. Write `<module_root>/sb.prd.yml`.
+///   6. Write `sb.prd.yml` next to the manifest.
 pub fn gopro_module(dev_yml_path: &Path) -> Result<GoproOutcome> {
     if !dev_yml_path.exists() {
-        bail!("sb.dev.yml not found at {}", dev_yml_path.display());
+        bail!("module manifest not found at {}", dev_yml_path.display());
     }
     let body = fs::read_to_string(dev_yml_path)
         .with_context(|| format!("reading {}", dev_yml_path.display()))?;
     let dev: ModuleDevConfig = serde_yaml::from_str(&body)
         .with_context(|| format!("parsing {}", dev_yml_path.display()))?;
-    // sb.prd.yml lands next to sb.dev.yml; the io files live under the
+    // sb.prd.yml lands next to the manifest; the io files live under the
     // module root, which `root:` may move away from that directory.
     let yml_dir = dev_yml_path
         .parent()
-        .ok_or_else(|| anyhow!("sb.dev.yml has no parent: {}", dev_yml_path.display()))?
+        .ok_or_else(|| anyhow!("module manifest has no parent: {}", dev_yml_path.display()))?
         .to_path_buf();
     let module_root = dev.module_root(dev_yml_path);
 
@@ -289,7 +296,7 @@ pub fn gopro_module(dev_yml_path: &Path) -> Result<GoproOutcome> {
     if !leaks.is_empty() {
         bail!(
             "sb.prd.yml would leak host-specific data — refusing to write:\n{}\
-             (this is a bug in sb-gopro — please file an issue with the offending sb.dev.yml)",
+             (this is a bug in sb-gopro — please file an issue with the offending module manifest)",
             format_leaks(&leaks),
         );
     }
@@ -320,15 +327,15 @@ pub struct ModuleResult {
 }
 
 /// `sb gopro --all` — run [`gopro_module`] on every module in the
-/// active workspace's `flow.yaml`. Errors per-module are collected,
-/// not propagated, so a single broken `sb.dev.yml` doesn't stop the
-/// rest from freezing.
+/// active workspace's flow. Errors per-module are collected, not
+/// propagated, so a single broken module manifest doesn't stop the rest
+/// from freezing.
 pub fn gopro_all(home: &SbHome, workspace: &str) -> Result<Vec<ModuleResult>> {
     let flow = read_flow(home, workspace)
-        .with_context(|| format!("reading flow.yaml for workspace {workspace:?}"))?;
+        .with_context(|| format!("reading the flow of workspace {workspace:?}"))?;
     let modules = flow.module_paths();
     if modules.is_empty() {
-        bail!("workspace {workspace:?} has no modules in flow.yaml — run `sb init` first");
+        bail!("workspace {workspace:?} has no modules in its flow — run `sb init` first");
     }
     let mut out = Vec::with_capacity(modules.len());
     for (module, dev_yml) in modules {
@@ -364,6 +371,10 @@ mod tests {
     }
 
     fn sample_dev() -> ModuleDevConfig {
+        // Every key this test does not set keeps its parsed default, so the
+        // fixture does not have to track the manifest's launch keys.
+        let base: ModuleDevConfig =
+            serde_yaml::from_str("module: camera\nlanguage: rust\n").unwrap();
         ModuleDevConfig {
             module: "camera".into(),
             language: Language::Rust,
@@ -385,6 +396,7 @@ mod tests {
             services: vec![ServiceSpec {
                 name: "calib".into(),
             }],
+            ..base
         }
     }
 

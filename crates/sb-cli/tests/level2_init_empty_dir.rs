@@ -1,11 +1,12 @@
-//! L2 TDD test #3 — `sb init --rust ./pubber` writes the three artifacts
-//! and registers the module in the active workspace's flow.yaml.
+//! L2 TDD test #3 — `sb init --rust ./pubber` writes `sb.module.yaml` and
+//! an empty IO directory (no runscript unless `--runscript`), and registers
+//! the module in the active workspace's installed flow.
 
 mod common;
 use common::WsSandbox;
 
 #[test]
-fn init_empty_dir_writes_three_artifacts_and_registers() {
+fn init_empty_dir_writes_manifest_and_io_dir_and_registers() {
     let s = WsSandbox::new();
 
     // Create + activate workspace `demo`.
@@ -24,26 +25,18 @@ fn init_empty_dir_writes_three_artifacts_and_registers() {
         .unwrap();
     assert!(out.status.success(), "init failed: {out:?}");
 
-    // 1. sb.dev.yml exists with right shape.
-    let dev_yml = project.join("sb.dev.yml");
-    assert!(dev_yml.exists(), "sb.dev.yml missing");
-    let body = std::fs::read_to_string(&dev_yml).unwrap();
+    // 1. sb.module.yaml exists with right shape; no legacy file is written.
+    let manifest = project.join(sb_core::MODULE_FILE);
+    assert!(manifest.exists(), "{} missing", sb_core::MODULE_FILE);
+    let body = std::fs::read_to_string(&manifest).unwrap();
     assert!(body.contains("module: pubber"), "body: {body}");
     assert!(body.contains("language: rust"), "body: {body}");
     assert!(body.contains("io_dir: swarmbotix_io"), "body: {body}");
+    assert!(!project.join(sb_core::LEGACY_MODULE_FILE).exists());
 
-    // 2. runscript.bash exists + executable bit set.
+    // 2. No runscript.bash: sb launches the module natively.
     let rs = project.join("runscript.bash");
-    assert!(rs.exists(), "runscript.bash missing");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&rs).unwrap().permissions().mode();
-        assert!(
-            mode & 0o111 != 0,
-            "runscript not executable (mode {mode:o})"
-        );
-    }
+    assert!(!rs.exists(), "runscript.bash written without --runscript");
 
     // 3. swarmbotix_io/ exists as empty dir.
     let io = project.join("swarmbotix_io");
@@ -53,20 +46,42 @@ fn init_empty_dir_writes_three_artifacts_and_registers() {
         "swarmbotix_io/ should be empty"
     );
 
-    // 4. flow.yaml has pubber → <abs>/sb.dev.yml.
+    // 4. The installed flow has pubber → <abs>/sb.module.yaml.
     let flow = s
         .sb_home()
         .join("workspaces")
         .join("demo")
-        .join("flow.yaml");
+        .join(sb_core::FLOW_FILE);
     let flow_body = std::fs::read_to_string(&flow).unwrap();
     assert!(
         flow_body.contains("pubber"),
-        "flow.yaml missing pubber: {flow_body}"
+        "installed flow missing pubber: {flow_body}"
     );
-    let canon_dev = std::fs::canonicalize(&dev_yml).unwrap();
+    let canon_manifest = std::fs::canonicalize(&manifest).unwrap();
     assert!(
-        flow_body.contains(canon_dev.to_str().unwrap()),
-        "flow.yaml missing absolute path to sb.dev.yml: {flow_body}"
+        flow_body.contains(canon_manifest.to_str().unwrap()),
+        "installed flow missing absolute path to the manifest: {flow_body}"
     );
+
+    // 5. `--runscript` still writes the executable stub (deprecated path).
+    let legacy = s.tempdir().join("legacy_launch");
+    std::fs::create_dir_all(&legacy).unwrap();
+    let out = s
+        .cmd()
+        .args(["init", "--rust", "--runscript"])
+        .arg(&legacy)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "init --runscript failed: {out:?}");
+    let rs = legacy.join("runscript.bash");
+    assert!(rs.exists(), "runscript.bash missing with --runscript");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&rs).unwrap().permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "runscript not executable (mode {mode:o})"
+        );
+    }
 }

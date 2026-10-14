@@ -1,6 +1,8 @@
 module: subber
 language: rust
 io_dir: swarmbotix_io
+scripts:
+  start: target/release/hello_subber{exe} {args}
 subscribers:
 - name: hello
   key: dev01/demo/pubber/zenoh/hello

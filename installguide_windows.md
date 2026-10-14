@@ -61,7 +61,7 @@ absent, wires `~/.bashrc`, writes an `uninstall.sh`, and finishes by running
 | Installer | `install.sh` — `readlink -f`, `mktemp -d`, `unzip`, `sed -i`, `hostname -s` | `install.ps1` |
 | PATH wiring | append to `~/.bashrc` | user-scoped `Path` env var |
 | Native libs | `libzenohc.so`, `libiceoryx2_ffi_c.so` | `zenohc.dll`, `iceoryx2_ffi_c.dll` |
-| Multiplexer | `tmux` | `psmux` (`winget install psmux`) — **already handled**, `sb` only ever invokes `tmux` by name |
+| Multiplexer | `tmux` | `psmux` (`winget install psmux`) — **already handled**, `sb` invokes `tmux` by name and (0.6.0+) falls back to `psmux` on `PATH` |
 
 The **Rust source is already portable.** `set_executable` is `#[cfg(unix)]` with
 a no-op `#[cfg(not(unix))]` twin
@@ -144,8 +144,8 @@ Everything the tooling needs, derived from `OS` alone:
 | `windows` | `x86_64-pc-windows-msvc` | `sb.exe` | `windows-x86_64` | `platforms/windows/dist/<ver>/` | `install.ps1` | `%USERPROFILE%\.swarmbotix` |
 | `mac` | `aarch64-apple-darwin` | `sb` | `macos-arm64` | `platforms/mac/dist/<ver>/` | `install.sh` | `$HOME/.swarmbotix` |
 
-Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.5.0 is
-`swarmbotix-0.5.0-windows-x86_64`.
+Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.6.0 is
+`swarmbotix-0.6.0-windows-x86_64`.
 
 `%USERPROFILE%\.swarmbotix` is not a free choice — it is what
 `dirs::home_dir()` returns on Windows, which is what `sb` itself uses to find
@@ -161,12 +161,15 @@ directories on boxes that ran the test suite before the §9.4 fix.
 |---|---|---|
 | Rust stable, `x86_64-pc-windows-msvc` | host toolchain; pinned by [rust-toolchain.toml](rust-toolchain.toml) | `rustc -vV` → `host: x86_64-pc-windows-msvc` |
 | **VS Build Tools** — MSVC v143 + Windows 11 SDK | `iceoryx2-pal-posix` compiles a C POSIX shim through `cc`; zenoh links against system crypto | `cl.exe` resolvable from a Developer prompt |
+| **LLVM / libclang** (e.g. `winget install LLVM.LLVM`) | `iceoryx2` runs `bindgen` when it builds for the Windows target, and `bindgen` loads `libclang.dll`; the same applies to every user module that depends on the `iceoryx2` crate | `$env:LIBCLANG_PATH` points at the LLVM `bin` directory (default `C:\Program Files\LLVM\bin`) and `libclang.dll` is in it |
 | PowerShell 7+ | **`build.ps1` only** — it uses `??`. `install.ps1` deliberately runs on 5.1 too; see below | `$PSVersionTable.PSVersion` |
 | Long paths enabled | deep `target/<triple>/build/...` trees exceed `MAX_PATH` | `HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1` |
 
 No `jq`, `rsync`, `zip`, or Git Bash is needed to *build* — that is the point of
-`build.ps1`. Git Bash **is** needed at runtime to execute generated
-`runscript.bash` files; see §9.5.
+`build.ps1`. Since 0.6.0 Git Bash is not needed at runtime either: modules
+launch natively from `sb.module.yaml`, and only a legacy module that still
+carries a bash launch script needs it (and cannot launch under psmux); see
+§9.5.
 
 **The build box and the target box have different floors.** `build.ps1` is
 maintainer-side and may assume pwsh 7. `install.ps1` runs on whatever an end
@@ -252,9 +255,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.sh
 │   │   └── sb.config.yml.template                    ← .so paths
 │   └── dist/                                         ← release OUTPUT, one dir per version
-│       ├── 0.5.0/
-│       │   ├── swarmbotix-0.5.0-linux-x86_64.zip
-│       │   ├── swarmbotix-0.5.0-linux-x86_64.zip.sha256
+│       ├── 0.6.0/
+│       │   ├── swarmbotix-0.6.0-linux-x86_64.zip
+│       │   ├── swarmbotix-0.6.0-linux-x86_64.zip.sha256
 │       │   └── install.sh                            ← verbatim from dist-tooling/
 │       └── 0.1.28/ …                                 ← previous cuts kept side by side
 │
@@ -264,9 +267,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.ps1
 │   │   └── sb.config.win.yml.template                ← .dll paths
 │   └── dist/
-│       └── 0.5.0/
-│           ├── swarmbotix-0.5.0-windows-x86_64.zip  ← the payload
-│           ├── swarmbotix-0.5.0-windows-x86_64.zip.sha256
+│       └── 0.6.0/
+│           ├── swarmbotix-0.6.0-windows-x86_64.zip  ← the payload
+│           ├── swarmbotix-0.6.0-windows-x86_64.zip.sha256
 │           └── install.ps1                           ← verbatim from dist-tooling/
 │
 └── mac/                                              ← not created yet; add as a sibling
@@ -295,7 +298,7 @@ Identical shape to Linux — one top-level dir named after the package stem, whi
 is what `install.ps1` asserts on:
 
 ```
-swarmbotix-0.5.0-windows-x86_64/
+swarmbotix-0.6.0-windows-x86_64/
 ├── bin/
 │   └── sb.exe                        ← from target/x86_64-pc-windows-msvc/release/
 ├── messages/                         ← one subdir per style; minus .cache/, targets/, message_targets/
@@ -624,7 +627,7 @@ Run on this box (Windows 11, rustc 1.89.0, host `x86_64-pc-windows-msvc`):
   all 26 zenoh 1.9 crates, `iceoryx2 0.9`, and every `sb-*` crate.
 - `cargo build --release --bin sb` → **links**, 2m16s cold, producing
   `target\release\sb.exe` (27.2 MB) + `sb.pdb` (9.8 MB).
-- `sb.exe --version` → `sb 0.5.0`.
+- `sb.exe --version` → `sb 0.6.0`.
 - `sb.exe doctor` → runs, correctly reports the four unset tool paths, and
   **auto-detects psmux**: `[OK] tmux  …\WinGet\Links\tmux.exe (tmux 3.3.4)`.
   The `which`-based resolution in `sb-launch` works exactly as its comment
@@ -649,13 +652,13 @@ It is now split per platform, next to that platform's tooling:
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.5.0-windows-x86_64"
+  "package_stem": "swarmbotix-0.6.0-windows-x86_64"
 }
 ```
 
@@ -721,23 +724,34 @@ wasn't used consistently. Four changes:
   payload namespace; previously the test passed only because the Linux dev box
   happened to have compiled it.
 
-### 9.5 `runscript.bash` stays bash — **runtime constraint, document it**
+### 9.5 Launch on Windows: **closed in 0.6.0 by native launch; psmux to be verified**
 
-`sb init` emits a bash script with a `#!/usr/bin/env bash` shebang, `set -euo
-pipefail`, `${BASH_SOURCE[0]}`, and a `printf %q` argv-quoting loop
-([sb-workspace/src/runscript.rs:24-93](crates/sb-workspace/src/runscript.rs#L24-L93)).
-`sb up` then hands tmux a POSIX command line — `cd '<dir>' && '<script>'`
-([sb-launch/src/lib.rs:82-93](crates/sb-launch/src/lib.rs#L82-L93)) — and
-`Script::filename()` hardcodes the `.bash` extension.
+The gap as it stood through 0.5.x: `sb init` emitted a bash launch script, and
+`sb up` handed tmux a POSIX command line (`cd '<dir>' && '<script>'`). psmux
+dispatches pane commands through PowerShell, so that line was not
+interpretable there no matter which bash was installed, and `sb up` / `sb run`
+did not work on Windows.
 
-psmux dispatches pane commands through PowerShell, so that command line is not
-interpretable there no matter which bash is installed. **`sb up` / `sb run` do
-not work on Windows yet.** This is the one substantive gap left; it needs a
-`runscript.ps1` variant, or panes routed through bash explicitly — a change to
-a published contract (`runscript.bash` is documented in requirements.md and
-sbcli_docker_runscript.md), so it is deliberately not bundled into this work.
+0.6.0 removes the bash pane command instead of porting it
+([plan/native_launch/README.md](plan/native_launch/README.md)). A module
+declares its build and start commands in `sb.module.yaml` (or takes the
+language defaults), and `sb-launch` hands tmux the start **argv** as separate
+trailing arguments with `-c <module root>` and one `-e KEY=VAL` per variable,
+so no shell parses anything. `sb init` no longer writes a launch script
+(`--runscript` keeps the old stub, deprecated), `{exe}` / `{os}` / per-OS
+`platforms:` overlays carry the Windows differences, and `resolve_tmux` falls
+back to `psmux` on `PATH`. Shipped docs: `documents/sbcli_module.md`,
+`documents/sbcli_launch.md` §11.
 
-Two things did land around it:
+**Status: to be verified on a Windows box.** tmux 3.0+ executes two or more
+trailing arguments directly; whether psmux does the same, and honors `-e` on
+`new-window` / `new-session` / `respawn-window` and `remain-on-exit`, has not
+been run. Until it has, treat Windows launch as expected rather than tested,
+and run the L5 native-launch tests (`level5_native_up`, `level5_native_stop`)
+on Windows to settle it. A module that still carries a bash launch script
+(legacy mode) cannot launch under psmux at all; migrating it is the fix.
+
+What landed around the old gap, still in place:
 
 - L5 tests that expect a pane to *execute* now guard on
   `tmux_launch_supported()` rather than `tmux_available()`, and skip on Windows
@@ -751,8 +765,9 @@ Two things did land around it:
   native `C:\Users\…` argument reaches bash with every backslash read as an
   escape, arriving mangled as `C:Usershylee…`.
 
-Smaller follow-on: the stub's `flutter run -d linux` example line should become
-`-d windows` under `OS="windows"`.
+The old follow-on (the stub's `flutter run -d linux` example line) is moot:
+the Flutter default start command is `flutter run -d {os}`, which expands to
+`-d windows` on Windows.
 
 ### 9.6 `$EDITOR` fell back to `vi` — **fixed**
 
@@ -831,7 +846,7 @@ Windows analogue of installguide_ubuntu.md §"Smoke testing before release" — 
 Linux smoke test covers have an equivalent:
 
 ```powershell
-$Dist = "platforms\windows\dist\0.5.0"
+$Dist = "platforms\windows\dist\0.6.0"
 
 $Sandbox = Join-Path $env:TEMP "sb-smoke-$(Get-Random)"
 New-Item -ItemType Directory -Force $Sandbox | Out-Null
@@ -841,7 +856,7 @@ $env:SB_HOME = "$Sandbox\.swarmbotix"
 & "$Dist\install.ps1" -Yes
 
 # Verify
-& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.5.0
+& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.6.0
 Get-ChildItem "$env:SB_HOME\messages"
 & "$env:SB_HOME\bin\sb.exe" doctor                 # lists what's missing
 
@@ -886,13 +901,14 @@ throwaway box or VM — the sandbox verifies extraction and layout, not PATH.
 
 Remaining:
 
-- [ ] **1.** Port the launch path — `sb up` / `sb run` panes are a POSIX command
-      line running a bash script, which psmux cannot dispatch. The L5
-      pane-executing tests skip on Windows via `tmux_launch_supported()`.
+- [ ] **1.** Verify native launch under psmux: 0.6.0 replaced the bash pane
+      command with an argv (§9.5); run the L5 pane-executing tests on Windows
+      (they currently skip via `tmux_launch_supported()`) and record what
+      psmux does with multi-argument exec, `-e`, and `remain-on-exit`.
       *(§9.5)*
 - [ ] **2.** Run the iceoryx2 integration tests with `--ignored` on Windows
       before claiming iox2 support. *(§9.10)*
 - [ ] **3.** Decide the `lib/` DLL-bundling question before publishing. *(§10)*
 
 The release path is done — a Windows bundle can be cut and installed today.
-Item 1 is what stands between that and `sb up` working on Windows.
+Item 1 is what stands between that and `sb up` being verified on Windows.

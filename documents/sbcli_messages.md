@@ -36,7 +36,7 @@ files and generated bindings never share a directory.
 | Codegen output | `<messages_root>/<style>/message_targets` | `iox2/`, `proto/`, `fb/` backend trees produced by `sb message compile` |
 
 **There is no "active" style.** A message is named in full wherever it
-appears — CLI argument, `sb.dev.yml`, or `Header.metadata.msg_type` on the
+appears — CLI argument, `sb.module.yaml`, or `Header.metadata.msg_type` on the
 wire:
 
 ```
@@ -147,22 +147,22 @@ source that names one wins, and the JSON line reports which in
    `swarmbotix/header/Header` (whose field 3 is `seq`) or field 3 of
    `ros2/std/Header`. sb 0.4.2+; earlier releases read field 3 only, so a
    swarmbotix-style Header never typed a frame.
-4. **The module's `sb.dev.yml`** (`"config"`, sb 0.4.1+): the `type` of the
+4. **The module's `sb.module.yaml`** (`"config"`, sb 0.4.1+): the `type` of the
    publisher or subscriber entry for this topic, used exactly as written.
    It types frames from publishers that stamp neither an encoding nor a
    Header type, such as ones rendered by older templates.
    - Bare topic: the cwd module's entry the name resolved to.
    - Fully-qualified `<device>/<workspace>/<module>/<zenoh|iox2>/<topic>`
      (a leading `/` is accepted and dropped, sb 0.5.0+):
-     `<module>` is looked up in the active workspace's `flow.yaml`, first as
+     `<module>` is looked up in the active workspace's `sb.flow.yaml`, first as
      written, then without its instance suffix (`ips_track-sb00` is found
-     as `ips_track`). In that module's `sb.dev.yml`, publishers are searched
+     as `ips_track`). In that module's `sb.module.yaml`, publishers are searched
      before subscribers for an entry whose transport is the path's and
      whose `topic:` is the path's last segment or whose `key:` is the whole
-     path. The cwd `sb.dev.yml` is not consulted for a fully-qualified path.
+     path. The cwd `sb.module.yaml` is not consulted for a fully-qualified path.
    - For a fully-qualified path, any miss skips this source without a
      message: no active workspace, a module not registered in it, an
-     unreadable `sb.dev.yml`, no matching entry, or a path not in the
+     unreadable `sb.module.yaml`, no matching entry, or a path not in the
      five-segment form. So it works only on a machine where that workspace
      is active and the module is registered. Only the full five-segment
      canonical form is looked up: a four-segment legacy key such as
@@ -190,7 +190,7 @@ stamp other tags, and `sb topic listen` and `sb topic list` recognise them:
 | `application/protobuf;<type>` | `<type>` | decoded JSON, as above; `<type>` | `"protobuf"` |
 | `application/flatbuffers;<type>` | `<type>` | decoded through `flatc --json` against the type's compiled `<message_targets>/fb/<ns>/<Leaf>/<Leaf>.bfbs` (§5.3); `<type>` | `"flatbuffers"` |
 | `text/*`, `application/json` | the mime, e.g. `text/json` | `{"kind": "text", "text": "..."}`; the mime | `"text"` |
-| `application/octet-stream` | empty | as for an untagged sample: the Header probe and `sb.dev.yml` sources still apply, and a raw entry declares no type, so usually hex | `null` |
+| `application/octet-stream` | empty | as for an untagged sample: the Header probe and `sb.module.yaml` sources still apply, and a raw entry declares no type, so usually hex | `null` |
 
 For FlatBuffers and text the tag decides how the body is read, with
 `schema_source: "wire"`; only `--type` overrides it. A FlatBuffers frame
@@ -713,10 +713,10 @@ compile (§5.1.1), so the full set is safe there.
 
 ---
 
-### 4.7 Repository messages: `flow.yaml` `messages:` (sb 0.5.0+)
+### 4.7 Repository messages: `sb.flow.yaml` `messages:` (sb 0.5.0+)
 
 A workspace repository can carry its own message definitions and list
-them in its `flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.1):
+them in its `sb.flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.1):
 
 ```yaml
 messages:
@@ -730,7 +730,7 @@ from the current directory) and then compiles it. There is no
 prints one line, for example
 `-- messages: ros2 <- messages/custom: 1 imported, 0 unchanged, 0 conflicts; compiled [proto, iox2]`.
 
-**Import**: `path` (relative to `flow.yaml`) is copied into
+**Import**: `path` (relative to `sb.flow.yaml`) is copied into
 `<messages_root>/<style>/message_definitions/` (`<defs>` below):
 
 | Source file | Lands at | Vault name |

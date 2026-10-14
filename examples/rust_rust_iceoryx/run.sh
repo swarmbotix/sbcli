@@ -31,7 +31,7 @@ export SB_CONFIG="$SB_HOME/sb.config.yml"
 PUBBER="$EXAMPLE_DIR/pubber"
 SUBBER="$EXAMPLE_DIR/subber"
 
-# `sb ws create` writes ./flow.yaml; keep it in the scratch home, not here.
+# `sb ws create` writes ./sb.flow.yaml; keep it in the scratch home, not here.
 mkdir -p "$SB_HOME/ws"
 ( cd "$SB_HOME/ws" && "$SB" ws create demo )
 "$SB" ws set demo
@@ -41,8 +41,12 @@ mkdir -p "$SB_HOME/ws"
 # absolute path; if we skip this step the include! fails at compile time.
 "$SB" message compile --iox2 ros2/std/ImageStamped
 
-"$SB" init --rust "$PUBBER" --force >/dev/null
-"$SB" init --rust "$SUBBER" --force >/dev/null
+# No --force on the Rust modules: each committed sb.module.yaml carries a
+# scripts.start (the binary is not named after the module), and --force
+# would rewrite the manifest without it. `sb pub/sub add --force` below
+# still resets the entries, so the example stays re-runnable.
+"$SB" init --rust "$PUBBER" >/dev/null
+"$SB" init --rust "$SUBBER" >/dev/null
 
 # Subscriber points at the publisher's fully-qualified topic; `--key` is
 # used verbatim.

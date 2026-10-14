@@ -1,0 +1,10 @@
+module: subber
+language: rust
+io_dir: swarmbotix_io
+scripts:
+  start: "target/release/sub_frame{exe} {args}"
+subscribers:
+- name: frame
+  key: dev01/demo/pubber/iox2/frame
+  type: ros2/std/ImageStamped
+  transport: iceoryx2

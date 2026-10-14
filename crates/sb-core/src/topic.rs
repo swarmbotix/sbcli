@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// Fully-qualified swarmbotix topic.
 ///
 /// Invariant: `device`, `workspace`, `module`, `topic` each match
-/// `[A-Za-z0-9_]+`; `transport` is exactly `"iox2"` or `"zenoh"`.
+/// `[A-Za-z0-9_-]+`; `transport` is exactly `"iox2"` or `"zenoh"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TopicName {
     device: String,
@@ -113,13 +113,24 @@ impl TopicName {
     }
 }
 
-fn is_valid_segment_char(c: char) -> bool {
+pub(crate) fn is_valid_segment_char(c: char) -> bool {
     // `-` is allowed so swarm-instance modules like `controller-2` (set
     // at construction time on the generated publisher/subscriber) parse
     // as valid segments. Module *identifiers* (the `module:` field in
-    // `sb.dev.yml`) still reject `-` via `validate_identifier`; this
-    // relaxation only affects the wire-path segments.
+    // the module manifest) still reject `-` via `validate_identifier`;
+    // this relaxation only affects the wire-path segments.
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// `<module>` for a singleton, `<module>-<id>` for an instance.
+///
+/// The one place the instance suffix is defined: tmux window names and
+/// the module segment of an instance's wire keys both come from here.
+pub fn instance_module(module: &str, id: Option<&str>) -> String {
+    match id {
+        Some(id) => format!("{module}-{id}"),
+        None => module.to_owned(),
+    }
 }
 
 /// Validate an instance ID. Instance IDs are the suffix appended to a
@@ -185,7 +196,7 @@ pub enum TopicNameError {
     WrongSegmentCount { got: usize },
     #[error("segment {index} is empty")]
     EmptySegment { index: usize },
-    #[error("segment {index} contains illegal character {ch:?} (allowed: [A-Za-z0-9_])")]
+    #[error("segment {index} contains illegal character {ch:?} (allowed: [A-Za-z0-9_-])")]
     IllegalChar { index: usize, ch: char },
     #[error("transport segment must be \"iox2\" or \"zenoh\", got {got:?}")]
     InvalidTransport { got: String },

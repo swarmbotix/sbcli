@@ -14,8 +14,16 @@ and services in one name space per module, adds the `encoding:` choice
 (`proto`, `fb`, `raw`), and regenerates a whole module with
 `sb io update`. `sb pub`, `sb sub`, `sb list`, and `sb service` keep
 working as documented here but are deprecated and receive no new
-features. Sections 1 to 13 describe the model both surfaces share:
-resolution, schema, codegen, and conflict policy.
+features; `sb 0.6.0+` prints a deprecation warning on stderr each time
+one is used, and 0.7.0 removes them ([sbcli.md](sbcli.md) §10).
+Sections 1 to 13 describe the model both surfaces share: resolution,
+schema, codegen, and conflict policy.
+
+`sb 0.6.0+`: the module file is `sb.module.yaml` (`sb.dev.yml` before;
+still read, with a warning, until 0.7.0). Its launch keys (`scripts`,
+`env`, `requires`, `platforms`) are documented in
+[sbcli_module.md](sbcli_module.md); this document covers its
+`publishers`, `subscribers`, and `services`.
 
 The canonical spec is `requirements.md` in the sbcli **source
 repository** — a maintainer document that is not part of your install;
@@ -26,10 +34,10 @@ when it and this page disagree, it wins.
 ## 1. Conceptual model
 
 `sb pub` and `sb sub` are **mutating** verbs that operate on a single
-module's `sb.dev.yml`. Each `add`, `edit`, or `rm` does two things in
+module's `sb.module.yaml`. Each `add`, `edit`, or `rm` does two things in
 lockstep:
 
-1. **Mutates the YAML.** Reads `sb.dev.yml`, modifies the
+1. **Mutates the YAML.** Reads `sb.module.yaml`, modifies the
    `publishers:` or `subscribers:` list, writes back.
 2. **Mirrors the change on disk.** Calls `sb-codegen` to render (or
    delete) the matching language file under
@@ -78,7 +86,7 @@ Per module:
 
 ```
 <module_root>/
-├─ sb.dev.yml                                   # READ + WRITE
+├─ sb.module.yaml                               # READ + WRITE
 └─ <io_dir>/                                    # WRITE + DELETE
    ├─ publishers/
    │  └─ <name>.<ext>                           # one per publisher
@@ -98,7 +106,7 @@ msg_type, device, workspace, module)` tuple — see §6.6 for the golden
 snapshot suite. You may either commit them or gitignore + regenerate
 at build time; sb has no opinion.
 
-`sb.dev.yml` is the **source of truth** — if it and the generated
+`sb.module.yaml` is the **source of truth** — if it and the generated
 files disagree, the YAML wins on the next mutation (the file is
 regenerated to match).
 
@@ -109,44 +117,49 @@ regenerated to match).
 Every `sb pub/sub *` verb takes an optional `--module <name>` flag.
 The lookup chain (highest priority first):
 
-1. **`--module <name>` given AND `./<name>/sb.dev.yml` exists** in
-   the current working directory.
-2. **`--module <name>` given AND active workspace's `flow.yaml`
+1. **`--module <name>` given AND `./<name>/sb.module.yaml` exists** in
+   the current working directory (or, deprecated, `./<name>/sb.dev.yml`).
+2. **`--module <name>` given AND active workspace's `sb.flow.yaml`
    has `<name>`**: the value in the installed copy is the absolute
-   path to its `sb.dev.yml` ([sbcli_ws.md](sbcli_ws.md) §4.3).
-3. **No `--module` flag → `./sb.dev.yml` in cwd**. Errors if absent.
+   path to its manifest ([sbcli_ws.md](sbcli_ws.md) §4.3).
+3. **No `--module` flag → `./sb.module.yaml` in cwd** (or, deprecated,
+   `./sb.dev.yml`). Errors if neither exists.
+
+`sb 0.6.0+` looks for `sb.module.yaml` first and falls back to
+`sb.module.yaml` with a warning; an installed copy written by 0.5.0 names
+`sb.dev.yml` paths explicitly, and those keep resolving.
 
 If `--module <name>` is given and neither rule 1 nor rule 2 hits, the
 CLI errors with **every path it tried**, including the dangling
-`flow.yaml` entry if rule 2 missed because the registered path no
+`sb.flow.yaml` entry if rule 2 missed because the registered path no
 longer exists.
 
 ```
 error: module "ghost" not found. Searched:
-  - /current/dir/ghost/sb.dev.yml
-  - /home/el/.swarmbotix/workspaces/demo/flow.yaml
+  - /current/dir/ghost/sb.module.yaml
+  - /home/el/.swarmbotix/workspaces/demo/sb.flow.yaml
 ```
 
-If no `--module` is given and cwd has no `sb.dev.yml`:
+If no `--module` is given and cwd has no module manifest:
 
 ```
-error: no sb.dev.yml in cwd (/wrong/place). Pass --module <name> or `cd` into a module dir.
+error: no module manifest (sb.module.yaml) in cwd (/wrong/place). Pass --module <name> or `cd` into a module dir.
 ```
 
 The resolver is `sb_pubsub::resolve_module`. Both lookups (rule 1
 sibling, rule 2 workspace) require the resolved file to exist; a
-registered-but-missing entry in `flow.yaml` is treated as a miss for
+registered-but-missing entry in `sb.flow.yaml` is treated as a miss for
 that rule, **and** the path is included in the error tail.
 
 `sb io` (§14) and `sb service` resolve their module through the same
-chain. The module root is then the directory holding `sb.dev.yml`
+chain. The module root is then the directory holding `sb.module.yaml`
 unless the file sets `root:` (§4.1).
 
 ---
 
 ## 4. Schema — `PubSpec` and `SubSpec`
 
-The `publishers:` and `subscribers:` lists in `sb.dev.yml` hold these
+The `publishers:` and `subscribers:` lists in `sb.module.yaml` hold these
 two record types (defined in `sb_core::config`):
 
 ```yaml
@@ -165,7 +178,7 @@ subscribers:
 | Field | Type | Set by | Notes |
 |---|---|---|---|
 | `name` | identifier | `-n` flag or topic's last segment | Drives the generated filename + the struct name (PascalCase). Must satisfy `validate_identifier`. |
-| `topic` | string | `<topic>` positional, or `-t` on `sb pub edit` | An owned, bare topic (`image_raw`). Codegen prepends `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. An entry carries exactly one of `topic` and `key` (sb 0.5.0+). |
+| `topic` | string | `<topic>` positional, or `-t` on `sb pub edit` | An owned, bare topic (`image_raw`). Codegen prepends `<device>/<workspace>/<module>/<transport>/`. May not contain `/`. An entry carries at most one of `topic` and `key` (sb 0.5.0+). `sb 0.6.0+`: optional; an entry with neither uses its `name` as the topic, and `sb` writes `topic:` back on the next write. |
 | `key` | string | `--key` flag | A verbatim wire key (`dev01/nav/teleop/zenoh/cmd_vel`), used as is: no prefix is prepended and no `<transport>` segment is injected. A leading `/` given to `--key` is dropped. An entry carries exactly one of `topic` and `key` (sb 0.5.0+). |
 | `type` | string | `-m` / `--msg` flag | Must parse as `<style>/<namespace>/<Leaf>` and exist in the vault (see §5.1). Stored verbatim, e.g. `ros2/std/ImageStamped`. Two-segment names are rejected; see [sbcli_messages.md](sbcli_messages.md) §2. `sb 0.5.0+`: required unless `encoding: raw`, which takes none. |
 | `transport` | enum (`zenoh` / `iceoryx2`) | `--zenoh` / `--iox2` or sb.config.yml default | See §7 for default resolution. |
@@ -174,9 +187,16 @@ subscribers:
 
 `deny_unknown_fields` is on for both records; hand-edited fields outside
 the schema are rejected on read. So is an entry that carries both
-`topic` and `key`, or neither, a `topic` containing `/`, and an empty
-`key` (error texts in §12). The one exception is a `topic: /...` entry
-written before 0.5.0: it is read as `key:` (§13.9).
+`topic` and `key`, a `topic` containing `/`, and an empty `key` (error
+texts in §12). The one exception is a `topic: /...` entry written
+before 0.5.0: it is read as `key:` (§13.9).
+
+**`topic:` is optional** (sb 0.6.0+). A hand-written entry such as
+`{ name: markers, type: ros2/custom/MarkerDetections, transport: zenoh }`
+reads as `topic: markers`, so the name must also be a valid topic
+segment. `sb` still writes `topic:` out whenever it writes the file, so
+a file written by 0.6.0 parses on 0.5.0 as long as it uses no other new
+key. Before 0.6.0 an entry with neither `topic` nor `key` was an error.
 
 `sb 0.5.0+` also enforces the encoding rules on read: `raw` takes no
 `type`, every other encoding needs one, `mime` needs `raw`, and an
@@ -195,13 +215,16 @@ the shared name space below makes unambiguous.
 
 ### 4.1 Module-level fields (sb 0.5.0+)
 
-Besides `publishers:` and `subscribers:`, `sb.dev.yml` carries:
+Besides `publishers:` and `subscribers:`, `sb.module.yaml` carries the
+fields below, and (sb 0.6.0+) the launch keys `scripts`, `env`,
+`requires`, `platforms`, plus `version`, `sb`, `description`, all
+documented in [sbcli_module.md](sbcli_module.md) §2:
 
 | Field | Type | Notes |
 |---|---|---|
 | `module` | identifier | Written by `sb init`, see [sbcli_init.md](sbcli_init.md) §4. |
 | `language` | enum | Same. Selects the templates. |
-| `root` | path, optional | The module root. Absent (what `sb init` writes since 0.5.0): the directory holding `sb.dev.yml`. Relative: resolved against that directory. Absolute: used as is, which is how files written before 0.5.0 keep working. |
+| `root` | path, optional | The module root. Absent (what `sb init` writes since 0.5.0): the directory holding `sb.module.yaml`. Relative: resolved against that directory. Absolute: used as is, which is how files written before 0.5.0 keep working. |
 | `io_dir` | relative path | Default `swarmbotix_io` (`Assets/Scripts/swarmbotix_io` for Unity), resolved against the module root. |
 | `services` | list of `{ name }` | One request/response router per entry, rendered to `<io_dir>/services/<name>.<ext>` (Rust and Python). See [sbcli_reqres.md](sbcli_reqres.md) §2. |
 
@@ -312,7 +335,7 @@ non-empty, ASCII letter/`_` first, then alphanumerics/`_`.
 
 ## 6. Codegen
 
-After `sb.dev.yml` mutation, the matching template renders into
+After `sb.module.yaml` mutation, the matching template renders into
 `<io_dir>/{publishers,subscribers}/<name>.<ext>`, or, for a service
 (sb 0.5.0+), `<io_dir>/services/<name>.<ext>`.
 
@@ -345,7 +368,7 @@ defined in `crates/sb-codegen/src/lib.rs`. Variables exposed:
 | `name` | `image_raw` | The spec's `name` field. |
 | `struct_name_base` | `ImageRaw` | PascalCase of `name`. |
 | `struct_name` | `ImageRawPublisher` / `ImageRawSubscriber` | `struct_name_base` + role suffix. |
-| `module` | `pubber` | Module name from `sb.dev.yml`. |
+| `module` | `pubber` | Module name from `sb.module.yaml`. |
 | `workspace` | `demo` | Active workspace name. |
 | `device` | `dev01` | From merged `sb.config.yml`. |
 | `topic_full` | `dev01/demo/pubber/iox2/image_raw` | The wire key, including the `<transport>` segment, with no leading `/` (sb 0.5.0+). A `topic:` entry builds it as `<device>/<workspace>/<module>/<transport>/<topic>`; a `key:` entry uses its key as is (and must already include any `<transport>` segment it wants). |
@@ -489,7 +512,7 @@ is re-rendered, for example with `sb pub edit <name> -m <its current type>`
 (§9.2), or (sb 0.5.0+) with `sb io update`; `sb message compile` does not
 rewrite publisher files. Until then,
 `sb topic listen` types its frames by the Header probe, `--type`, or
-(sb 0.4.1+) the entry's `type` in the module's `sb.dev.yml`
+(sb 0.4.1+) the entry's `type` in the module's `sb.module.yaml`
 ([sbcli_messages.md](sbcli_messages.md) §1.1).
 
 **Encodings and typed wrappers (sb 0.5.0+).** The wire tag follows the
@@ -529,6 +552,11 @@ This is the supported way to run N instances of the same module
 §3, §10. The user's `main()` parses `--id N` (or any other flag),
 constructs a `TopicOverrides { module: format!("{}-{}", DEFAULT_MODULE, id) }`,
 and the publisher opens on `dev/ws/<module>-<id>/<transport>/<topic>`.
+That pattern is still the one to use in 0.6.0. What changed
+(sb 0.6.0+) is the launch side: for a module with instances in
+`sb.flow.yaml`, `sb up` and `sb run` append `--id <id>` to the start
+command themselves and also export `SB_INSTANCE_ID=<id>`, so `main()`
+can take the id from either ([sbcli_module.md](sbcli_module.md) §9).
 
 **Emitted alongside the class** (when `is_owned == true`):
 
@@ -677,12 +705,12 @@ Force semantics:
     overwrote sub hello
   added publisher on module pubber
     wrote .../publishers/hello.rs
-    updated .../sb.dev.yml
+    updated .../sb.module.yaml
   ```
 
 Skip semantics:
 
-- No `sb.dev.yml` write. No file write. No file delete.
+- No `sb.module.yaml` write. No file write. No file delete.
 - Prints `<role> skipped on module <name> (already exists)`.
 - Exit code: 0 (success).
 
@@ -724,7 +752,7 @@ leading `/` on its value is dropped. The two conflict.
 
 **Effects (in order)**:
 
-1. Resolve the module (§3). Errors with `"no sb.dev.yml ..."` or
+1. Resolve the module (§3). Errors with `"no module manifest ..."` or
    `"module not found ..."` on miss.
 2. Validate `<MsgType>` against the vault (§5.1).
 3. Derive `<name>` (§5.3) or use `-n` value. Validate against the
@@ -734,7 +762,7 @@ leading `/` on its value is dropped. The two conflict.
 5. Resolve transport (§7).
 6. Render the template (§6) and write
    `<io_dir>/publishers/<name>.<ext>` (creating subdirs as needed).
-7. Append the new `PubSpec` to `sb.dev.yml`. Write back, rewriting
+7. Append the new `PubSpec` to `sb.module.yaml`. Write back, rewriting
    any legacy `topic: /...` entries in the file as `key:` (§13.9).
 8. Print the outcome.
 
@@ -744,7 +772,7 @@ Output (Force path, with overwrite):
   overwrote pub hello
 added publisher on module pubber
   wrote /path/to/pubber/swarmbotix_io/publishers/hello.rs
-  updated /path/to/pubber/sb.dev.yml
+  updated /path/to/pubber/sb.module.yaml
 ```
 
 ### 9.2 `sb pub edit <name> [OPTIONS]`
@@ -774,7 +802,7 @@ sb pub edit hello -m ros2/std/Header -t other_topic
      Same collision check. The entry becomes `key: <new>`, replacing
      its `topic` or `key`. Conflicts with `-t`.
 5. Re-render the file (same path: `<name>` doesn't change on edit).
-6. Replace the spec in the list. Write `sb.dev.yml`, rewriting any
+6. Replace the spec in the list. Write `sb.module.yaml`, rewriting any
    legacy `topic: /...` entries as `key:` (§13.9).
 
 `edit` does **not** support changing the transport — see §6.7. To
@@ -785,7 +813,7 @@ Output:
 ```
 edited publisher on module pubber
   wrote /path/to/pubber/swarmbotix_io/publishers/hello.rs
-  updated /path/to/pubber/sb.dev.yml
+  updated /path/to/pubber/sb.module.yaml
 ```
 
 ### 9.3 `sb pub rm <name> [--module <name>]`
@@ -796,7 +824,7 @@ edited publisher on module pubber
 2. Find the publisher by `<name>`. Error if missing.
 3. Remove it from the list.
 4. Delete `<io_dir>/publishers/<name>.<ext>` if it exists.
-5. Write back `sb.dev.yml`.
+5. Write back `sb.module.yaml`.
 
 Removing a publisher does **not** remove a subscriber on the same
 topic; they're independent entries. Use `sb sub rm <topic-or-key>` for
@@ -807,7 +835,7 @@ Output:
 ```
 removed publisher on module pubber
   removed /path/to/pubber/swarmbotix_io/publishers/hello.rs
-  updated /path/to/pubber/sb.dev.yml
+  updated /path/to/pubber/sb.module.yaml
 ```
 
 If the generated file was already absent (e.g. you deleted it
@@ -855,7 +883,7 @@ regenerated subscriber on module subber
   wrote /path/to/subber/swarmbotix_io/subscribers/image_raw.py
 ```
 
-`sb sub edit` does **not** write `sb.dev.yml` for the entry it
+`sb sub edit` does **not** write `sb.module.yaml` for the entry it
 regenerates (the spec is unchanged; only the file is). That's by
 design. The exception (sb 0.5.0+) is a file that still holds legacy
 `topic: /...` entries: those are rewritten as `key:` (§13.9).
@@ -927,14 +955,14 @@ for a working end-to-end script.
 $ sb pub add -m ros2/std/StringStamped hello --zenoh
 added publisher on module pubber
   wrote .../publishers/hello.rs
-  updated .../sb.dev.yml
+  updated .../sb.module.yaml
 
 # Realize the type was wrong — change it without manual cleanup:
 $ sb pub add -m ros2/std/Header hello --zenoh --force
   overwrote pub hello
 added publisher on module pubber
   wrote .../publishers/hello.rs
-  updated .../sb.dev.yml
+  updated .../sb.module.yaml
 ```
 
 `--force` is also useful in scripts that regenerate things from
@@ -974,6 +1002,20 @@ sb sub add -m ros2/std/ImageStamped --key dev01/demo/camera/iox2/image_raw --iox
 # detector listens on the same key
 ```
 
+`--key` is the working mechanism in 0.6.0. `sb 0.6.0+` also accepts the
+same edge declared once in the workspace's `sb.flow.yaml`,
+
+```yaml
+wires:
+  detector.image_raw: camera.image_raw
+```
+
+which `sb ws check` validates (both entries exist, transports and types
+agree; [sbcli_ws.md](sbcli_ws.md) §4.7). Code generation does not read
+`wires:` yet; a later release will derive the subscriber's key from it,
+including the per-instance (`[{id}]`) and fan-in (`[*]`) forms that
+`--key` cannot express. Until then, keep the `--key` entry.
+
 ### 10.5 Regenerate after a config change
 
 Bumped `device:` from `dev01` to `dev02` in `sb.config.yml`. Old
@@ -986,7 +1028,7 @@ sb io update camera           # one module
 ```
 
 `sb io update` re-renders every publisher and subscriber from
-`sb.dev.yml` without changing the YAML; services only with
+`sb.module.yaml` without changing the YAML; services only with
 `--services`. Only `topic:` entries pick up the new device; a `key:`
 entry is verbatim, so its key keeps naming `dev01` until you change it
 (`sb io edit <name> --key <new key>`).
@@ -996,14 +1038,14 @@ re-renders without changing the YAML) and `rm` + `add` per publisher.
 
 ### 10.6 List everything across a workspace
 
-There's no built-in `sb list --all-modules` yet (planned for L6). For
-now, iterate `flow.yaml`:
+There's no built-in `sb io list --all-modules` yet (planned for L6). For
+now, iterate the installed `sb.flow.yaml`:
 
 ```bash
-yq '.modules | to_entries[] | .key' ~/.swarmbotix/workspaces/demo/flow.yaml | \
+yq '.modules | to_entries[] | .key' ~/.swarmbotix/workspaces/demo/sb.flow.yaml | \
   while read -r mod; do
     echo "=== $mod ==="
-    sb list --module "$mod"
+    sb io list --module "$mod"
   done
 ```
 
@@ -1075,7 +1117,7 @@ Stable wordings (substring-asserted by integration tests in
 
 | Code path | Message |
 |---|---|
-| Module not in cwd | `no sb.dev.yml in cwd (<dir>). Pass --module <name> or \`cd\` into a module dir.` |
+| Module not in cwd | `no module manifest (sb.module.yaml) in cwd (<dir>). Pass --module <name> or \`cd\` into a module dir.` |
 | `--module <n>` miss | `module "<n>" not found. Searched:\n  - <path1>\n  - <path2>` |
 | MsgType parse | `invalid message name "<m>": <reason from MessageNameError>` |
 | MsgType missing | `message "<m>" not in vault. Run \`sb message list\` to see available types.` |
@@ -1085,14 +1127,14 @@ Stable wordings (substring-asserted by integration tests in
 | Already exists (default policy) | `sb pub add blocked by N existing entr<y|ies>:\n  - <role> "<n>" on topic "<t>" (<reason>)\n  ...\nRe-run with --force to overwrite, --skip-existing to no-op, or \`cd\` to a TTY and re-run for an interactive prompt.` |
 | `pub edit` with no mutation flag | `at least one of -m/--msg, -t/--topic, or --key is required` (sb 0.5.0+) |
 | `<topic>` positional containing `/` | `topic "/dev01/ws/mod/iox2/hello" may not contain '/'; for a verbatim wire key use --key dev01/ws/mod/iox2/hello` (sb 0.5.0+) |
-| `sb.dev.yml` load: entry has both `topic` and `key` | `publishers[0]: exactly one of topic: or key: is required (both given)` (sb 0.5.0+) |
-| `sb.dev.yml` load: entry has neither | `publishers[0]: exactly one of topic: or key: is required (neither given)` (sb 0.5.0+) |
-| `sb.dev.yml` load: `topic` contains `/` (not a leading one, §13.9) | `publishers[0]: topic "a/b" may not contain '/'; use key: for a verbatim wire key`, followed by a parenthetical naming the equivalent `key: <device>/<ws>/<module>/<transport>/a/b` (sb 0.5.0+) |
-| `sb.dev.yml` load: empty `key` | `publishers[0]: key: is empty` (sb 0.5.0+) |
-| `sb.dev.yml` load: raw entry with a `type` | `publishers[0]: encoding: raw takes no type:` (sb 0.5.0+) |
-| `sb.dev.yml` load: no `type`, encoding not raw | `publishers[0]: type: is required unless encoding: raw` (sb 0.5.0+) |
-| `sb.dev.yml` load: `mime` without raw | `publishers[0]: mime: is only valid with encoding: raw` (sb 0.5.0+) |
-| `sb.dev.yml` load: `fb` / `raw` on iceoryx2 | `publishers[0]: encoding: is only valid for transport: zenoh` (sb 0.5.0+) |
+| `sb.module.yaml` load: entry has both `topic` and `key` | `publishers[0]: exactly one of topic: or key: is required (both given)` (sb 0.5.0+) |
+| manifest load: entry has neither | before 0.6.0 only: `publishers[0]: exactly one of topic: or key: is required (neither given)`. `sb 0.6.0+` reads such an entry as `topic: <name>` (§4) |
+| `sb.module.yaml` load: `topic` contains `/` (not a leading one, §13.9) | `publishers[0]: topic "a/b" may not contain '/'; use key: for a verbatim wire key`, followed by a parenthetical naming the equivalent `key: <device>/<ws>/<module>/<transport>/a/b` (sb 0.5.0+) |
+| `sb.module.yaml` load: empty `key` | `publishers[0]: key: is empty` (sb 0.5.0+) |
+| `sb.module.yaml` load: raw entry with a `type` | `publishers[0]: encoding: raw takes no type:` (sb 0.5.0+) |
+| `sb.module.yaml` load: no `type`, encoding not raw | `publishers[0]: type: is required unless encoding: raw` (sb 0.5.0+) |
+| `sb.module.yaml` load: `mime` without raw | `publishers[0]: mime: is only valid with encoding: raw` (sb 0.5.0+) |
+| `sb.module.yaml` load: `fb` / `raw` on iceoryx2 | `publishers[0]: encoding: is only valid for transport: zenoh` (sb 0.5.0+) |
 | Name already used on the module | `name "<n>" is already used by <publisher\|subscriber\|service> "<n>" on module "<m>"; publishers, subscribers, and services share one name space` (sb 0.5.0+) |
 | `sb io add --raw --iox2` | `iceoryx2 payloads are typed; use a message with a bytes field and --iox2` (sb 0.5.0+) |
 | `sb io add` / `edit --fb` without compiled FlatBuffers | `flatbuffers backend not compiled for style <style>; run sb message compile <type> --fb` (sb 0.5.0+) |
@@ -1137,7 +1179,7 @@ longer want.
 
 ### 13.3 IO dir lives under a build-system out-of-tree dir
 
-`sb.dev.yml`'s `io_dir:` is relative to the module root. You can point
+`sb.module.yaml`'s `io_dir:` is relative to the module root. You can point
 it at a sibling dir if your build system prefers:
 
 ```yaml
@@ -1207,7 +1249,7 @@ five-segment form, so for a key like this one pass `-t zenoh` or
 
 ### 13.8 `sb sub list` with no module errors with a more useful message
 
-When in a directory without `sb.dev.yml`, `sb pub list` and
+When in a directory without a module manifest, `sb pub list` and
 `sb sub list` error the same way as `sb pub add` — same module
 resolution chain. To list a specific module from anywhere with an
 active workspace:
@@ -1218,7 +1260,7 @@ sb pub list --module pubber
 
 ### 13.9 Legacy `topic: /...` entries (configs written before 0.5.0)
 
-An `sb.dev.yml` or `sb.prd.yml` written before 0.5.0 may hold entries
+A module manifest (then `sb.dev.yml`) or `sb.prd.yml` written before 0.5.0 may hold entries
 whose `topic` starts with `/`:
 
 ```yaml
@@ -1244,7 +1286,7 @@ rewrites it.
   `rm`) rewrites every legacy entry in it as `key:` and says so:
 
   ```
-    rewrote 1 legacy topic entry as key: in /path/to/subber/sb.dev.yml
+    rewrote 1 legacy topic entry as key: in /path/to/subber/sb.module.yaml
   ```
 
   (`entries` when the count is not 1.)
@@ -1264,7 +1306,7 @@ workspace, module, and transport), to keep the same wire key.
 
 `sb io` is the module-interface surface that replaces `sb pub`,
 `sb sub`, `sb list`, and `sb service init`. It edits the same
-`sb.dev.yml` and renders the same files (§2, §6), with three additions:
+`sb.module.yaml` and renders the same files (§2, §6), with three additions:
 one name space for publishers, subscribers, and services (§4.1); the
 `encoding:` choice (§14.3); and `sb io update`, which regenerates a
 module's `swarmbotix_io/` without changing its YAML (§14.6).
@@ -1283,7 +1325,7 @@ sb io update [<module> | --all] [--services]
 ```
 
 Every verb except `update` acts on one module, resolved as in §3
-(`--module <name>`, else the `sb.dev.yml` in the current directory).
+(`--module <name>`, else the `sb.module.yaml` in the current directory).
 Mutations print the same lines as `sb pub` / `sb sub` (§9.1), for
 example `added service on module api`.
 
@@ -1304,7 +1346,7 @@ against the vault (§5.1) and the transport / encoding / type / mime
 combination (§14.3); check the name is free across publishers,
 subscribers, and services and find topic collisions (§5.2); render
 `<io_dir>/publishers/<name>.<ext>` or `subscribers/<name>.<ext>` (§6);
-write `sb.dev.yml`, rewriting any legacy `topic: /...` entries as
+write `sb.module.yaml`, rewriting any legacy `topic: /...` entries as
 `key:` (§13.9).
 
 ```bash
@@ -1334,7 +1376,7 @@ router, its routes, and its key layout are described in
 | `--raw [<mime>]` | `encoding: raw`, plus `mime: <mime>` when given | none | `zenoh` | `<mime>`, else `application/octet-stream` | bytes |
 
 Rules, checked when an entry is added or edited and again whenever
-`sb.dev.yml` is read (§12):
+`sb.module.yaml` is read (§12):
 
 - **Zenoh only.** `--raw` or `--fb` with `--iox2` is an error: an
   iceoryx2 payload is always the fixed-layout struct generated from the
@@ -1375,13 +1417,13 @@ The flags:
 
 The new topic or key is checked against the module's other entries
 (§5.2), the result against §14.3, and then the file is re-rendered (its
-name does not change) and `sb.dev.yml` is written. The transport cannot
+name does not change) and `sb.module.yaml` is written. The transport cannot
 be edited (§6.7): `sb io rm` then `sb io add`.
 
 ### 14.5 `sb io rm <name>` and `sb io list`
 
 `sb io rm <name>` removes the publisher, subscriber, or service called
-`<name>` from `sb.dev.yml` and deletes its generated file. Deleting a
+`<name>` from `sb.module.yaml` and deletes its generated file. Deleting a
 service file discards any routes written in it.
 
 `sb io list` (alias `sb io ls`) prints the `sb list` table (§9.7) for
@@ -1390,11 +1432,11 @@ writes.
 
 ### 14.6 `sb io update [<module> | --all] [--services]`
 
-Regenerates `swarmbotix_io/` from `sb.dev.yml` without changing the
+Regenerates `swarmbotix_io/` from `sb.module.yaml` without changing the
 YAML.
 
 - Targets `<module>` (resolved as `--module` is, §3); else the module in
-  the current directory when it holds `sb.dev.yml`; else, or with
+  the current directory when it holds `sb.module.yaml`; else, or with
   `--all`, every module registered in the active workspace, including
   `up: false` ones. That last form is the step `sb install` runs
   ([sbcli_ws.md](sbcli_ws.md) §5.2). An active workspace is required in
@@ -1407,7 +1449,7 @@ YAML.
   reported as skipped with the reason, and the other entries still run.
 - Services are regenerated only with `--services`. Their files are
   routers you edit, and regenerating one overwrites your routes.
-- The one write to `sb.dev.yml`: legacy `topic: /...` entries are
+- The one write to `sb.module.yaml`: legacy `topic: /...` entries are
   rewritten as `key:` (§13.9).
 
 One line per module:
@@ -1422,6 +1464,6 @@ non-zero (`<n> entr(y/ies) or module(s) could not be updated`) after
 every target has run.
 
 Run it after changing `device:`, after a workspace is renamed or
-reinstalled under another name, after pulling an `sb.dev.yml` edited
+reinstalled under another name, after pulling an `sb.module.yaml` edited
 elsewhere, and after upgrading `sb` (so the files pick up new
 templates).

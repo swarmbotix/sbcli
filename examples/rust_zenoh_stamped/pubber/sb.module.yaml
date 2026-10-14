@@ -1,8 +1,10 @@
 module: pubber
 language: rust
 io_dir: swarmbotix_io
+scripts:
+  start: "target/release/pub_stamped{exe} {args}"
 publishers:
-- name: hello
-  topic: hello
+- name: chatter
+  topic: chatter
   type: ros2/std/StringStamped
   transport: zenoh

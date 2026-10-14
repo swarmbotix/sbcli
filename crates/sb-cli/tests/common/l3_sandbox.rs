@@ -3,7 +3,7 @@
 //! Every L3 mutation needs:
 //!   1. An active workspace (the L2 primitive).
 //!   2. A vault populated with std/* (so `MsgType` validation succeeds).
-//!   3. A module adopted via `sb init` so `sb.dev.yml` exists.
+//!   3. A module adopted via `sb init` so `sb.module.yaml` exists.
 //!
 //! The helper does all three and exposes the module root + a `cmd_in()`
 //! that runs `sb` with cwd = module root (so bare `sb pub list` resolves
@@ -107,8 +107,9 @@ impl L3Sandbox {
         self.ws.sb_home()
     }
 
+    /// The module manifest `sb init` wrote (`sb.module.yaml`).
     pub fn dev_yml(&self) -> PathBuf {
-        self.module_root.join("sb.dev.yml")
+        self.module_root.join(sb_core::MODULE_FILE)
     }
 
     /// `<module_root>/swarmbotix_io` (default io_dir for non-Unity).

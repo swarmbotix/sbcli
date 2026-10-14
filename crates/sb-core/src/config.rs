@@ -5,31 +5,92 @@
 //! | File             | Type              | Owner               |
 //! | ---------------- | ----------------- | ------------------- |
 //! | `sb.config.yml`  | `SbCliConfig`     | the CLI itself      |
-//! | `sb.dev.yml`     | `ModuleDevConfig` | per-module, dev     |
+//! | `sb.module.yaml` | `ModuleDevConfig` | per-module, dev     |
 //! | `sb.prd.yml`     | `ModulePrdConfig` | per-module, prod    |
-//! | `flow.yaml`      | `WorkspaceFlow`   | workspace registry  |
+//! | `sb.flow.yaml`   | `WorkspaceFlow`   | workspace registry  |
+//!
+//! `sb.module.yaml` and `sb.flow.yaml` replaced `sb.dev.yml` and
+//! `flow.yaml` in 0.6.0. The old names are still read (see
+//! [`module_file_candidates`] and [`flow_file_candidates`]); callers report
+//! them as deprecated. sb-core does no file IO, so probing is the caller's.
 //!
 //! Every field is `Option<T>` where it can legitimately be absent in a
 //! given layer; `SbCliConfig::merge` then resolves the layering.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::host::{Host, is_valid_platform_key};
 use crate::ident::{IdentError, validate_identifier};
 use crate::style::Backend;
-use crate::topic::{InstanceIdError, validate_instance_id};
+use crate::topic::{InstanceIdError, is_valid_segment_char, validate_instance_id};
 use crate::transport::Transport;
 
 // ─────────────────────────────────────────────────────────────────────
-// Language — `sb.dev.yml`'s `language:` tag
+// File names
+// ─────────────────────────────────────────────────────────────────────
+
+/// A module's manifest, at the module root.
+pub const MODULE_FILE: &str = "sb.module.yaml";
+/// The pre-0.6.0 manifest name. Read, never written; deprecated.
+pub const LEGACY_MODULE_FILE: &str = "sb.dev.yml";
+/// A workspace's flow, at the repository root (and the installed copy).
+pub const FLOW_FILE: &str = "sb.flow.yaml";
+/// The pre-0.6.0 flow name. Read, never written; deprecated.
+pub const LEGACY_FLOW_FILE: &str = "flow.yaml";
+
+/// Probe order for a module directory: new name first, then legacy.
+pub fn module_file_candidates() -> [&'static str; 2] {
+    [MODULE_FILE, LEGACY_MODULE_FILE]
+}
+
+/// Probe order for a workspace directory: new name first, then legacy.
+pub fn flow_file_candidates() -> [&'static str; 2] {
+    [FLOW_FILE, LEGACY_FLOW_FILE]
+}
+
+/// True when `path`'s file name is [`LEGACY_MODULE_FILE`].
+pub fn is_legacy_module_file(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == LEGACY_MODULE_FILE)
+}
+
+/// True when `path`'s file name is [`LEGACY_FLOW_FILE`].
+pub fn is_legacy_flow_file(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == LEGACY_FLOW_FILE)
+}
+
+/// One deprecation hit found while reading a file or planning a launch.
+///
+/// Crates collect these instead of printing; the CLI prints each one as
+/// `warning: <item> is deprecated since ...; <hint>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deprecation {
+    /// What is deprecated, as the warning names it (`sb.dev.yml`).
+    pub item: String,
+    /// What to do instead.
+    pub hint: String,
+}
+
+impl Deprecation {
+    pub fn new(item: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            item: item.into(),
+            hint: hint.into(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Language — the manifest's `language:` tag
 // ─────────────────────────────────────────────────────────────────────
 
 /// The language of the user's module. Picked at `sb init` time via a
-/// `--<lang>` flag, written to `sb.dev.yml`, and consulted by L3 codegen
-/// to choose file extensions / runtime APIs.
+/// `--<lang>` flag, written to the module manifest, and consulted by L3
+/// codegen to choose file extensions / runtime APIs, and by
+/// [`language_defaults`] to choose the build and start commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
@@ -359,15 +420,22 @@ impl SbCliConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// ModuleDevConfig — `sb.dev.yml`
+// ModuleDevConfig — `sb.module.yaml` (legacy name `sb.dev.yml`)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Per-module development-time interface.
+/// Per-module manifest: identity, launch scripts, environment, and the
+/// pub/sub interface.
 ///
 /// `root` is optional: absent means "the directory holding this
-/// `sb.dev.yml`", which keeps the file free of host-specific paths so it
+/// manifest", which keeps the file free of host-specific paths so it
 /// can be committed. Resolve it with [`ModuleDevConfig::module_root`],
 /// never by reading the field directly.
+///
+/// Every launch key has a default from `language:` (see
+/// [`language_defaults`]); [`ModuleDevConfig::resolve`] merges defaults,
+/// the top level, and the host's `platforms:` overlays into one
+/// [`Resolved`]. Every key added in 0.6.0 is omitted on write when empty,
+/// so a manifest that uses none of them still reads on sb 0.5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleDevConfig {
@@ -379,6 +447,29 @@ pub struct ModuleDevConfig {
     pub root: Option<PathBuf>,
     #[serde(default = "default_io_dir")]
     pub io_dir: PathBuf,
+    /// The module's own version, for sharing. Free text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The sb version the module needs (`">=0.6"`). Free text; not
+    /// enforced in 0.6.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `build` / `start` / `stop` / `test`; each overrides the language
+    /// default individually.
+    #[serde(default, skip_serializing_if = "Scripts::is_empty")]
+    pub scripts: Scripts,
+    /// Environment applied to every script. Values may use `${VAR}`,
+    /// `${VAR:-default}`, and `{name}` placeholders.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Executables `sb doctor` must find on `PATH`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// Supported hosts and their overlays. Absent = every host.
+    #[serde(default, skip_serializing_if = "Platforms::is_empty")]
+    pub platforms: Platforms,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publishers: Vec<PubSpec>,
@@ -393,11 +484,32 @@ fn default_io_dir() -> PathBuf {
 }
 
 impl ModuleDevConfig {
-    /// The module root for the `sb.dev.yml` at `dev_yml`.
+    /// A manifest with only `module` and `language` set; every other key
+    /// is at its default and `io_dir` is the language's default.
+    pub fn new(module: impl Into<String>, language: Language) -> Self {
+        Self {
+            module: module.into(),
+            language,
+            root: None,
+            io_dir: language.default_io_dir(),
+            version: None,
+            sb: None,
+            description: None,
+            scripts: Scripts::default(),
+            env: BTreeMap::new(),
+            requires: Vec::new(),
+            platforms: Platforms::default(),
+            publishers: Vec::new(),
+            subscribers: Vec::new(),
+            services: Vec::new(),
+        }
+    }
+
+    /// The module root for the manifest at `dev_yml`.
     ///
     /// `root:` absent resolves to the yaml's directory, a relative `root:`
     /// is joined onto that directory, and an absolute one is returned
-    /// unchanged. A bare `sb.dev.yml` (no directory part) resolves to `.`.
+    /// unchanged. A bare file name (no directory part) resolves to `.`.
     pub fn module_root(&self, dev_yml: &Path) -> PathBuf {
         let dir = match dev_yml.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
@@ -420,8 +532,494 @@ impl ModuleDevConfig {
     /// Re-run the per-entry load-time rules (`topic:`/`key:`, `type:`,
     /// `encoding:`, `mime:`) on a config built in code. The error names the
     /// entry the way a load error would: `publishers[0]: ...`.
+    ///
+    /// Also checks the launch keys: every `platforms:` key is known, and
+    /// `scripts.start` (top level or in any overlay) is at most one
+    /// command.
     pub fn validate(&self) -> Result<(), String> {
-        validate_entries(&self.publishers, &self.subscribers)
+        validate_entries(&self.publishers, &self.subscribers)?;
+        self.platforms.validate().map_err(|e| e.to_string())?;
+        if self.scripts.has_multi_step_start() {
+            return Err(ManifestError::StartNotSingle.to_string());
+        }
+        if let Some(key) = self
+            .platforms
+            .0
+            .iter()
+            .find_map(|(key, overlay)| overlay.scripts.has_multi_step_start().then_some(key))
+        {
+            return Err(format!(
+                "platforms.{key}: {}",
+                ManifestError::StartNotSingle
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `scripts:` is declared at the top level or in any
+    /// `platforms:` overlay. A module that declares scripts launches
+    /// natively even when a `runscript.bash` sits beside it.
+    pub fn declares_scripts(&self) -> bool {
+        !self.scripts.is_empty() || self.platforms.0.values().any(|o| !o.scripts.is_empty())
+    }
+
+    /// Whether `host` may run this module. See [`Platforms::supports`].
+    pub fn supports_host(&self, host: &Host) -> bool {
+        self.platforms.supports(host)
+    }
+
+    /// The launch facts for `host`, before placeholder expansion.
+    ///
+    /// Merge order, lowest to highest: [`language_defaults`], the top
+    /// level, then [`Platforms::overlays_for`] (`<os>` before
+    /// `<os>-<arch>`). `scripts` merge per key, `env` per key (later
+    /// wins), `requires` append and dedupe keeping the first occurrence,
+    /// and `bin` comes from the language defaults only.
+    ///
+    /// Errors: [`ManifestError::Unsupported`] when `platforms:` does not
+    /// list the host, [`ManifestError::StartNotSingle`] when the effective
+    /// `start` is not exactly one command, and [`ManifestError::NoStart`]
+    /// when neither the manifest nor the language supplies one.
+    pub fn resolve(&self, host: &Host) -> Result<Resolved, ManifestError> {
+        if !self.supports_host(host) {
+            return Err(ManifestError::Unsupported(
+                self.module.clone(),
+                host.to_string(),
+            ));
+        }
+        let mut out = language_defaults(self.language, host);
+        let mut scripts = Scripts::default();
+        let overlays = self.platforms.overlays_for(host);
+        let layers = std::iter::once((&self.scripts, &self.env, self.requires.as_slice())).chain(
+            overlays
+                .iter()
+                .map(|o| (&o.scripts, &o.env, o.requires.as_slice())),
+        );
+        for (layer_scripts, env, requires) in layers {
+            scripts.merge_over(layer_scripts);
+            out.env
+                .extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+            out.requires.extend_from_slice(requires);
+        }
+        out.requires = dedupe_keep_first(std::mem::take(&mut out.requires));
+        if let Some(build) = scripts.build {
+            out.build = build.steps;
+        }
+        if let Some(stop) = scripts.stop {
+            out.stop = stop.steps;
+        }
+        if let Some(test) = scripts.test {
+            out.test = test.steps;
+        }
+        match scripts.start {
+            Some(start) => {
+                out.start = start
+                    .single()
+                    .cloned()
+                    .ok_or(ManifestError::StartNotSingle)?;
+            }
+            None if out.start.is_empty() => return Err(ManifestError::NoStart(self.language)),
+            None => {}
+        }
+        Ok(out)
+    }
+}
+
+/// `items` with later duplicates removed, order otherwise kept.
+fn dedupe_keep_first(items: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Scripts, platforms, and resolution for one host
+// ─────────────────────────────────────────────────────────────────────
+
+/// One argv, already split. `argv[0]` is the program.
+pub type Argv = Vec<String>;
+
+/// A script slot: one or more commands, run in order.
+///
+/// On disk a slot is a string (one command) or a list of strings (one
+/// command each). Each string is split by [`Script::parse_line`] into an
+/// argv; it is never handed to a shell, so `&&`, redirection, and
+/// `export` have no meaning. An empty list declares the slot with no
+/// commands, which overrides a language default with nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Script {
+    pub steps: Vec<Argv>,
+}
+
+impl Script {
+    /// Split one command line into argv.
+    ///
+    /// Whitespace separates tokens. `"..."` and `'...'` group, may appear
+    /// inside a token (`a"b c"d` is the one token `ab cd`), and are
+    /// removed; `""` is an empty token. There are no backslash escapes.
+    pub fn parse_line(line: &str) -> Result<Argv, ScriptError> {
+        let mut argv = Vec::new();
+        let mut token = String::new();
+        let mut in_token = false;
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '"' || c == '\'' {
+                in_token = true;
+                loop {
+                    match chars.next() {
+                        Some(q) if q == c => break,
+                        Some(other) => token.push(other),
+                        None => return Err(ScriptError::UnterminatedQuote(line.to_owned())),
+                    }
+                }
+            } else if c.is_whitespace() {
+                if in_token {
+                    argv.push(std::mem::take(&mut token));
+                    in_token = false;
+                }
+            } else {
+                token.push(c);
+                in_token = true;
+            }
+        }
+        if in_token {
+            argv.push(token);
+        }
+        if argv.is_empty() {
+            return Err(ScriptError::Empty);
+        }
+        Ok(argv)
+    }
+
+    /// The command, when the slot holds exactly one.
+    pub fn single(&self) -> Option<&Argv> {
+        if let [only] = self.steps.as_slice() {
+            Some(only)
+        } else {
+            None
+        }
+    }
+}
+
+/// A token that needs no quoting: non-empty, no whitespace, no quotes.
+fn is_plain_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+}
+
+/// `token` spelled so [`Script::parse_line`] reads it back unchanged.
+fn quote_token(token: &str) -> String {
+    if is_plain_token(token) {
+        return token.to_owned();
+    }
+    if !token.contains('"') {
+        return format!("\"{token}\"");
+    }
+    if !token.contains('\'') {
+        return format!("'{token}'");
+    }
+    // Both quote kinds: double-quote each run between `"`s and spell each
+    // `"` itself as `'"'`; adjacent quoted parts join into one token.
+    let mut out = String::with_capacity(token.len() + 8);
+    for (i, run) in token.split('"').enumerate() {
+        if i > 0 {
+            out.push_str("'\"'");
+        }
+        if !run.is_empty() {
+            out.push('"');
+            out.push_str(run);
+            out.push('"');
+        }
+    }
+    out
+}
+
+/// One step as one line, each token quoted only when it must be.
+fn join_argv(step: &[String]) -> String {
+    step.iter()
+        .map(|t| quote_token(t))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// One plain step is written as a string; anything else as a list of
+// lines. Both forms read back to the same steps.
+impl Serialize for Script {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let plain = self
+            .single()
+            .filter(|step| !step.is_empty() && step.iter().all(|t| is_plain_token(t)));
+        if let Some(step) = plain {
+            return s.serialize_str(&step.join(" "));
+        }
+        s.collect_seq(self.steps.iter().map(|step| join_argv(step)))
+    }
+}
+
+impl<'de> Deserialize<'de> for Script {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ScriptVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ScriptVisitor {
+            type Value = Script;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a command string, or a list of command strings")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Script, E> {
+                let argv = Script::parse_line(s).map_err(E::custom)?;
+                Ok(Script { steps: vec![argv] })
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Script, A::Error> {
+                let mut steps = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(line) = seq.next_element::<String>()? {
+                    steps.push(Script::parse_line(&line).map_err(serde::de::Error::custom)?);
+                }
+                Ok(Script { steps })
+            }
+        }
+
+        d.deserialize_any(ScriptVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScriptError {
+    #[error("unterminated quote in command: {0}")]
+    UnterminatedQuote(String),
+    #[error("empty command")]
+    Empty,
+}
+
+/// The `scripts:` block. Each key is optional; an absent key falls
+/// through to the next lower layer (ultimately [`language_defaults`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scripts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<Script>,
+    /// Exactly one command. sb appends `--id <id>` per instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<Script>,
+    /// Extra teardown, run after sb has closed the module's windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Script>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<Script>,
+}
+
+impl Scripts {
+    /// True when no key is declared.
+    pub fn is_empty(&self) -> bool {
+        self.build.is_none() && self.start.is_none() && self.stop.is_none() && self.test.is_none()
+    }
+
+    /// Per key: a key declared in `over` replaces this one.
+    pub fn merge_over(&mut self, over: &Scripts) {
+        let slots = [
+            (&mut self.build, &over.build),
+            (&mut self.start, &over.start),
+            (&mut self.stop, &over.stop),
+            (&mut self.test, &over.test),
+        ];
+        for (slot, value) in slots {
+            if value.is_some() {
+                slot.clone_from(value);
+            }
+        }
+    }
+
+    /// `start` declared with more than one command.
+    fn has_multi_step_start(&self) -> bool {
+        self.start.as_ref().is_some_and(|s| s.steps.len() > 1)
+    }
+}
+
+/// One `platforms.<key>` value: the same launch keys as the top level,
+/// merged over it on a matching host.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Overlay {
+    #[serde(default, skip_serializing_if = "Scripts::is_empty")]
+    pub scripts: Scripts,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+}
+
+/// The `platforms:` block. Keys are `<os>` or `<os>-<arch>` from
+/// [`crate::host::KNOWN_OS`] / [`crate::host::KNOWN_ARCH`], checked when
+/// the file is read.
+///
+/// An empty block (absent, or `{}`) means every host is supported. A
+/// non-empty block lists the supported hosts: a host is supported when
+/// its `<os>` or `<os>-<arch>` key is present.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(transparent)]
+pub struct Platforms(pub BTreeMap<String, Overlay>);
+
+impl Platforms {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Absent block = every host supported. Present = the host's `<os>`
+    /// key or `<os>-<arch>` key exists.
+    pub fn supports(&self, host: &Host) -> bool {
+        self.0.is_empty() || host.platform_keys().iter().any(|k| self.0.contains_key(k))
+    }
+
+    /// Overlays for this host in merge order: `<os>` then `<os>-<arch>`.
+    pub fn overlays_for(&self, host: &Host) -> Vec<&Overlay> {
+        host.platform_keys()
+            .iter()
+            .filter_map(|k| self.0.get(k))
+            .collect()
+    }
+
+    /// Every key is `<os>` or `<os>-<arch>` with a known os and arch.
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        match self.0.keys().find(|k| !is_valid_platform_key(k)) {
+            Some(bad) => Err(ManifestError::BadPlatformKey(bad.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+// Hand-written so a misspelt key (`linx`) fails at load instead of
+// silently making the module unsupported everywhere.
+impl<'de> Deserialize<'de> for Platforms {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let platforms = Platforms(BTreeMap::deserialize(d)?);
+        platforms.validate().map_err(serde::de::Error::custom)?;
+        Ok(platforms)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ManifestError {
+    #[error(
+        "platforms: unknown key {0:?} (expected <os> or <os>-<arch>, os in linux|windows|macos, \
+         arch in x86_64|aarch64)"
+    )]
+    BadPlatformKey(String),
+    #[error("scripts.start must be exactly one command")]
+    StartNotSingle,
+    #[error("language {0} has no start command (unity modules launch from the editor)")]
+    NoStart(Language),
+    #[error("module {0:?} is not supported on {1}")]
+    Unsupported(String, String),
+}
+
+/// Fully merged launch facts for one module on one host, before
+/// placeholder expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub build: Vec<Argv>,
+    pub start: Argv,
+    pub stop: Vec<Argv>,
+    pub test: Vec<Argv>,
+    pub env: BTreeMap<String, String>,
+    pub requires: Vec<String>,
+    /// Relative path of the built binary, the value of `{bin}` once
+    /// expanded (it may use `{module}` and `{exe}`). Empty for python and
+    /// flutter.
+    pub bin: String,
+}
+
+/// The language defaults for `lang` on `host`, raw (before expansion).
+///
+/// | language | build | start | bin | test |
+/// | -------- | ----- | ----- | --- | ---- |
+/// | rust | `cargo build --release` | `{bin} {args}` | `target/release/{module}{exe}` | `cargo test` |
+/// | cpp | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`, `cmake --build build --config Release` | `{bin} {args}` | `build/{module}`; Windows `build/Release/{module}.exe` | none |
+/// | python | none | `{python} main.py {args}` | empty | none |
+/// | flutter | none | `flutter run -d {os}` | empty | none |
+/// | unity | none | none | empty | none |
+///
+/// Unity's empty `start` is what makes [`ModuleDevConfig::resolve`]
+/// return [`ManifestError::NoStart`] unless the manifest declares one.
+pub fn language_defaults(lang: Language, host: &Host) -> Resolved {
+    let cpp_bin = if host.os == "windows" {
+        "build/Release/{module}.exe"
+    } else {
+        "build/{module}"
+    };
+    let none = Resolved {
+        build: Vec::new(),
+        start: Vec::new(),
+        stop: Vec::new(),
+        test: Vec::new(),
+        env: BTreeMap::new(),
+        requires: Vec::new(),
+        bin: String::new(),
+    };
+    match lang {
+        Language::Rust => Resolved {
+            build: vec![argv(&["cargo", "build", "--release"])],
+            start: argv(&["{bin}", "{args}"]),
+            test: vec![argv(&["cargo", "test"])],
+            bin: "target/release/{module}{exe}".to_owned(),
+            ..none
+        },
+        Language::Cpp => Resolved {
+            build: vec![
+                argv(&[
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    "build",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                ]),
+                argv(&["cmake", "--build", "build", "--config", "Release"]),
+            ],
+            start: argv(&["{bin}", "{args}"]),
+            bin: cpp_bin.to_owned(),
+            ..none
+        },
+        Language::Python => Resolved {
+            start: argv(&["{python}", "main.py", "{args}"]),
+            ..none
+        },
+        Language::Flutter => Resolved {
+            start: argv(&["flutter", "run", "-d", "{os}"]),
+            ..none
+        },
+        Language::Unity => none,
+    }
+}
+
+fn argv(tokens: &[&str]) -> Argv {
+    tokens.iter().copied().map(str::to_owned).collect()
+}
+
+/// Where a module's virtualenv interpreter lives, relative to the module
+/// root. The caller uses it for `{python}` when the file exists.
+pub fn python_venv_relpath(host: &Host) -> &'static str {
+    if host.os == "windows" {
+        ".venv/Scripts/python.exe"
+    } else {
+        ".venv/bin/python"
+    }
+}
+
+/// The interpreter `{python}` falls back to when there is no virtualenv.
+pub fn python_fallback(host: &Host) -> &'static str {
+    if host.os == "windows" {
+        "python"
+    } else {
+        "python3"
     }
 }
 
@@ -685,8 +1283,9 @@ impl std::fmt::Display for Encoding {
 // Pub / Sub specs (shared between dev and prd configs)
 // ─────────────────────────────────────────────────────────────────────
 
-/// One `publishers:` entry. On disk it carries exactly one of `topic:`
-/// (bare, owned by the module) or `key:` (verbatim wire key).
+/// One `publishers:` entry. On disk it carries at most one of `topic:`
+/// (bare, owned by the module) or `key:` (verbatim wire key); with
+/// neither, `name` is the bare topic. `topic:` is always written back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(into = "RawSpec")]
 pub struct PubSpec {
@@ -780,6 +1379,11 @@ enum RawSpecError {
     Topic(#[from] TopicRefError),
     #[error("topic: is empty")]
     EmptyTopic,
+    /// Neither `topic:` nor `key:`, and `name` is not a valid bare topic.
+    #[error(
+        "name {name:?} cannot double as the topic (allowed: [A-Za-z0-9_-]); add topic: or key:"
+    )]
+    NameNotTopic { name: String },
     #[error(transparent)]
     Rule(#[from] SpecRuleError),
 }
@@ -791,11 +1395,21 @@ impl RawSpec {
     /// - `topic: a/b` (inner `/`, no leading `/`) is refused, see
     ///   [`TopicRefError::LegacyOwnedWithSlash`];
     /// - `topic: hello` is `Owned`, `key: ...` is `Key`;
-    /// - both or neither is an error.
+    /// - neither is `Owned(name)`, provided every char of `name` is valid
+    ///   in a wire segment (since 0.6.0; serialization still writes the
+    ///   `topic:` back, so the file reads on older sb);
+    /// - both is an error.
     fn topic_ref(&self) -> Result<TopicRef, RawSpecError> {
         match (self.topic.as_deref(), self.key.as_deref()) {
             (Some(_), Some(_)) => Err(TopicRefError::BothTopicAndKey.into()),
-            (None, None) => Err(TopicRefError::NeitherTopicNorKey.into()),
+            (None, None) => {
+                if self.name.is_empty() || !self.name.chars().all(is_valid_segment_char) {
+                    return Err(RawSpecError::NameNotTopic {
+                        name: self.name.clone(),
+                    });
+                }
+                TopicRef::owned(&self.name).map_err(|_| RawSpecError::EmptyTopic)
+            }
             (None, Some(key)) => Ok(TopicRef::key(key)?),
             (Some(topic), None) if topic.starts_with('/') => {
                 TopicRef::key(topic).map_err(|_| RawSpecError::EmptyTopic)
@@ -928,7 +1542,7 @@ where
     type Value = T;
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a pub/sub entry with name, topic or key, type, and transport")
+        f.write_str("a pub/sub entry with name, optional topic or key, type, and transport")
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
@@ -1012,27 +1626,27 @@ pub fn legacy_topics_in(dev_yml_text: &str) -> Vec<LegacyTopic> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// WorkspaceFlow — `flow.yaml`
+// WorkspaceFlow — `sb.flow.yaml` (legacy name `flow.yaml`)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Workspace module registry. Maps module name → path to its config.
+/// Workspace module registry. Maps module name → path to its manifest.
 ///
 /// Two copies of this shape exist:
 ///
-/// - the **repo copy**, a `flow.yaml` at a repository root, written by
+/// - the **repo copy**, an `sb.flow.yaml` at a repository root, written by
 ///   hand (and by `sb init`). Module and message paths are relative to
 ///   that file's directory; `name:` optionally names the workspace.
-/// - the **installed copy** at `<sb_home>/workspaces/<name>/flow.yaml`,
-///   derived from the repo copy on install. Every path is absolute and
-///   `source:` records where it came from.
+/// - the **installed copy** under `<sb_home>/workspaces/<name>/`, derived
+///   from the repo copy on install. Every path is absolute and `source:`
+///   records where it came from.
 ///
-/// `instances` carries the workspace's deployment topology — one entry
-/// per declared instance of a module (e.g. `cam_gige_ht: [left, right]`).
-/// Instances are the unit of node identity in the L6 graph editor; they
-/// also drive docker-aware runscript codegen at L2 (`sb init --docker`).
-/// A module with no `instances:` entry runs as a single (un-suffixed)
-/// process; that's the default and matches the pre-instances flow.yaml
-/// shape.
+/// Instances are the workspace's deployment topology: one tmux window,
+/// and one node in the L6 graph editor, per declared instance of a
+/// module. Since 0.6.0 they sit under the module entry
+/// (`cam: { path: cam, instances: [left, right] }`); the pre-0.6.0
+/// top-level `instances:` map is still read. Use
+/// [`WorkspaceFlow::instances_for`] rather than either field. A module
+/// with no instances runs as a single (un-suffixed) process.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceFlow {
@@ -1044,8 +1658,16 @@ pub struct WorkspaceFlow {
     /// Message directories imported into the vault on install.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<MessageSource>,
+    /// Legacy top-level form (`instances: { cam: [left, right] }`),
+    /// deprecated since 0.6.0. Read, and copied as is on install; never
+    /// written by code paths that build a new flow.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, Vec<ModuleInstance>>,
+    /// Subscriber to publisher links, `<module>.<entry>:
+    /// <module>[<selector>].<entry>`. Parsed and validated in 0.6.0; see
+    /// [`WorkspaceFlow::wires`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wires: BTreeMap<String, String>,
     /// Provenance of an installed copy. Never present in a repo copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<FlowSource>,
@@ -1064,13 +1686,40 @@ impl WorkspaceFlow {
     /// Look up a single instance by `(module, id)`. Returns `None` if
     /// the module has no instances declared or no instance with that id.
     pub fn instance(&self, module: &str, id: &str) -> Option<&ModuleInstance> {
-        self.instances.get(module)?.iter().find(|i| i.id == id)
+        self.instances_for(module).iter().find(|i| i.id == id)
     }
 
-    /// Validate the workspace name, module paths, message sources, and
-    /// every instance id (rejecting duplicates within one module's list).
-    /// Call after deserializing `flow.yaml` so bad input fails at load
-    /// time, not at launch time.
+    /// The module's instances: the inline list under its `modules:` entry
+    /// if non-empty, else the legacy top-level list, else empty.
+    pub fn instances_for(&self, module: &str) -> &[ModuleInstance] {
+        match self.modules.get(module) {
+            Some(m) if !m.instances.is_empty() => &m.instances,
+            _ => self.instances.get(module).map_or(&[][..], Vec::as_slice),
+        }
+    }
+
+    /// True when the legacy top-level `instances:` map has any entry, so
+    /// the caller can warn that it is deprecated.
+    pub fn has_legacy_instances(&self) -> bool {
+        !self.instances.is_empty()
+    }
+
+    /// The parsed `wires:`, in key order. Errors are grammar only
+    /// ([`FlowValidationError::BadWire`]); whether the named modules and
+    /// entries exist needs the manifests, which `sb doctor` checks.
+    pub fn wires(&self) -> Result<Vec<Wire>, FlowValidationError> {
+        self.wires
+            .iter()
+            .map(|(lhs, rhs)| parse_wire(lhs, rhs))
+            .collect()
+    }
+
+    /// Validate the workspace name, module paths, message sources, every
+    /// instance id in both forms (rejecting duplicates within one
+    /// module's list), that no module uses both instance forms, that the
+    /// top-level form names only registered modules, and the grammar of
+    /// every wire. Call after deserializing the flow so bad input fails
+    /// at load time, not at launch time.
     pub fn validate(&self) -> Result<(), FlowValidationError> {
         if let Some(name) = &self.name {
             validate_identifier(name).map_err(|e| FlowValidationError::BadName {
@@ -1084,28 +1733,47 @@ impl WorkspaceFlow {
                     module: module.clone(),
                 });
             }
+            validate_instance_list(module, &m.instances)?;
+            if !m.instances.is_empty() && self.instances.contains_key(module) {
+                return Err(FlowValidationError::BothInstanceForms(module.clone()));
+            }
         }
         for (index, src) in self.messages.iter().enumerate() {
             src.validate(index)?;
         }
         for (module, list) in &self.instances {
-            let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-            for inst in list {
-                validate_instance_id(&inst.id).map_err(|e| FlowValidationError::BadInstanceId {
-                    module: module.clone(),
-                    id: inst.id.clone(),
-                    source: e,
-                })?;
-                if !seen.insert(inst.id.as_str()) {
-                    return Err(FlowValidationError::DuplicateInstanceId {
-                        module: module.clone(),
-                        id: inst.id.clone(),
-                    });
-                }
+            if !self.modules.contains_key(module) {
+                return Err(FlowValidationError::InstancesForUnknownModule(
+                    module.clone(),
+                ));
             }
+            validate_instance_list(module, list)?;
         }
+        self.wires()?;
         Ok(())
     }
+}
+
+/// Every id in one module's instance list is valid and unique.
+fn validate_instance_list(
+    module: &str,
+    list: &[ModuleInstance],
+) -> Result<(), FlowValidationError> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for inst in list {
+        validate_instance_id(&inst.id).map_err(|e| FlowValidationError::BadInstanceId {
+            module: module.to_owned(),
+            id: inst.id.clone(),
+            source: e,
+        })?;
+        if !seen.insert(inst.id.as_str()) {
+            return Err(FlowValidationError::DuplicateInstanceId {
+                module: module.to_owned(),
+                id: inst.id.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1133,33 +1801,49 @@ pub enum FlowValidationError {
     EmptyMessagePath { index: usize },
     #[error("messages[{index}]: unknown backend {backend:?} (expected one of: proto, fb, iox2)")]
     UnknownBackend { index: usize, backend: String },
+    #[error(
+        "module {0:?} declares instances both under its modules: entry and in the top-level \
+         instances: map; keep only the list under modules:"
+    )]
+    BothInstanceForms(String),
+    #[error("top-level instances: names module {0:?}, which is not listed under modules:")]
+    InstancesForUnknownModule(String),
+    /// `(lhs, reason)`: the wire's key and what is wrong with it.
+    #[error("wires.{0}: {1}")]
+    BadWire(String, String),
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// One `modules:` value in `flow.yaml`: where the module's `sb.dev.yml`
-/// is, and whether `sb up` launches it.
+/// One `modules:` value in the flow: where the module's manifest is,
+/// whether `sb up` launches it, and its instances.
 ///
-/// On disk it is either a bare path (`pubber` or `pubber/sb.dev.yml`),
-/// which means `up: true`, or a map `{ path: ..., up: false }`. A module
-/// with `up: false` is still registered (`sb run` / `sb stop` work on it);
-/// only the whole-workspace `sb up` skips it. Serialises back to the bare
-/// form whenever `up` is true.
+/// On disk it is either a bare path (`pubber` or
+/// `pubber/sb.module.yaml`), which means `up: true` and no instances, or a
+/// map `{ path: ..., up: false, instances: [...] }`. A module with
+/// `up: false` is still registered (`sb run` / `sb stop` work on it); only
+/// the whole-workspace `sb up` skips it. Serialises back to the bare form
+/// only when `up` is true and `instances` is empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(into = "ModuleRefRaw")]
 pub struct ModuleRef {
     pub path: PathBuf,
     pub up: bool,
+    /// One window per entry under `sb up`. Empty = one un-suffixed
+    /// process. Read through [`WorkspaceFlow::instances_for`], which also
+    /// honours the legacy top-level form.
+    pub instances: Vec<ModuleInstance>,
 }
 
 impl ModuleRef {
-    /// A module `sb up` launches (`up: true`).
+    /// A module `sb up` launches (`up: true`), with no instances.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             up: true,
+            instances: Vec::new(),
         }
     }
 }
@@ -1170,17 +1854,26 @@ impl From<PathBuf> for ModuleRef {
     }
 }
 
+// By reference because `skip_serializing_if` passes `&bool`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 /// The two YAML spellings of a [`ModuleRef`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ModuleRefRaw {
-    /// `name: path`, meaning `up: true`.
+    /// `name: path`, meaning `up: true` and no instances.
     Path(PathBuf),
-    /// `name: { path: ..., up: ... }`; `up` defaults to `true`.
+    /// `name: { path: ..., up: ..., instances: [...] }`; `up` defaults to
+    /// `true` and is written only when `false`.
     Full {
         path: PathBuf,
-        #[serde(default = "default_true")]
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
         up: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        instances: Vec<ModuleInstance>,
     },
 }
 
@@ -1188,19 +1881,28 @@ impl From<ModuleRefRaw> for ModuleRef {
     fn from(raw: ModuleRefRaw) -> Self {
         match raw {
             ModuleRefRaw::Path(path) => Self::new(path),
-            ModuleRefRaw::Full { path, up } => Self { path, up },
+            ModuleRefRaw::Full {
+                path,
+                up,
+                instances,
+            } => Self {
+                path,
+                up,
+                instances,
+            },
         }
     }
 }
 
 impl From<ModuleRef> for ModuleRefRaw {
     fn from(m: ModuleRef) -> Self {
-        if m.up {
+        if m.up && m.instances.is_empty() {
             Self::Path(m.path)
         } else {
             Self::Full {
                 path: m.path,
-                up: false,
+                up: m.up,
+                instances: m.instances,
             }
         }
     }
@@ -1214,6 +1916,8 @@ struct ModuleRefMap {
     path: PathBuf,
     #[serde(default = "default_true")]
     up: bool,
+    #[serde(default)]
+    instances: Vec<ModuleInstance>,
 }
 
 // Hand-written rather than `#[serde(from = "ModuleRefRaw")]`: an untagged
@@ -1228,7 +1932,7 @@ impl<'de> Deserialize<'de> for ModuleRef {
             type Value = ModuleRef;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a module path, or a map with `path:` and optional `up:`")
+                f.write_str("a module path, or a map with `path:` and optional `up:`, `instances:`")
             }
 
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ModuleRef, E> {
@@ -1244,6 +1948,7 @@ impl<'de> Deserialize<'de> for ModuleRef {
                 Ok(ModuleRef {
                     path: m.path,
                     up: m.up,
+                    instances: m.instances,
                 })
             }
         }
@@ -1298,8 +2003,8 @@ impl MessageSource {
     }
 }
 
-/// Where an installed `flow.yaml` came from. Written only into the
-/// installed copy under `<sb_home>/workspaces/<name>/`.
+/// Where an installed flow came from. Written only into the installed
+/// copy under `<sb_home>/workspaces/<name>/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowSource {
@@ -1312,25 +2017,137 @@ pub struct FlowSource {
     pub installed_at: String,
 }
 
-/// One deployed instance of a module — a node in the L6 graph and a
-/// dispatch branch in the docker runscript.
+/// One deployed instance of a module: a tmux window under `sb up` and a
+/// node in the L6 graph.
 ///
-/// `id` is the wire-form suffix appended to the module on the wire
-/// (`<module>-<id>` → e.g. `cam_gige_ht-left`). `label` is a free-form
-/// human-readable display string used by the L6 graph editor; if
-/// absent, the UI should fall back to `id`. `docker` carries per-instance
-/// container settings consumed by `sb init --docker`; if absent, the
-/// instance runs as a plain (non-docker) process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// `id` is the suffix appended to the module on the wire and in the
+/// window name (`<module>-<id>` → e.g. `cam_gige_ht-left`; see
+/// [`crate::topic::instance_module`]). `label` is a free-form display
+/// string for the L6 graph editor; if absent, the UI falls back to `id`.
+/// `args` are appended to the start command and `env` is merged over the
+/// manifest's for this instance only. `docker` carries per-instance
+/// container settings; if absent, the instance runs as a plain process.
+///
+/// On disk an instance is a bare id (`left`, or a number such as `1`)
+/// when only `id` is set, or a map `{ id, label, args, env, docker }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleInstance {
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub docker: Option<DockerSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub docker: Option<DockerSpec>,
+}
+
+impl ModuleInstance {
+    /// An instance with only `id` set.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            docker: None,
+        }
+    }
+
+    /// Only `id` is set, so the instance is written as a bare id.
+    fn is_bare(&self) -> bool {
+        self.label.is_none() && self.args.is_empty() && self.env.is_empty() && self.docker.is_none()
+    }
+}
+
+/// The map spelling of a [`ModuleInstance`], parsed strictly so a typo'd
+/// key is reported by name.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModuleInstanceMap {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docker: Option<DockerSpec>,
+}
+
+impl From<ModuleInstanceMap> for ModuleInstance {
+    fn from(m: ModuleInstanceMap) -> Self {
+        Self {
+            id: m.id,
+            label: m.label,
+            args: m.args,
+            env: m.env,
+            docker: m.docker,
+        }
+    }
+}
+
+impl From<ModuleInstance> for ModuleInstanceMap {
+    fn from(i: ModuleInstance) -> Self {
+        Self {
+            id: i.id,
+            label: i.label,
+            args: i.args,
+            env: i.env,
+            docker: i.docker,
+        }
+    }
+}
+
+impl Serialize for ModuleInstance {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.is_bare() {
+            s.serialize_str(&self.id)
+        } else {
+            ModuleInstanceMap::from(self.clone()).serialize(s)
+        }
+    }
+}
+
+// Hand-written for the same reason as `ModuleRef`'s: an untagged enum
+// would hide a typo'd key behind "data did not match any variant".
+impl<'de> Deserialize<'de> for ModuleInstance {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ModuleInstanceVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ModuleInstanceVisitor {
+            type Value = ModuleInstance;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "an instance id, or a map with `id:` and optional `label:`, `args:`, \
+                     `env:`, `docker:`",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ModuleInstance, E> {
+                Ok(ModuleInstance::new(s))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<ModuleInstance, E> {
+                Ok(ModuleInstance::new(n.to_string()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<ModuleInstance, E> {
+                Ok(ModuleInstance::new(n.to_string()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<ModuleInstance, A::Error> {
+                let m = ModuleInstanceMap::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(m.into())
+            }
+        }
+
+        d.deserialize_any(ModuleInstanceVisitor)
+    }
 }
 
 /// Per-instance container settings. Every field is optional so an
@@ -1354,9 +2171,118 @@ pub struct DockerSpec {
     pub network: Option<String>,
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Wires — `wires:` in the flow
+// ─────────────────────────────────────────────────────────────────────
+
+/// One `wires:` entry: a subscriber entry and the publisher entry it
+/// reads from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wire {
+    pub sub: WireEnd,
+    pub pub_: WireSource,
+}
+
+/// The subscriber side, `<module>.<entry>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireEnd {
+    pub module: String,
+    pub entry: String,
+}
+
+/// Which instances of the publisher module a wire reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireSelector {
+    /// No brackets: the publisher is a singleton.
+    None,
+    /// `[{id}]`: the instance with the subscriber instance's own id.
+    SameId,
+    /// `[*]`: every instance.
+    All,
+    /// `[<id>]`: one named instance.
+    Id(String),
+}
+
+/// The publisher side, `<module>[<selector>].<entry>` or
+/// `<module>.<entry>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireSource {
+    pub module: String,
+    pub selector: WireSelector,
+    pub entry: String,
+}
+
+/// Parse one wire: `lhs` is `<module>.<entry>`, `rhs` is
+/// `<module>[<selector>].<entry>` or `<module>.<entry>`.
+///
+/// Each side splits on its first `.`. Modules and entries must pass
+/// [`validate_identifier`]; the selector is `{id}`, `*`, or an id passing
+/// [`validate_instance_id`]. Errors are [`FlowValidationError::BadWire`].
+pub fn parse_wire(lhs: &str, rhs: &str) -> Result<Wire, FlowValidationError> {
+    parse_wire_parts(lhs, rhs)
+        .map_err(|reason| FlowValidationError::BadWire(lhs.to_owned(), reason))
+}
+
+fn parse_wire_parts(lhs: &str, rhs: &str) -> Result<Wire, String> {
+    Ok(Wire {
+        sub: parse_wire_end(lhs)?,
+        pub_: parse_wire_source(rhs)?,
+    })
+}
+
+/// The subscriber side, `<module>.<entry>`.
+fn parse_wire_end(lhs: &str) -> Result<WireEnd, String> {
+    let (module, entry) = lhs
+        .split_once('.')
+        .ok_or_else(|| format!("subscriber {lhs:?} is not <module>.<entry>"))?;
+    check_wire_ident("subscriber module", module)?;
+    check_wire_ident("subscriber entry", entry)?;
+    Ok(WireEnd {
+        module: module.to_owned(),
+        entry: entry.to_owned(),
+    })
+}
+
+/// The publisher side, `<module>[<selector>].<entry>` or `<module>.<entry>`.
+fn parse_wire_source(rhs: &str) -> Result<WireSource, String> {
+    let (head, entry) = rhs.split_once('.').ok_or_else(|| {
+        format!("publisher {rhs:?} is not <module>.<entry> or <module>[<selector>].<entry>")
+    })?;
+    let (module, selector) = if let Some((module, rest)) = head.split_once('[') {
+        let sel = rest
+            .strip_suffix(']')
+            .ok_or_else(|| format!("publisher {rhs:?} has no ']' closing the selector"))?;
+        (module, parse_wire_selector(sel)?)
+    } else {
+        (head, WireSelector::None)
+    };
+    check_wire_ident("publisher module", module)?;
+    check_wire_ident("publisher entry", entry)?;
+    Ok(WireSource {
+        module: module.to_owned(),
+        selector,
+        entry: entry.to_owned(),
+    })
+}
+
+fn parse_wire_selector(sel: &str) -> Result<WireSelector, String> {
+    match sel {
+        "{id}" => Ok(WireSelector::SameId),
+        "*" => Ok(WireSelector::All),
+        id => validate_instance_id(id)
+            .map(|()| WireSelector::Id(id.to_owned()))
+            .map_err(|e| format!("selector [{id}] is not {{id}}, *, or an instance id ({e})")),
+    }
+}
+
+fn check_wire_ident(what: &str, s: &str) -> Result<(), String> {
+    validate_identifier(s).map_err(|e| format!("{what} {s:?} is invalid: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expand::{ExpandCtx, ExpandError, expand_argv, expand_str};
 
     // ── YAML round-trip tests (L1 TDD test #2) ────────────────────────
 
@@ -1419,11 +2345,19 @@ mod tests {
     }
 
     #[test]
-    fn spec_rejects_neither() {
+    fn spec_neither_topic_nor_key_uses_name() {
+        let y = dev_yml_with(
+            "publishers:\n  - name: hello\n    type: std/String\n    transport: zenoh\n",
+        );
+        let m: ModuleDevConfig = serde_yaml::from_str(&y).unwrap();
+        assert_eq!(m.publishers[0].topic, TopicRef::Owned("hello".into()));
+        // `topic:` is still written back, so the file reads on sb 0.5.
+        let out = serde_yaml::to_string(&m).unwrap();
+        assert!(out.contains("topic: hello"), "{out}");
         let e =
-            load_err("publishers:\n  - name: hello\n    type: std/String\n    transport: zenoh\n");
+            load_err("publishers:\n  - name: a.b\n    type: std/String\n    transport: zenoh\n");
         assert!(
-            e.contains("publishers[0]: exactly one of topic: or key: is required (neither given)"),
+            e.contains("publishers[0]: name \"a.b\" cannot double as the topic"),
             "{e}"
         );
     }
@@ -1469,18 +2403,12 @@ mod tests {
     #[test]
     fn workspace_flow_validate_rejects_bad_instance_id() {
         for bad in ["", "a b", "a/b", "a.b"] {
-            let mut instances = BTreeMap::new();
-            instances.insert(
-                "cam".into(),
-                vec![ModuleInstance {
-                    id: bad.into(),
-                    label: None,
-                    docker: None,
-                    args: vec![],
-                }],
-            );
+            let cam = ModuleRef {
+                instances: vec![ModuleInstance::new(bad)],
+                ..ModuleRef::new("apps/cam")
+            };
             let f = WorkspaceFlow {
-                instances,
+                modules: BTreeMap::from([("cam".to_owned(), cam)]),
                 ..Default::default()
             };
             assert!(
@@ -1492,32 +2420,33 @@ mod tests {
 
     #[test]
     fn workspace_flow_validate_rejects_duplicate_instance_id() {
-        let mut instances = BTreeMap::new();
-        instances.insert(
-            "cam".into(),
-            vec![
-                ModuleInstance {
-                    id: "left".into(),
-                    label: None,
-                    docker: None,
-                    args: vec![],
-                },
-                ModuleInstance {
-                    id: "left".into(),
-                    label: None,
-                    docker: None,
-                    args: vec![],
-                },
-            ],
-        );
-        let f = WorkspaceFlow {
-            instances,
+        // Legacy top-level form.
+        let left = ModuleInstance::new("left");
+        let mut f = WorkspaceFlow {
+            modules: BTreeMap::from([("cam".to_owned(), ModuleRef::new("apps/cam"))]),
+            instances: BTreeMap::from([("cam".to_owned(), vec![left.clone(), left.clone()])]),
             ..Default::default()
         };
         assert!(matches!(
             f.validate(),
             Err(FlowValidationError::DuplicateInstanceId { .. })
         ));
+        assert!(f.has_legacy_instances());
+        // Both forms for one module, and the top-level form for a module
+        // that is not registered.
+        f.instances.insert("cam".to_owned(), vec![left.clone()]);
+        f.modules.get_mut("cam").unwrap().instances = vec![left.clone()];
+        assert_eq!(
+            f.validate(),
+            Err(FlowValidationError::BothInstanceForms("cam".into()))
+        );
+        f.instances = BTreeMap::from([("ghost".to_owned(), vec![left])]);
+        assert_eq!(
+            f.validate(),
+            Err(FlowValidationError::InstancesForUnknownModule(
+                "ghost".into()
+            ))
+        );
     }
 
     // ── encoding: / type: / mime: rules ───────────────────────────────
@@ -1627,23 +2556,34 @@ mod tests {
     #[test]
     fn module_ref_string_and_map_forms() {
         let y = "modules:\n  a: apps/a\n  b:\n    path: apps/b\n    up: false\n  \
-                 c:\n    path: apps/c\n";
+                 c:\n    path: apps/c\n  d:\n    path: apps/d\n    \
+                 instances: [left, 2, { id: right, args: [--debug], env: { K: v } }]\n";
         let f: WorkspaceFlow = serde_yaml::from_str(y).unwrap();
+        f.validate().unwrap();
         assert_eq!(f.modules["a"], ModuleRef::new("apps/a"));
         assert_eq!(
             f.modules["b"],
             ModuleRef {
-                path: PathBuf::from("apps/b"),
-                up: false
+                up: false,
+                ..ModuleRef::new("apps/b")
             }
         );
         // Map form without `up:` means up: true and re-emits as a string.
         assert_eq!(f.modules["c"], ModuleRef::new("apps/c"));
+        // Inline instances: bare id, numeric id, and the map form.
+        let ids: Vec<&str> = f.instances_for("d").iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["left", "2", "right"]);
+        assert_eq!(f.instances_for("d")[2].args, ["--debug"]);
+        assert_eq!(f.instances_for("d")[2].env["K"], "v");
+        assert!(f.instances_for("a").is_empty());
         let out = serde_yaml::to_string(&f).unwrap();
         assert!(out.contains("a: apps/a\n"), "{out}");
         assert!(out.contains("c: apps/c\n"), "{out}");
         assert!(out.contains("path: apps/b"), "{out}");
         assert!(out.contains("up: false"), "{out}");
+        assert!(out.contains("path: apps/d"), "{out}");
+        assert!(out.contains("- left\n"), "{out}");
+        assert_eq!(out.matches("up:").count(), 1, "{out}");
         yaml_fixed_point(&f);
         assert_eq!(
             f.module_paths(),
@@ -1651,14 +2591,120 @@ mod tests {
                 ("a".to_owned(), PathBuf::from("apps/a")),
                 ("b".to_owned(), PathBuf::from("apps/b")),
                 ("c".to_owned(), PathBuf::from("apps/c")),
+                ("d".to_owned(), PathBuf::from("apps/d")),
             ])
         );
         assert_eq!(
             ModuleRef::from(ModuleRefRaw::Full {
                 path: "x".into(),
-                up: true
+                up: true,
+                instances: vec![],
             }),
             ModuleRef::new("x")
+        );
+    }
+
+    // ── sb.module.yaml launch keys ────────────────────────────────────
+
+    #[test]
+    fn manifest_platform_merge_and_expansion() {
+        let y = "module: ips_detect\nlanguage: rust\nenv: { RUST_LOG: info, MODE: base }\n\
+                 requires: [cargo]\nplatforms:\n  linux:\n    \
+                 env: { LIBCLANG_PATH: \"${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}\", MODE: linux }\n    \
+                 requires: [libclang-dev, cargo]\n    \
+                 scripts: { test: 'cargo test --features \"a b\"' }\n  \
+                 linux-x86_64: { env: { MODE: linux-x86_64 } }\n  windows: {}\n";
+        let m: ModuleDevConfig = serde_yaml::from_str(y).unwrap();
+        m.validate().unwrap();
+        yaml_fixed_point(&m);
+
+        // linux-x86_64: defaults <- top level <- linux <- linux-x86_64.
+        let linux = Host {
+            os: "linux",
+            arch: "x86_64",
+        };
+        let on_linux = m.resolve(&linux).unwrap();
+        assert_eq!(on_linux.build, [["cargo", "build", "--release"]]);
+        assert_eq!(on_linux.start, ["{bin}", "{args}"]);
+        assert_eq!(on_linux.test, [["cargo", "test", "--features", "a b"]]);
+        assert!(on_linux.stop.is_empty());
+        assert_eq!(on_linux.requires, ["cargo", "libclang-dev"]);
+        assert_eq!(on_linux.env["RUST_LOG"], "info");
+        assert_eq!(on_linux.env["MODE"], "linux-x86_64");
+
+        // Expansion: `${VAR:-default}` with the variable unset and set,
+        // then `{bin} {args}` for two instances.
+        let unset = |_: &str| -> Option<String> { None };
+        let set = |key: &str| (key == "LIBCLANG_PATH").then(|| "/opt/llvm/lib".to_owned());
+        let base = ExpandCtx {
+            module: &m.module,
+            root: "/ws/modules/ips_detect",
+            bin: "",
+            exe: linux.exe_suffix(),
+            id: None,
+            args: &[],
+            ws: "ws_ips",
+            os: linux.os,
+            python: "python3",
+        };
+        let lib = &on_linux.env["LIBCLANG_PATH"];
+        assert_eq!(
+            expand_str(lib, &base, &unset).unwrap(),
+            "/usr/lib/llvm-18/lib"
+        );
+        assert_eq!(expand_str(lib, &base, &set).unwrap(), "/opt/llvm/lib");
+        let bin = expand_str(&on_linux.bin, &base, &unset).unwrap();
+        assert_eq!(bin, "target/release/ips_detect");
+        for (id, args) in [("sb00", vec![]), ("sb01", vec!["--debug".to_owned()])] {
+            let ctx = ExpandCtx {
+                bin: &bin,
+                id: Some(id),
+                args: &args,
+                ..base
+            };
+            let mut want = vec![bin.clone()];
+            want.extend(args.iter().cloned());
+            assert_eq!(expand_argv(&on_linux.start, &ctx, &unset).unwrap(), want);
+            assert_eq!(
+                expand_str("{module}-{id}", &ctx, &unset).unwrap(),
+                format!("ips_detect-{id}")
+            );
+        }
+        assert_eq!(
+            expand_str("{id}", &base, &unset),
+            Err(ExpandError::NoInstance)
+        );
+
+        // windows: the linux overlays do not apply; `{exe}` adds `.exe`.
+        let windows = Host {
+            os: "windows",
+            arch: "x86_64",
+        };
+        let on_windows = m.resolve(&windows).unwrap();
+        assert_eq!(on_windows.env["MODE"], "base");
+        assert!(!on_windows.env.contains_key("LIBCLANG_PATH"));
+        assert_eq!(on_windows.test, [["cargo", "test"]]);
+        let win_ctx = ExpandCtx {
+            exe: windows.exe_suffix(),
+            ..base
+        };
+        assert_eq!(
+            expand_str(&on_windows.bin, &win_ctx, &unset).unwrap(),
+            "target/release/ips_detect.exe"
+        );
+
+        // macos is not listed under platforms:.
+        let mac = Host {
+            os: "macos",
+            arch: "aarch64",
+        };
+        assert!(!m.supports_host(&mac));
+        assert_eq!(
+            m.resolve(&mac),
+            Err(ManifestError::Unsupported(
+                "ips_detect".into(),
+                "macos-aarch64".into()
+            ))
         );
     }
 

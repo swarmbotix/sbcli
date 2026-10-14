@@ -5,7 +5,7 @@ over Zenoh **queryables**, with **stringified-JSON** payloads. This is
 independent of pub/sub: each service is a router file the user writes their own
 routes against.
 
-`sb 0.5.0+`: a service is a `services:` entry in `sb.dev.yml`, added with
+`sb 0.5.0+`: a service is a `services:` entry in `sb.module.yaml`, added with
 `sb io add service <name>` and rendered to `<io_dir>/services/<name>.<ext>`.
 The older `sb service init` still works but is deprecated (§2.2).
 
@@ -48,7 +48,7 @@ sb io add service calib            # adds { name: calib } and renders the router
 ```
 
 ```yaml
-# sb.dev.yml
+# sb.module.yaml
 services:
   - name: calib
 ```
@@ -63,13 +63,17 @@ Flutter and Unity have no service router.
   ([sbcli_pubsub.md](sbcli_pubsub.md) §4.1).
 - `sb io rm <name>` removes the entry and deletes its file.
 - `sb io update --services` re-renders every service file; plain
-  `sb io update` and `sb install` leave service files alone, because you edit
-  them ([sbcli_pubsub.md](sbcli_pubsub.md) §14.6).
+  `sb io update` leaves service files alone, because you edit them
+  ([sbcli_pubsub.md](sbcli_pubsub.md) §14.6). `sb install` (sb 0.6.0+)
+  renders a service file only where it does not exist yet, so a fresh
+  clone gets its routers and an edited one is never overwritten
+  ([sbcli_ws.md](sbcli_ws.md) §5.2).
 
 Module resolution is the same chain as `sb pub/sub` (see
 [sbcli_pubsub.md](sbcli_pubsub.md) §3): `--module` + sibling dir
-(`./<name>/sb.dev.yml`), then `--module` + the active workspace's
-`flow.yaml`, then `./sb.dev.yml` in cwd.
+(`./<name>/sb.module.yaml`), then `--module` + the active workspace's
+`sb.flow.yaml`, then `./sb.module.yaml` in cwd; each step also accepts
+the deprecated `sb.dev.yml` name (sb 0.6.0+).
 
 The router file is a **static, self-contained source file**: sb fills only the
 namespace constants (`device`, `workspace`, `module`, and the service name);

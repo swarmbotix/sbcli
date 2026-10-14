@@ -5,12 +5,12 @@
 //! - **Module resolution** ([`resolve_module`]) — three lookup rules.
 //! - **Mutation** ([`pub_add`], [`pub_edit`], [`pub_rm`], [`sub_add`],
 //!   [`sub_edit`], [`sub_rm`], [`service_add`], [`service_rm`]): reads
-//!   `sb.dev.yml`, validates against the vault, mutates the in-memory
-//!   `ModuleDevConfig`, writes it back, and invokes [`sb_codegen`] to emit /
-//!   update / remove the matching language file under
-//!   `<io_dir>/{publishers,subscribers,services}/`.
+//!   the module manifest, validates against the vault, mutates the
+//!   in-memory `ModuleDevConfig`, writes it back, and invokes
+//!   [`sb_codegen`] to emit / update / remove the matching language file
+//!   under `<io_dir>/{publishers,subscribers,services}/`.
 //! - **Regeneration** ([`regenerate_entry`], [`update_all`]): re-render
-//!   generated files from the current `sb.dev.yml` without changing it.
+//!   generated files from the current manifest without changing it.
 //! - **Listing** ([`list`]) — pure read; produces a structured view the
 //!   CLI renders as a table.
 //!
@@ -18,11 +18,15 @@
 //! ([`find_entry`]); adding an entry whose name is taken by any of the
 //! three is refused.
 //!
+//! The manifest is `sb.module.yaml`, or a legacy `sb.dev.yml` when that
+//! is the file the module has; it is always written back to the file it
+//! was read from.
+//!
 //! Filesystem state owned by this crate (per module):
 //!
 //! ```text
 //! <module_root>/
-//!   sb.dev.yml                    ← read + write
+//!   sb.module.yaml                ← read + write
 //!   <io_dir>/publishers/<n>.<ext> ← write + delete
 //!   <io_dir>/subscribers/<n>.<ext>
 //!   <io_dir>/services/<n>.<ext>
@@ -36,25 +40,26 @@ use anyhow::{Context, Result, anyhow, bail};
 use sb_codegen::{CodegenInput, Kind, Rendered};
 use sb_core::{
     Encoding, EntryKind, Language, LegacyTopic, ModuleDevConfig, PubSpec, SbCliConfig, ServiceSpec,
-    SubSpec, TopicRef, Transport, legacy_topics_in,
+    SubSpec, TopicRef, Transport, legacy_topics_in, module_file_candidates,
 };
 use sb_vault::{MessageName, Vault};
-use sb_workspace::{SbHome, active_workspace, read_flow};
+use sb_workspace::{MODULE_FILE, SbHome, active_workspace, find_module_file, read_flow};
 
 // ─────────────────────────────────────────────────────────────────────
 // Module resolution — the three lookup rules from level3.html
 // ─────────────────────────────────────────────────────────────────────
 
-/// In-memory handle for a resolved module: where its `sb.dev.yml` lives
-/// on disk + the parsed config. Created by [`resolve_module`].
+/// In-memory handle for a resolved module: where its manifest lives on
+/// disk + the parsed config. Created by [`resolve_module`].
 #[derive(Debug, Clone)]
 pub struct ModuleHandle {
+    /// The manifest file: `sb.module.yaml`, or a legacy `sb.dev.yml`.
     pub dev_yml_path: PathBuf,
     /// [`ModuleDevConfig::module_root`] of `config` for `dev_yml_path`.
     pub module_root: PathBuf,
     pub config: ModuleDevConfig,
     /// Legacy `topic: /...` entries found in the file as loaded. They are
-    /// already read as `key:`; the next write of `sb.dev.yml` stores them
+    /// already read as `key:`; the next write of the manifest stores them
     /// in that form and empties this list.
     pub legacy_topics: Vec<LegacyTopic>,
 }
@@ -66,26 +71,29 @@ impl ModuleHandle {
     }
 }
 
-/// Resolve which `sb.dev.yml` `sb pub/sub *` should operate on.
+/// Resolve which module manifest `sb pub/sub *` should operate on. A
+/// module directory is probed for `sb.module.yaml`, then the legacy
+/// `sb.dev.yml`.
 ///
 /// Order (highest priority first), per level3.html §"Module resolution":
-///   1. `explicit = Some(name)` AND `./<name>/sb.dev.yml` exists in `cwd`.
-///   2. `explicit = Some(name)` AND active workspace's `flow.yaml` has it.
-///   3. `explicit = None` AND `./sb.dev.yml` exists in `cwd`.
+///   1. `explicit = Some(name)` AND `./<name>/` holds a manifest in `cwd`.
+///   2. `explicit = Some(name)` AND the active workspace's flow has it.
+///   3. `explicit = None` AND `./` holds a manifest.
 ///
 /// Errors with all paths searched if every rule misses.
 pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Result<ModuleHandle> {
-    let mut tried: Vec<PathBuf> = Vec::new();
-
     match explicit {
         Some(name) => {
             // Rule 1 — child of cwd.
-            let child = cwd.join(name).join("sb.dev.yml");
-            tried.push(child.clone());
-            if child.exists() {
-                return load_handle(&child);
+            let child = cwd.join(name);
+            if let Some(found) = find_module_file(&child) {
+                return load_handle(&found);
             }
-            // Rule 2 — active workspace's flow.yaml.
+            let mut tried: Vec<PathBuf> = module_file_candidates()
+                .into_iter()
+                .map(|file| child.join(file))
+                .collect();
+            // Rule 2 — active workspace's flow.
             if let Some(ws) = active_workspace(home)? {
                 let flow = read_flow(home, &ws)?;
                 if let Some(m) = flow.modules.get(name) {
@@ -94,7 +102,7 @@ pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Resu
                         return load_handle(&m.path);
                     }
                 } else {
-                    tried.push(home.flow_yaml(&ws));
+                    tried.push(home.flow_path(&ws));
                 }
             }
             bail!(
@@ -108,13 +116,12 @@ pub fn resolve_module(explicit: Option<&str>, cwd: &Path, home: &SbHome) -> Resu
         }
         None => {
             // Rule 3 — cwd.
-            let here = cwd.join("sb.dev.yml");
-            tried.push(here.clone());
-            if here.exists() {
-                return load_handle(&here);
+            if let Some(found) = find_module_file(cwd) {
+                return load_handle(&found);
             }
             bail!(
-                "no sb.dev.yml in cwd ({}). Pass --module <name> or `cd` into a module dir.",
+                "no module manifest ({MODULE_FILE}) in cwd ({}). Pass --module <name> or `cd` \
+                 into a module dir.",
                 cwd.display()
             );
         }
@@ -205,7 +212,7 @@ fn variant_base(cfg: &SbCliConfig, name: &MessageName) -> Option<String> {
 }
 
 /// Check an entry's `(transport, encoding, type, mime)` combination
-/// before it is stored: the same rules `sb.dev.yml` loading enforces,
+/// before it is stored: the same rules manifest loading enforces,
 /// worded for the CLI, plus a well-formed `mime`.
 fn check_typing(
     transport: Transport,
@@ -372,7 +379,7 @@ pub struct MutationOutcome {
     /// the new one, as `"<role> <name>"` (`pub hello`, `service nav`).
     pub overwrote: Vec<String>,
     /// Legacy `topic: /...` entries stored as `key:` by this write of
-    /// `sb.dev.yml`. Zero when `dev_yml_written` is false.
+    /// the manifest. Zero when `dev_yml_written` is false.
     pub legacy_rewritten: usize,
 }
 
@@ -402,9 +409,26 @@ pub struct UpdateReport {
     /// Entries that could not be rendered, as `(name, reason)`.
     pub skipped: Vec<(String, String)>,
     /// Legacy `topic: /...` entries stored as `key:` (the only change
-    /// [`update_all`] makes to `sb.dev.yml`). Zero when nothing was
+    /// [`update_all`] makes to the manifest). Zero when nothing was
     /// rewritten.
     pub legacy_rewritten: usize,
+    /// Names of the services whose router file this call wrote (their
+    /// paths are in `written` too).
+    pub services_rendered: Vec<String>,
+}
+
+/// Which service routers [`update_all`] renders. Services are
+/// user-edited routers, so an existing one is overwritten only on
+/// explicit request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRender {
+    /// Leave every service file alone (`sb io update`).
+    Skip,
+    /// Render a service only when its file does not exist yet; never
+    /// overwrite (`sb install`).
+    IfMissing,
+    /// Re-render every service (`sb io update --services`).
+    Always,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -958,7 +982,7 @@ fn find_subscriber(handle: &ModuleHandle, input: &str) -> Result<usize> {
 }
 
 /// Regenerate a subscriber's file. `input` is the bare topic or wire key
-/// as the user typed it. `sb.dev.yml` is left alone unless it still holds
+/// as the user typed it. The manifest is left alone unless it still holds
 /// legacy `topic: /...` entries, which this rewrites as `key:`.
 pub fn sub_edit(
     handle: &mut ModuleHandle,
@@ -1083,7 +1107,7 @@ pub fn service_rm(handle: &mut ModuleHandle, name: &str) -> Result<MutationOutco
 // ─────────────────────────────────────────────────────────────────────
 
 /// Re-render the generated file of the publisher, subscriber, or service
-/// called `name` from its current entry. `sb.dev.yml` is left alone
+/// called `name` from its current entry. The manifest is left alone
 /// unless it still holds legacy `topic: /...` entries, which this
 /// rewrites as `key:`. The file is written even when its bytes would not
 /// change.
@@ -1125,32 +1149,38 @@ fn regenerate(
     })
 }
 
-/// Re-render every publisher and subscriber of the module (and every
-/// service when `include_services`; services are user-edited routers, so
-/// they are opt-in). A file whose rendered bytes equal what is on disk is
-/// reported `unchanged` and not touched; an entry that does not render
-/// (type no longer in the vault, no template for the language, …) is
-/// reported in `skipped` and the rest still run. `sb.dev.yml` is left
-/// alone unless it holds legacy `topic: /...` entries.
+/// Re-render every publisher and subscriber of the module, and the
+/// services `services` selects: none ([`ServiceRender::Skip`]), only
+/// those whose file does not exist yet ([`ServiceRender::IfMissing`]), or
+/// all ([`ServiceRender::Always`]); services are user-edited routers, so
+/// overwriting them is opt-in. A file whose rendered bytes equal what is
+/// on disk is reported `unchanged` and not touched; an entry that does
+/// not render (type no longer in the vault, no template for the language,
+/// …) is reported in `skipped` and the rest still run. The manifest is
+/// left alone unless it holds legacy `topic: /...` entries.
 ///
 /// Errors only when the vault cannot be listed or a file cannot be
 /// read or written.
 pub fn update_all(
     handle: &mut ModuleHandle,
     ctx: &GenCtx<'_>,
-    include_services: bool,
+    services: ServiceRender,
 ) -> Result<UpdateReport> {
     let known = known_types(ctx.vault)?;
+    let mut service_kinds = Vec::new();
+    if services != ServiceRender::Skip {
+        for (i, spec) in handle.config.services.iter().enumerate() {
+            let missing = !emitted_path(handle, Kind::Service, &spec.name).exists();
+            if services == ServiceRender::Always || missing {
+                service_kinds.push(EntryKind::Service(i));
+            }
+        }
+    }
     let cfg = &handle.config;
-    let services = if include_services {
-        cfg.services.len()
-    } else {
-        0
-    };
     let kinds: Vec<EntryKind> = (0..cfg.publishers.len())
         .map(EntryKind::Publisher)
         .chain((0..cfg.subscribers.len()).map(EntryKind::Subscriber))
-        .chain((0..services).map(EntryKind::Service))
+        .chain(service_kinds)
         .collect();
 
     let mut report = UpdateReport {
@@ -1172,10 +1202,19 @@ pub fn update_all(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("reading {}", abs.display())),
         };
+        let is_service = matches!(kind, EntryKind::Service(_));
+        if is_service && services == ServiceRender::IfMissing && on_disk.is_some() {
+            // Never overwrite a router the user may have edited.
+            continue;
+        }
         if on_disk.as_deref() == Some(rendered.contents.as_bytes()) {
             report.unchanged.push(abs);
         } else {
             report.written.push(write_rendered(handle, &rendered)?);
+            if is_service {
+                let name = entry_name(&handle.config, kind).to_owned();
+                report.services_rendered.push(name);
+            }
         }
     }
     if !handle.legacy_topics.is_empty() {
@@ -1393,7 +1432,7 @@ fn render_service(handle: &ModuleHandle, spec: &ServiceSpec, ctx: &GenCtx<'_>) -
 /// The targets root comes from **the message's own style**, not from any
 /// ambient setting. A module that publishes `swarmbotix/images/Image720pRgb8`
 /// and subscribes to `ros2/sensor_msgs/Image` needs two different roots in
-/// the same `sb.dev.yml`; one "current style" could not express that.
+/// the same manifest; one "current style" could not express that.
 fn targets_for(cfg: &SbCliConfig, msg: &MessageName) -> Result<PathBuf> {
     sb_config::message_targets_for(cfg, &msg.style)
 }
@@ -1452,12 +1491,19 @@ fn ext_for(language: Language) -> &'static str {
     }
 }
 
-fn remove_emitted_file(handle: &ModuleHandle, kind: Kind, name: &str) -> Result<Option<PathBuf>> {
+/// Where the generated file of entry `name` of `kind` lives:
+/// `<io_dir>/<kind dir>/<name>.<ext>`, the path [`sb_codegen::render`]
+/// emits.
+fn emitted_path(handle: &ModuleHandle, kind: Kind, name: &str) -> PathBuf {
     let ext = ext_for(handle.config.language);
-    let path = handle
+    handle
         .io_dir()
         .join(kind.dir())
-        .join(format!("{name}.{ext}"));
+        .join(format!("{name}.{ext}"))
+}
+
+fn remove_emitted_file(handle: &ModuleHandle, kind: Kind, name: &str) -> Result<Option<PathBuf>> {
+    let path = emitted_path(handle, kind, name);
     if path.exists() {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         Ok(Some(path))
@@ -1466,11 +1512,12 @@ fn remove_emitted_file(handle: &ModuleHandle, kind: Kind, name: &str) -> Result<
     }
 }
 
-/// Write `sb.dev.yml` back. Every entry is serialised in its canonical
-/// form, so any legacy `topic: /...` entries become `key:`. Returns how
-/// many legacy entries the file held (and clears that list).
+/// Write the manifest back to the file it was read from. Every entry is
+/// serialised in its canonical form, so any legacy `topic: /...` entries
+/// become `key:`. Returns how many legacy entries the file held (and
+/// clears that list).
 fn write_dev_yml(handle: &mut ModuleHandle) -> Result<usize> {
-    let body = serde_yaml::to_string(&handle.config).context("serializing sb.dev.yml")?;
+    let body = serde_yaml::to_string(&handle.config).context("serializing the module manifest")?;
     fs::write(&handle.dev_yml_path, body)
         .with_context(|| format!("writing {}", handle.dev_yml_path.display()))?;
     let rewritten = handle.legacy_topics.len();
@@ -1502,7 +1549,7 @@ mod tests {
         fs::write(std_dir.join("String.proto"), "syntax = \"proto3\";\n").unwrap();
         let module_dir = tmp.path().join("m");
         fs::create_dir_all(&module_dir).unwrap();
-        let dev_yml = module_dir.join("sb.dev.yml");
+        let dev_yml = module_dir.join(MODULE_FILE);
         fs::write(&dev_yml, "module: m\nlanguage: rust\n").unwrap();
         let env = Env {
             cfg: SbCliConfig {
@@ -1516,7 +1563,7 @@ mod tests {
         (env, load_handle(&dev_yml).unwrap())
     }
 
-    /// The handle as `sb.dev.yml` now stores it.
+    /// The handle as the manifest now stores it.
     fn reload(handle: &ModuleHandle) -> ModuleHandle {
         load_handle(&handle.dev_yml_path).unwrap()
     }

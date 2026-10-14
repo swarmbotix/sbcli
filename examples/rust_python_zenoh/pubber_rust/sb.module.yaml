@@ -1,6 +1,8 @@
 module: pubber_rust
 language: rust
 io_dir: swarmbotix_io
+scripts:
+  start: "target/release/pub_hello{exe} {args}"
 publishers:
 - name: hello
   topic: hello

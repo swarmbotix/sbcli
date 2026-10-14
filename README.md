@@ -80,8 +80,9 @@ for zero-copy shared memory on one device.
 ### Developer experience
 
 - **Bring your own project** -- `sb init` adopts an existing Cargo crate,
-  Python project, C++ tree, Flutter app, or Unity game by dropping bookkeeping
-  files into it; it never scaffolds or moves your code
+  Python project, C++ tree, Flutter app, or Unity game by dropping one
+  manifest, `sb.module.yaml`, and an IO directory into it; it never scaffolds
+  or moves your code
 - **Message vault** -- `.proto` files are the single source of truth; `sb`
   compiles them into iceoryx2 ctypes, protobuf, and FlatBuffers bindings per
   language, with a shipped ROS2-style bundle (`std/*`, `geometry_msgs`,
@@ -89,10 +90,10 @@ for zero-copy shared memory on one device.
 - **Pub/sub codegen** -- each `sb io add` writes one file under
   `swarmbotix_io/` that you wire into your build; edit the message or the
   topic and the file regenerates, and `sb io update` regenerates a whole
-  module from its `sb.dev.yml`
+  module from its `sb.module.yaml`
 - **Workspaces** -- named, isolated collections of modules, comparable to
-  Python virtual environments but for a swarm; a workspace is a `flow.yaml`
-  committed at a repository root, and `sb install <git-url>` clones it,
+  Python virtual environments but for a swarm; a workspace is an
+  `sb.flow.yaml` committed at a repository root, and `sb install <git-url>` clones it,
   installs it, compiles its messages, and regenerates every module in one
   step
 - **Layered config** -- one `sb.config.yml` per host, an optional override per
@@ -105,14 +106,17 @@ for zero-copy shared memory on one device.
 
 ### Launch and production
 
-- **`sb up`** -- starts every module in the active workspace under tmux, one
-  window per module, driven by that module's `runscript.bash`; a module
-  marked `up: false` in `flow.yaml` is left for `sb run`
-- **Per-module lifecycle** -- `sb run` restarts one module with passthrough
-  args, `sb stop` runs its `stopscript.bash`, `sb attach` drops you into the
-  session, `sb down` tears it all down
-- **Docker dispatch** -- `sb init --docker` lets a module run as a container
-  through the same lifecycle
+- **`sb up`** -- builds every module in the active workspace, then starts it
+  under tmux, one window per instance, straight from its `sb.module.yaml`:
+  no launch scripts, language defaults for build and start, per-OS overlays,
+  the same files on Linux and Windows; a module marked `up: false` in
+  `sb.flow.yaml` is left for `sb run`
+- **Instances** -- list a module's instances once in `sb.flow.yaml`; each gets
+  its own window (`<module>-<id>`), its `--id`, and `SB_INSTANCE_ID`
+- **Per-module lifecycle** -- `sb run <module>[:<id>]` rebuilds and restarts a
+  module or one instance (`--fg` runs it in the current terminal), `sb stop`
+  closes its windows, `sb attach` drops you into the session, `sb down` tears
+  it all down
 - **`sb gopro`** -- freezes a module's interface into a language-agnostic
   `sb.prd.yml` that ships with the binary
 - **Request/response** -- `sb io add service <name>` drops a REST-style router
@@ -123,7 +127,7 @@ for zero-copy shared memory on one device.
 - **App packages** -- `sb install <git-url | path>` installs any repository
   that carries an `sb.app.yml` and runs it as `sb <name> [args...]`, with no
   `PATH` change; `sb app init` writes that manifest for package authors. A
-  repository with a `flow.yaml` at its root installs as a workspace instead
+  repository with an `sb.flow.yaml` at its root installs as a workspace instead
 
 ### Introspection
 
@@ -131,7 +135,7 @@ for zero-copy shared memory on one device.
   iceoryx2 registrations left behind by dead publishers
 - **`sb topic listen`** -- decodes frames as JSON lines on the transport the
   topic path names, typed by `--type`, the publisher's wire schema, the
-  Header, or the module's `sb.dev.yml`; `--show` opens a window for image
+  Header, or the module's `sb.module.yaml`; `--show` opens a window for image
   topics
 - **`sb topic pub`** -- one-shot raw publish for smoke tests, on the
   transport the topic path names
@@ -346,7 +350,7 @@ need; `sb doctor` reports what is missing:
 | `flatc` | FlatBuffers codegen | 24.x+ |
 | `libzenohc.so` | cross-device pub/sub | matches Zenoh 1.9 |
 | `libiceoryx2_ffi_c.so` | same-device pub/sub | matches iceoryx2 0.9 |
-| `tmux` | `sb up` and friends | 3.2+ |
+| `tmux` (psmux on Windows) | `sb up` and friends | 3.2+ |
 
 Per-language clients: Rust adds `zenoh` / `iceoryx2` to `Cargo.toml`; Python
 needs `pip install eclipse-zenoh iceoryx2`; C++ needs the two shared libraries
@@ -355,8 +359,8 @@ in `Assets/Plugins/` (Zenoh only).
 
 ## Quick Start
 
-**Install a published workspace.** A workspace is a repository with a
-`flow.yaml` at its root. From a host with `sb` installed:
+**Install a published workspace.** A workspace is a repository with an
+`sb.flow.yaml` at its root. From a host with `sb` installed:
 
 ```bash
 sb config set device <name>
@@ -365,7 +369,7 @@ sb up
 ```
 
 `sb install` clones the repository (into `--dir`, or `~/.swarmbotix/repos/`
-without it), installs its `flow.yaml` as the active workspace, imports and
+without it), installs its `sb.flow.yaml` as the active workspace, imports and
 compiles its messages, and regenerates every module's `swarmbotix_io/`. After a `git pull`, run `sb install .` again (or
 `sb ws update <workspace>`). On a new host, run `sb doctor` first.
 
@@ -387,7 +391,7 @@ sb message compile                           # generate bindings into message_ta
 
 ```bash
 cd ~/my_project
-sb ws create my_project      # writes ./flow.yaml, installs it, makes it active
+sb ws create my_project      # writes ./sb.flow.yaml, installs it, makes it active
 ```
 
 **3. Adopt your modules** (once per app)
@@ -397,8 +401,12 @@ sb init --rust   modules/camera_app
 sb init --python modules/detector
 ```
 
-Each module gets `sb.dev.yml`, a `runscript.bash` stub, and an empty
-`swarmbotix_io/`, and is registered in `./flow.yaml` with a relative path.
+Each module gets an `sb.module.yaml` and an empty `swarmbotix_io/`, and is
+registered in `./sb.flow.yaml` with a relative path. There is no launch script
+to write: `sb up` builds and starts each module with its language's defaults
+(`cargo build --release` and `target/release/<module>` for Rust, `main.py` for
+Python, ...), and a few lines of `scripts:` in `sb.module.yaml` cover a module
+that differs ([sbcli_module.md](documents/sbcli_module.md)).
 
 **4. Wire pub/sub** (iterate freely)
 
@@ -421,28 +429,27 @@ build as described in
 **5. Run and inspect**
 
 ```bash
-# edit each module's runscript.bash so it actually launches the app, then:
-sb up                                                    # tmux session comes up
+sb up                                                    # build, then the tmux session comes up
 sb attach                                                # look inside
 sb topic listen dev01/my_project/camera_app/iox2/image_raw    # add --show for images
-sb run camera_app --id 2                                 # restart one module with args
-sb stop camera_app                                       # run its stopscript.bash
+sb run camera_app                                        # rebuild and restart one module
+sb stop camera_app                                       # close its windows
 ```
 
 **6. Share it**
 
 ```bash
-git add flow.yaml modules && git commit -m "my_project" && git push
+git add sb.flow.yaml modules && git commit -m "my_project" && git push
 # others: sb install <git-url>
 ```
 
-Commit `flow.yaml` and each module's `sb.dev.yml`; every install regenerates
+Commit `sb.flow.yaml` and each module's `sb.module.yaml`; every install regenerates
 `swarmbotix_io/`.
 
 **7. Freeze for production**
 
 ```bash
-sb gopro --all   # writes sb.prd.yml next to each sb.dev.yml
+sb gopro --all   # writes sb.prd.yml next to each sb.module.yaml
 sb down          # tear down the session
 ```
 
@@ -472,14 +479,14 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 
 | Command | Purpose |
 |---|---|
-| `sb install <url\|path> [--dir <path>] [--force]` | Install a workspace repository (root holds `flow.yaml`): install the flow, import and compile `messages:`, regenerate every module's io |
-| `sb ws create <name>` | Write `./flow.yaml` and install it |
+| `sb install <url\|path> [--dir <path>] [--force]` | Install a workspace repository (root holds `sb.flow.yaml`): install the flow, import and compile `messages:`, regenerate every module's io |
+| `sb ws create <name>` | Write `./sb.flow.yaml` and install it |
 | `sb ws install [<url\|path>] [--dir <path>] [--force]` | Workspace-only form of `sb install` (default: the current folder) |
-| `sb ws check [<name>]` | Validate a workspace (default: the active one): module files, message types, instance ids, encodings per wire key, generated files, staleness |
+| `sb ws check [<name>]` | Validate a workspace (default: the active one): module files, message types, instance ids, encodings per wire key, generated files, required tools, platform support, wires, deprecated files, staleness |
 | `sb ws update <name> [--force]` | `git pull --ff-only` the workspace's clone, then reinstall |
 | `sb ws uninstall <name> [--clean]` | Remove the installed copy; `--clean` also deletes each module's io dir and the clone `sb` made |
 | `sb ws <set\|list\|delete>` | Switch, list (with source and a stale marker), delete installed workspaces under `~/.swarmbotix/workspaces/` |
-| `sb init [path] [--rust\|--python\|--cpp\|--flutter\|--unity] [--docker] [--force]` | Adopt an existing project as a module; registers it in the repository `flow.yaml` above it |
+| `sb init [path] [--rust\|--python\|--cpp\|--flutter\|--unity] [--docker] [--force]` | Adopt an existing project as a module (writes `sb.module.yaml`); registers it in the repository `sb.flow.yaml` above it |
 | `sb list` | List publishers and subscribers on the resolved module (deprecated: `sb io list`) |
 | `sb gopro [--all \| --module <name>]` | Freeze a module for production (`sb.prd.yml`) |
 
@@ -491,7 +498,7 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | `sb io add <pub\|sub> <topic> --raw [<mime>]` | Add a raw-bytes Zenoh entry, tagged with `<mime>` or `application/octet-stream` |
 | `sb io add service <name>` | Add a REST-style request/response router over Zenoh queryables |
 | `sb io <edit\|rm\|list>` | Change (or, with no flags, regenerate), remove, or list entries by name |
-| `sb io update [<module> \| --all] [--services]` | Regenerate `swarmbotix_io/` from `sb.dev.yml` without changing it |
+| `sb io update [<module> \| --all] [--services]` | Regenerate `swarmbotix_io/` from `sb.module.yaml` without changing it |
 | `sb pub <list\|add\|edit\|rm>` | Deprecated: manage publishers |
 | `sb sub <list\|add\|edit\|rm>` | Deprecated: manage subscribers |
 | `sb service init` | Deprecated: scaffold the module's default service router |
@@ -500,16 +507,16 @@ With no `--zenoh` / `--iox2` flag, a protobuf entry from `sb io add` (or the
 deprecated `sb pub add` / `sb sub add`) uses `transport_on_device`, iceoryx2
 unless configured; `--fb` and `--raw` entries are Zenoh only. `sb topic listen` and `sb topic pub` have no default: they take
 the transport from the topic path's `zenoh` / `iox2` segment, or for a bare
-topic from its entry in the cwd module's `sb.dev.yml`. Any other path needs
+topic from its entry in the cwd module's `sb.module.yaml`. Any other path needs
 `-t zenoh` or `-t iox2`.
 
 ### Launch
 
 | Command | Purpose |
 |---|---|
-| `sb up` | Launch every module in the active workspace in tmux |
-| `sb run <module> [args...]` | Launch or restart a single module, passthrough args |
-| `sb stop <module> [args...]` | Stop a module by running its `stopscript.bash` |
+| `sb up` | Build, then launch every module in the active workspace in tmux, one window per instance |
+| `sb run [--fg] <module>[:<id>] [args...]` | Build, then launch or restart one module or instance, passthrough args; `--fg` runs it in this terminal |
+| `sb stop <module> [args...]` | Close a module's windows, then run its `scripts.stop` if it declares one |
 | `sb attach` | Attach to the workspace's tmux session |
 | `sb down` | Kill the session |
 
@@ -545,21 +552,20 @@ Every `sb` invocation reads from and writes to one of three roots:
 │   │   └── message_targets/             generated bindings (iox2 / proto / fb)
 │   └── swarmbotix/
 └── workspaces/<name>/
-    ├── flow.yaml                        installed copy: absolute paths + source (never hand-edited)
+    ├── sb.flow.yaml                     installed copy: absolute paths + source (never hand-edited)
     └── sb.config.yml                    per-workspace override (optional)
 
 /path/to/<repo>/                     (3) a workspace repository, located anywhere
-├── flow.yaml                            the workspace: modules, messages (committed)
+├── sb.flow.yaml                         the workspace: modules, instances, messages, wires (committed)
 ├── messages/<dir>/*.proto               optional; imported into (2) by `sb install`
 └── modules/<module>/                    an adopted module
-    ├── sb.dev.yml                       dev-time interface (committed; no host paths)
+    ├── sb.module.yaml                   the module manifest: interface, build, launch (committed; no host paths)
     ├── sb.prd.yml                       production interface (ships with binary)
     ├── swarmbotix_io/                   generated publishers/, subscribers/, services/
-    ├── runscript.bash                   user-written launch script
     └── ...your own source tree...
 ```
 
-The vault is global to the host. A workspace is the `flow.yaml` in its
+The vault is global to the host. A workspace is the `sb.flow.yaml` in its
 repository; `sb install` derives the installed copy that every other verb
 reads, and re-running it after a `git pull` brings that copy up to date.
 Modules stay wherever you keep your source. Configuration resolves as
@@ -578,12 +584,12 @@ Rust source is not split per OS.
 | [sb-vault](crates/sb-vault) | Message vault: embedded standard bundle, CRUD, `protoc` invocation |
 | [sb-iox2-typegen](crates/sb-iox2-typegen) | Flattens protobuf descriptors into iceoryx2-compatible fixed-size types |
 | [sb-doctor](crates/sb-doctor) | Environment validation behind `sb doctor` |
-| [sb-workspace](crates/sb-workspace) | Workspace lifecycle, repository `flow.yaml` install / update / uninstall, module adoption |
+| [sb-workspace](crates/sb-workspace) | Workspace lifecycle, repository `sb.flow.yaml` install / update / uninstall, module adoption |
 | [sb-codegen](crates/sb-codegen) | Per-language pub/sub codegen (minijinja templates) |
 | [sb-pubsub](crates/sb-pubsub) | `sb io` (and `sb pub` / `sb sub`) mutation, `sb io update`, and codegen invocation |
 | [sb-discover](crates/sb-discover) | Snapshot topic discovery (Zenoh enumeration, iceoryx2 service list) |
 | [sb-listen](crates/sb-listen) | Per-transport frame iterators and one-shot raw publishers |
-| [sb-launch](crates/sb-launch) | tmux session launch (`sb up` / `run` / `stop` / `down` / `attach`) |
+| [sb-launch](crates/sb-launch) | Native build and tmux launch from `sb.module.yaml` (`sb up` / `run` / `stop` / `down` / `attach`) |
 | [sb-gopro](crates/sb-gopro) | Production export to `sb.prd.yml` |
 | [sb-apps](crates/sb-apps) | App packages: `sb.app.yml` manifest, `sb install`, registry, `sb <name>` dispatch |
 | [sb-update](crates/sb-update) | Self-update: release lookup, cached `--version` notice, download, checksum, installer run |
@@ -674,13 +680,13 @@ release. Start with [sbcli.md](documents/sbcli.md).
 | [sbcli_config.md](documents/sbcli_config.md) | `sb config`: file locations, layering chain, key reference |
 | [sbcli_doctor.md](documents/sbcli_doctor.md) | `sb doctor`: every check, OK / FAIL / SKIP semantics |
 | [sbcli_init.md](documents/sbcli_init.md) | `sb init`: adopting a project in each supported language |
-| [sbcli_ws.md](documents/sbcli_ws.md) | `sb ws` and workspace `sb install`: the repository `flow.yaml`, the installed copy, `active` marker |
+| [sbcli_module.md](documents/sbcli_module.md) | `sb.module.yaml`: build, start, stop, env, requires, platforms, language defaults, migrating from 0.5 |
+| [sbcli_ws.md](documents/sbcli_ws.md) | `sb ws` and workspace `sb install`: the repository `sb.flow.yaml`, instances, wires, the installed copy, `active` marker |
 | [sbcli_messages.md](documents/sbcli_messages.md) | `sb message`: vault lifecycle, codegen, capacity configuration |
 | [sbcli_pubsub.md](documents/sbcli_pubsub.md) | `sb io` (and the deprecated `sb pub` / `sb sub` / `sb list`): resolution, validation, encodings, conflicts |
 | [sbcli_pubsub_consuming.md](documents/sbcli_pubsub_consuming.md) | Per-language guide to wiring generated files into your build |
-| [sbcli_launch.md](documents/sbcli_launch.md) | `sb up` / `run` / `stop` / `down` / `attach`: the tmux session and lifecycle scripts |
+| [sbcli_launch.md](documents/sbcli_launch.md) | `sb up` / `run` / `stop` / `down` / `attach`: build, one tmux window per instance, stop, Windows |
 | [sbcli_reqres.md](documents/sbcli_reqres.md) | Services (`sb io add service`, `sb service`): request/response over Zenoh queryables |
-| [sbcli_docker_runscript.md](documents/sbcli_docker_runscript.md) | `sb init --docker`: `flow.yaml` instances and docker dispatch |
 | [sbcli_app.md](documents/sbcli_app.md) | `sb app` / `sb install`: app packages, `sb.app.yml`, running `sb <name>` |
 | [sbcli_update.md](documents/sbcli_update.md) | `sb update` / `sb --version`: update notice, `--check`, in-place self-update |
 

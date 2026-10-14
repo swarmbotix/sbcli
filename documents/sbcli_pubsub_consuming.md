@@ -25,7 +25,7 @@ leading `/` (sb 0.5.0+):
 |---|---|---|
 | `<device>` | `sb config get device` | `dev01` |
 | `<workspace>` | active workspace name (`cat ~/.swarmbotix/active`) | `ws1` |
-| `<module>` | `module:` in this module's `sb.dev.yml` | `app1` |
+| `<module>` | `module:` in this module's `sb.module.yaml` | `app1` |
 | `<transport>` | literal `iox2` or `zenoh`, picked from the entry's `--iox2` / `--zenoh` flag | `iox2` |
 | `<bare_topic>` | the positional `<topic>` of `sb io add pub` / `sb io add sub` | `hello` |
 
@@ -106,7 +106,7 @@ The generated publisher/subscriber class has **two** constructors:
 
 This is the supported way to run **N instances of the same module** (swarm), point a publisher at a different device for a remote replay, or rebind a topic without re-running `sb io edit`.
 
-> **Instance id form.** The `id` is just a string — anything matching `[A-Za-z0-9_-]+` works. Numeric (`--id 2`) and named (`--id left`) forms are equivalent; the latter is conventional when each instance has a distinct role (`left`/`right`, `front`/`rear`) rather than just an index. flow.yaml's `instances:` block declares the canonical id per instance; see [sbcli_docker_runscript.md](sbcli_docker_runscript.md) for the registry-side counterpart.
+> **Instance id form.** The `id` is just a string: anything matching `[A-Za-z0-9_-]+` works. Numeric (`--id 2`) and named (`--id left`) forms are equivalent; the latter is conventional when each instance has a distinct role (`left`/`right`, `front`/`rear`) rather than just an index. `sb 0.6.0+`: the canonical ids are the `instances` under the module's entry in `sb.flow.yaml` ([sbcli_ws.md](sbcli_ws.md) §4.6); `sb up` and `sb run` pass each one to its process as `--id <id>` and as the environment variable `SB_INSTANCE_ID` (§10).
 
 ### 3.1 What gets emitted alongside the class
 
@@ -116,7 +116,7 @@ For a publisher named `hello` (bare-topic input), the generated file exposes the
 |---|---|---|
 | `<Name>_DEFAULT_DEVICE` | `"dev01"` | from `sb.config.yml::device` |
 | `<Name>_DEFAULT_WORKSPACE` | `"ws1"` | active workspace |
-| `<Name>_DEFAULT_MODULE` | `"app1"` | from `sb.dev.yml::module` |
+| `<Name>_DEFAULT_MODULE` | `"app1"` | from `sb.module.yaml::module` |
 | `<Name>_DEFAULT_TOPIC` | `"hello"` | the bare topic |
 | `<Name>_TRANSPORT_SEGMENT` | `"iox2"` or `"zenoh"` | not overridable — transport is fixed by template choice |
 
@@ -186,7 +186,7 @@ The override machinery is only emitted for a `topic:` entry, that is, when the u
 1. **Switch to a bare-topic subscriber and use the `full` override at runtime.** Re-add via `sb io add sub state -m ... --iox2 --module remote-app1` (or any bare topic), then in your subscriber's `main()` set `TopicOverrides { full: Some(format!("dev01/ws/app1-{id}/iox2/state")), ..Default::default() }`. The generated wrapper does the rest. New since 0.1.21 (`full` field).
 2. **Re-add the subscriber per instance** (`sb io add sub --key dev01/ws/app1-2/iox2/state ... --name state_2`). N instances → N entries; doesn't scale.
 3. **Manually build the wire path in your subscriber's `main()`** and call the underlying transport API directly (bypass the generated `HelloSubscriber`). See §10.4 for a worked sketch.
-4. **Use Zenoh, not iceoryx2.** Zenoh KeyExpr supports wildcards (`dev01/ws/app1-*/zenoh/state` matches every instance). iceoryx2 services don't — each subscriber connects to exactly one ServiceName.
+4. **Use Zenoh, not iceoryx2.** Zenoh KeyExpr supports wildcards: `dev01/ws/app1-$*/zenoh/state` matches every instance. (`*` matches only a whole chunk between two `/`, so `app1-*` is not a valid key expression; `$*` is the wildcard that matches inside a chunk.) iceoryx2 services don't: each subscriber connects to exactly one ServiceName.
 
 A future sb release may parse `key:` entries into segments and emit `TopicOverrides` for them too. Until then, the rule above holds.
 
@@ -279,7 +279,7 @@ int main(int argc, char** argv) {
 
 **Key points:**
 
-- `int main(int argc, char** argv)` — so `--id 2` reaches the binary. Pair this with the runscript's `exec ./build/app "$@"` (see §5.3).
+- `int main(int argc, char** argv)` — so `--id 2` reaches the binary. For a module with instances, `sb up` appends `--id <id>` to the start command itself (see §5.3), and also sets `SB_INSTANCE_ID`, which `std::getenv` reads without any argument parsing.
 - `swarmbotix_io::Hello_Payload` — type alias the codegen emits for `<iox2_cpp_namespace>::<Leaf>` (e.g., `swarmbotix_std::StringStamped`). Use it directly; no `IOX2_TYPE_NAME` wrapper.
 - `mod_storage` lifetime — `HelloTopicOverrides::module` is `std::string_view`. The backing string must outlive `pub`. Declaring `mod_storage` before the `if` and never reassigning it after `pub` is constructed keeps this honest.
 - `pub.service_name()` — accessor on the publisher returns the actual wire string in use (defaults or override-resolved). Useful for logging.
@@ -302,14 +302,17 @@ add_executable(<module_name> main.cpp)
 
 # The generated `swarmbotix_io/publishers/<name>.cpp` does `#include "<Leaf>.h"`
 # by basename (sb 0.1.23+). Resolve it via `-I<message_targets>/iox2/<pkg>/<Leaf>`.
-# Read `<message_targets>` from `sb config get message_targets` (or
-# `${SB_MESSAGE_TARGETS}` when running inside a Docker runscript — `sb init
-# --docker` exports it). Repeat the `target_include_directories` line per
-# consumed message.
-if(NOT DEFINED ENV{SB_MESSAGE_TARGETS})
-  message(FATAL_ERROR "SB_MESSAGE_TARGETS not set — run via sb runscript or export it")
+# `SB_MESSAGE_TARGETS` overrides (set it in a container build, or in the
+# manifest's env:); otherwise ask sb. Repeat the `target_include_directories`
+# line per consumed message.
+if(DEFINED ENV{SB_MESSAGE_TARGETS})
+  set(SB_MSG_TARGETS "$ENV{SB_MESSAGE_TARGETS}")
+else()
+  execute_process(COMMAND sb config get message_targets
+                  OUTPUT_VARIABLE SB_MSG_TARGETS
+                  OUTPUT_STRIP_TRAILING_WHITESPACE
+                  COMMAND_ERROR_IS_FATAL ANY)
 endif()
-set(SB_MSG_TARGETS "$ENV{SB_MESSAGE_TARGETS}")
 
 target_include_directories(<module_name> PRIVATE
   ${CMAKE_SOURCE_DIR}
@@ -321,23 +324,29 @@ target_link_libraries(<module_name> PRIVATE iceoryx2-cxx::shared-lib-cxx)
 
 Available CMake targets in iceoryx2-cxx v0.9.x (unchanged across 0.9.0 → 0.9.3): `iceoryx2-cxx::includes-only-cxx`, `iceoryx2-cxx::static-lib-cxx`, `iceoryx2-cxx::shared-lib-cxx` (recommended).
 
-### 5.3 `runscript.bash`
+### 5.3 `sb.module.yaml`
 
-The generator emits a runscript stub that forwards `"$@"` into the tmux re-exec and ends with `exec ./build/<module> "$@"`. **Keep the `"$@"`.** Without it, `--id 2` never reaches your `main()`.
+No launch script (sb 0.6.0+). The C++ defaults configure and build with
+CMake (`cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`, then
+`cmake --build build --config Release`) and start `build/<module>` with
+`{args}`, plus `--id <id>` for each instance: exactly what the
+`main(argc, argv)` in §5.1 parses. Declare only what differs:
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-
-# (tmux wrap from `sb init` template omitted for brevity — see sbcli_init.md)
-
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-
-export LD_LIBRARY_PATH="/opt/iceoryx2/current/lib:${LD_LIBRARY_PATH:-}"
-exec ./build/<module_name> "$@"      # ← the "$@" is load-bearing
+```yaml
+module: app1                     # the CMake target above is named after the module
+language: cpp
+platforms:
+  linux:
+    env: { LD_LIBRARY_PATH: "/opt/iceoryx2/current/lib:${LD_LIBRARY_PATH}" }
 ```
+
+Listing only `linux` under `platforms` also marks the module Linux-only;
+add `windows: {}` (with its own `env`) when it builds there too. A CMake
+target with another name needs a `start` override,
+`"build/<target> {args}"`, and on Windows, where the multi-config
+generator writes `build/Release/<target>.exe`, a
+`platforms.windows.scripts.start` of its own. Everything else is in
+[sbcli_module.md](sbcli_module.md) §3.2 and §6.
 
 ### 5.4 C++ subscriber — zero-copy receive (iceoryx2)
 
@@ -446,22 +455,35 @@ if __name__ == "__main__":
 - `pub.service_name` — instance attribute set in the constructor; reflects defaults or overrides.
 - Subscriber variant: see §6.3 — `try_recv_latest()` returns a zero-copy `Sample` wrapper, not an owned struct.
 
-### 6.2 `runscript.bash`
+### 6.2 `sb.module.yaml`
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-
-# (tmux wrap omitted; keep the generated one.)
-
-# No PYTHONPATH for the payload type — the generated module loads it
-# directly from the absolute message_targets path. You still need cwd on
-# PYTHONPATH if `main.py` does `from swarmbotix_io.publishers...`.
-export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
-
-exec /home/el/miniconda3/bin/python3 main.py "$@"   # ← "$@" forwards --id 2
+```yaml
+module: app1
+language: python
 ```
+
+Nothing else to declare when the entry point is `main.py` at the module
+root (sb 0.6.0+). The default start is `{python} main.py {args}`, where
+`{python}` is the module's `.venv/bin/python` (`.venv/Scripts/python.exe`
+on Windows) when it exists, else `python3` (`python` on Windows); an
+instance also gets `--id <id>`, which the `argparse` in §6.1 reads.
+
+No `PYTHONPATH` is needed: the generated module loads the payload type
+from the absolute `message_targets` path, and Python puts `main.py`'s
+directory, the module root, first on `sys.path`, so
+`from swarmbotix_io.publishers...` resolves.
+
+To pin a particular interpreter, such as a conda environment, override
+`start` with an environment reference rather than a machine-specific
+path:
+
+```yaml
+scripts:
+  start: "${CONDA_PREFIX:-/usr}/bin/python3 main.py {args}"
+```
+
+`${CONDA_PREFIX}` is read from the shell you run `sb up` in
+([sbcli_module.md](sbcli_module.md) §5).
 
 The `iceoryx2` Python module ships separately (`pip install iceoryx2`). `sb doctor` does not check it — verify yourself with `<your-python> -c "import iceoryx2"`.
 
@@ -595,18 +617,38 @@ is `/opt/iceoryx2/current/lib/libiceoryx2_ffi_c.so`, where `current` is a
 symlink to the installed `v<x.y.z>` tree — read the link to see which version
 you are on. **sb 0.1.40 ships against 0.9.3.**
 
-### 7.3 `runscript.bash`
+**Windows builds need LLVM.** The `iceoryx2` crate runs `bindgen` when it
+builds for a Windows target, and `bindgen` loads libclang. Install LLVM
+(for example `winget install LLVM.LLVM`) and point `LIBCLANG_PATH` at
+its `bin` directory, which a module can do portably in its manifest
+([sbcli_module.md](sbcli_module.md) §6.3):
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-
-# (tmux wrap omitted; keep the generated one.)
-
-cargo build --release
-exec ./target/release/<module> "$@"      # ← "$@" forwards --id 2
+```yaml
+platforms:
+  linux: {}
+  windows: { env: { LIBCLANG_PATH: "${LIBCLANG_PATH:-C:/Program Files/LLVM/bin}" } }
 ```
+
+### 7.3 `sb.module.yaml`
+
+```yaml
+module: app1
+language: rust
+```
+
+Nothing else to declare when the binary carries the module's name, as
+the package name or a `[[bin]] name` (sb 0.6.0+): the defaults run
+`cargo build --release` and start `target/release/<module>` with
+`{args}`, plus `--id <id>` for an instance, which `parse_id()` in §7.1
+reads. A binary named otherwise needs one line:
+
+```yaml
+scripts:
+  start: "target/release/pub_hello{exe} {args}"
+```
+
+`{exe}` adds `.exe` on Windows, so the same line works on both
+platforms ([sbcli_module.md](sbcli_module.md) §3.2).
 
 ### 7.4 Rust subscriber — zero-copy receive (iceoryx2)
 
@@ -830,9 +872,9 @@ If you registered the subscriber with `--key`, the generated file omits `<Name>_
 
 If you write `dev01/ws1/app1/iox2/hello` (the wire key, which is also the canonical form since sb 0.5.0) anywhere except in code generated by sb, every workspace/module/device/transport rename silently breaks that callsite while sb-managed callsites update on the next `sb io update`. **Always go through the generated `<Name>_SERVICE` / `<Name>_TOPIC` / `<Name>_DEFAULT_*` constants.**
 
-### 9.8 Forgetting `"$@"` in the runscript
+### 9.8 Forgetting `{args}` in a custom start command
 
-The `sb init` runscript template ends each language example with `"$@"` (e.g. `exec ./build/app "$@"`, `python main.py "$@"`). If you delete that, `--id 2` reaches the runscript but not your `main()`. Symptom: every invocation, with or without `--id`, opens the same service. See §10 for the swarm pattern that depends on this.
+Every language default ends in `{args}` (`{bin} {args}`, `{python} main.py {args}`). A custom `scripts.start` without it drops the instance's `args` and `sb run`'s passthrough args; the `--id <id>` of an instance still arrives, because `sb` appends it after expansion (sb 0.6.0+). Symptom: `sb run app1 -- --verbose` changes nothing. Keep `{args}` in any `start` you write ([sbcli_module.md](sbcli_module.md) §13.2).
 
 ### 9.9 `main()` without `argc, argv`
 
@@ -844,7 +886,7 @@ C-style `int main()` is legal but ignores all CLI args. Use `int main(int argc, 
 
 ### 9.11 Python `iceoryx2` module not found
 
-`sb doctor` checks the C library (`libiceoryx2_ffi_c.so`) but not the Python bindings. Verify with `<your-python> -c "import iceoryx2"`. If missing: `pip install iceoryx2`. Ensure your `runscript.bash` invokes the **same** Python interpreter that has the module installed (e.g. `/home/el/miniconda3/bin/python3`, not `/usr/bin/python3`).
+`sb doctor` checks the C library (`libiceoryx2_ffi_c.so`) but not the Python bindings. Verify with `<your-python> -c "import iceoryx2"`. If missing: `pip install iceoryx2`. Make sure the module starts with the **same** interpreter that has the package installed: the default `{python}` is the module's `.venv` interpreter if it has one, else `python3` as found in the tmux environment, which may not be your activated conda environment. Give the module a `.venv`, or pin the interpreter in `scripts.start` (§6.2).
 
 ### 9.12 `sb init` does not scaffold `main.{cpp,py,rs}` or build files
 
@@ -869,43 +911,50 @@ Same module code, N processes, each publishing on a distinct wire path. This is 
 
 ### 10.1 The pattern in one paragraph
 
-The runscript forwards `"$@"` → the binary parses `--id N` → the binary constructs `TopicOverrides { module: <DEFAULT_MODULE>-<N> }` → the publisher opens on `<device>/<ws>/<module>-<N>/<transport>/<topic>`. The runscript's tmux re-exec also reads `--id N` from `"$@"` and names the session `<module>-<N>-dev` (or `<module>-dev` when no id is given), so N invocations from N terminals run as N processes side-by-side instead of the second invocation silently reattaching to the first session (see §10.3 for the failure mode).
+`sb.flow.yaml` lists the module's instances → `sb up` starts one tmux window per instance, named `<module>-<N>`, and appends `--id N` to each start command, also exporting `SB_INSTANCE_ID=N` → the binary reads its id → it constructs `TopicOverrides { module: <DEFAULT_MODULE>-<N> }` → the publisher opens on `<device>/<ws>/<module>-<N>/<transport>/<topic>`. The window name and the wire segment are the same string (sb 0.6.0+).
 
-### 10.2 Launch N instances from one terminal
+### 10.2 Declare and launch N instances
 
-```bash
-for i in $(seq 1 100); do
-  bash app1/runscript.bash --id "$i" &
-done
-wait
+```yaml
+# sb.flow.yaml
+modules:
+  app1: { path: modules/app1, instances: [1, 2, 3] }
 ```
 
-Each invocation:
+```bash
+sb install .          # the installed copy picks up the instances
+sb up                 # windows app1-1, app1-2, app1-3
+sb run app1:2         # rebuild, then restart only instance 2
+sb stop app1          # close all three
+```
 
-- Re-execs into a tmux session named `app1-<i>-dev` (per-instance — see §10.3 for why).
-- Runs the binary with `--id $i`.
-- The binary's `main()` reads `--id`, sets `ov.module = "app1-" + id`, opens a publisher on `dev01/ws/app1-<i>/iox2/state`.
+Each instance:
 
-### 10.3 Per-instance tmux session naming (built into the template)
+- Runs in its own tmux window, `app1-<i>`, in the `sb-<workspace>` session.
+- Runs the start command with `--id <i>` appended and `SB_INSTANCE_ID=<i>` in its environment.
+- The binary's `main()` reads the id, sets `ov.module = "app1-" + id`, and opens a publisher on `dev01/ws/app1-<i>/iox2/state`.
 
-The generated runscript scans `"$@"` for `--id <id>` and builds the session name as `{{MODULE}}-<id>-dev` (falling back to `{{MODULE}}-dev` when no `--id` is passed). That is what makes `bash runscript.bash --id 1` and `bash runscript.bash --id 2` actually run as **two** processes on two distinct wire paths.
+The instance list is data in `sb.flow.yaml`: a hundred instances are a hundred ids, not a shell loop. An instance can also carry its own `args` and `env` ([sbcli_ws.md](sbcli_ws.md) §4.6).
 
-Why this matters (the failure mode if you remove it): `tmux new -A -s "<session>" "<cmd>"` **attaches** to an existing session of that name and silently discards `<cmd>`. So if both invocations resolved to the same session, the second call would just be a second client viewing instance #1's output, while no second binary ever launched. The symptom looks like "the topic is shared" because both terminals show the same publisher on `.../app1-1/iox2/...`. The per-id session suffix breaks that collision.
+### 10.3 Per-instance windows (built into `sb`)
 
-If you don't want the per-instance split (e.g., you genuinely want one tmux session per module no matter the `--id`), edit the runscript and replace the `__sb_id_suffix` block with a literal empty string.
+`sb` owns the windows: one session per workspace, one window per instance, each addressed by an exact target, so `app1-1` and `app1-10` never collide and a second `sb run app1:1` respawns the existing window instead of opening a duplicate ([sbcli_launch.md](sbcli_launch.md) §1.1, §3). Before 0.6.0 the generated launch script had to derive a per-instance tmux session name from `--id` itself, because `tmux new -A` attaches to an existing session and silently discards the new command; that logic is gone.
+
+To run one instance in the current terminal instead, with its output and exit code there: `sb run --fg app1:2`.
 
 ### 10.4 Subscribing to a specific instance (the foreign-topic case)
 
 If your subscriber lives in a **different module** and was registered with `--key` (a `key:` entry), you don't get `TopicOverrides` (§3.3). To target instance `N` of the publisher, you must build the wire path yourself in `main()`:
 
 ```python
-# Python subscriber tracking app1's instance --id N
+# Python subscriber tracking app1's instance with the same id as this one
 import argparse, os
 from iceoryx2 import NodeBuilder, ServiceName, ServiceType
 from StringStamped import StringStamped
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--id", default="", help="track this app1 instance")
+ap.add_argument("--id", default=os.environ.get("SB_INSTANCE_ID", ""),
+                help="track this app1 instance")
 args = ap.parse_args()
 
 device, workspace, pub_module, transport, topic = "dev01", "ws", "app1", "iox2", "state"
@@ -919,7 +968,7 @@ sub = svc.subscriber_builder().create()
 # ... poll loop ...
 ```
 
-The hardcoded segments here are a known wart; track the upstream issue if you want sb to emit `TopicOverrides` for `key:` subscribers too.
+The hardcoded segments here are a known wart. `sb 0.6.0+` lets you declare this edge in `sb.flow.yaml` instead, as `app2.state: "app1[{id}].state"` (the publisher instance with the subscriber's own id) or `"app1[*].state"` (every instance, Zenoh only); `sb ws check` validates it today ([sbcli_ws.md](sbcli_ws.md) §4.7). Code generation does not read `wires:` yet, so in 0.6.0 the workaround above is still required; a later release generates the subscriber's key from the wire and retires it.
 
 ### 10.5 Discovery — finding running instances
 
@@ -939,7 +988,7 @@ Zenoh entries render `-` in the PID column today — Zenoh has no notion of publ
 
 Filter by substring: `sb topic list -k app1-`. iceoryx2 has no wildcard subscribe — discovery is enumerate-only.
 
-For Zenoh, the wildcard `dev01/ws/app1-*/zenoh/state` matches all instances at subscribe time. Use Zenoh when you want a single ground-station subscriber that follows every drone.
+For Zenoh, the wildcard `dev01/ws/app1-$*/zenoh/state` matches all instances at subscribe time (`$*` matches inside a chunk; a bare `*` must be a whole chunk, so `app1-*` is not a valid key expression). Use Zenoh when you want a single ground-station subscriber that follows every drone.
 
 ---
 
@@ -955,9 +1004,9 @@ Before running a new pub/sub pair end-to-end:
 - [ ] Bare topic is `snake_case`, lowercase, ROS2-style.
 - [ ] If a subscriber uses `--key` (cross-module), **the key includes the `<transport>` segment** matching the publisher's flag.
 - [ ] Entry-point (`main.cpp` / `main.py` / `src/main.rs`) **uses `argc/argv` (or equivalent)** and constructs the publisher via the no-arg form OR `TopicOverrides` — never with a hardcoded wire string.
-- [ ] Runscript ends with `exec <bin> "$@"` (or `python main.py "$@"`, `cargo run -- "$@"`, etc.) so `--id` reaches `main()`.
+- [ ] The module's `sb.module.yaml` resolves to the binary you built: the language default fits, or `scripts.start` names it and keeps `{args}` ([sbcli_module.md](sbcli_module.md) §3.2).
 - [ ] Cross-language pair: payload type names match (C++ has `IOX2_TYPE_NAME = "<Leaf>"`).
 - [ ] Build glue (`CMakeLists.txt` / `PYTHONPATH`) points at `<message_targets>/iox2/<pkg>/<Leaf>/`.
 - [ ] On clean re-runs after schema changes: `rm -rf /tmp/iceoryx2 /dev/shm/iox2_*`.
 - [ ] The subscriber's `key:` (as `sb io list` shows it) is identical to the publisher's key as `sb topic list` prints it, or, if running swarm instances, both ends use the same `<module>-<id>` suffix.
-- [ ] If you're running multiple instances: each invocation passes a distinct `--id`, your `main()` parses it, and `sb topic list` shows the per-instance wire paths.
+- [ ] If you're running multiple instances: they are listed under the module's entry in `sb.flow.yaml`, your `main()` reads `--id` (or `SB_INSTANCE_ID`), and `sb topic list` shows the per-instance wire paths.

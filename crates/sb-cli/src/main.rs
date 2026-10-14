@@ -2,6 +2,8 @@
 //!
 //! L1 surface: `doctor`, `message *`, `config *`. Later levels add verbs.
 
+mod deprecation;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -56,21 +58,21 @@ enum Cmd {
     /// Manage a module's publishers, subscribers, and services, and regenerate their code.
     #[command(subcommand)]
     Io(IoCmd),
-    /// Deprecated since 0.5.0: use `sb io list`.
+    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io list`.
     ///
     /// List publishers and subscribers across the resolved module.
     List(ListArgs),
-    /// Deprecated since 0.5.0: use `sb io add pub`, `sb io edit`, `sb io rm`.
+    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io add pub`, `sb io edit`, `sb io rm`.
     ///
     /// Manage publishers.
     #[command(subcommand)]
     Pub(PubCmd),
-    /// Deprecated since 0.5.0: use `sb io add sub`, `sb io edit`, `sb io rm`.
+    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io add sub`, `sb io edit`, `sb io rm`.
     ///
     /// Manage subscribers.
     #[command(subcommand)]
     Sub(SubCmd),
-    /// Deprecated since 0.5.0: use `sb io add service`.
+    /// Deprecated since 0.5.0, removed in 0.7.0: use `sb io add service`.
     ///
     /// REST-style request/response over Zenoh (FastAPI-style route router).
     #[command(subcommand)]
@@ -78,30 +80,39 @@ enum Cmd {
     /// Inspect live topics — list, listen, or one-shot publish.
     #[command(subcommand)]
     Topic(TopicCmd),
-    /// Launch every module in the active workspace in tmux.
+    /// Build, then launch every module in the active workspace in tmux.
+    ///
+    /// Each module's `scripts.build` runs first, in order; a failed build
+    /// leaves no session. Then one window per instance, named `<module>-<id>`
+    /// (or `<module>` for a module without instances). Modules this host does
+    /// not support, and modules with `up: false`, are left out.
     Up,
-    /// Launch a single module — idempotent (kill + restart if already up).
+    /// Launch one module, or one instance with `<module>:<id>` (idempotent).
     ///
-    /// Any args after `<module>` are forwarded verbatim to the module's
-    /// `runscript.bash`. Use `--` if your args clash with `sb` flags.
+    /// Builds first, then starts the module's windows; a window that is
+    /// already up is restarted in place. Any args after the target are
+    /// appended to the start command (or forwarded verbatim to a legacy
+    /// `runscript.bash`). Use `--` if your args clash with `sb` flags.
+    /// `--fg` runs one instance in this terminal, without tmux.
     Run(RunArgs),
-    /// Stop a single module by running its `stopscript.bash`.
+    /// Stop a module: close all its windows, then run `scripts.stop`.
     ///
-    /// Mirror of `sb run`: same resolution (active workspace's
-    /// flow.yaml), same tmux wrap (`sb-<workspace>` session, one window
-    /// per module, idempotent respawn), passthrough args appended to
-    /// `stopscript.bash`. Errors if the module has no stopscript.
+    /// Closes every `<module>` and `<module>-<id>` window in the
+    /// `sb-<workspace>` session, then runs the manifest's `scripts.stop`
+    /// inline if it declares one, with any trailing args appended. A legacy
+    /// module with a `stopscript.bash` runs that script in its window
+    /// instead (deprecated).
     Stop(StopArgs),
     /// Kill the workspace's tmux session.
     Down,
     /// Print the workspace's session name (or exec `tmux attach` in a TTY).
     Attach,
-    /// Freeze a module for production — write sb.prd.yml next to sb.dev.yml.
+    /// Freeze a module for production — write sb.prd.yml next to the module manifest.
     Gopro(GoproArgs),
     /// Install an app or workspace package from a git URL or a local folder.
     ///
     /// The package root decides the kind: `sb.app.yml` is an app package,
-    /// `flow.yaml` is a workspace package; a root holding both, or neither,
+    /// `sb.flow.yaml` (or a legacy `flow.yaml`) is a workspace package; a root holding both, or neither,
     /// is refused. Git URLs are anything starting with https://,
     /// http://, ssh://, git://, file:// or git@ (as in git@github.com:org/repo.git),
     /// plus any path ending in .git. Append @<branch-or-tag> to a git URL to pin
@@ -125,7 +136,7 @@ enum Cmd {
     /// needed. An app name may not be an sb built-in command, and a name already
     /// taken by another package must be freed first with `sb app remove <name>`.
     ///
-    /// A workspace package is installed from its flow.yaml: a git URL is cloned
+    /// A workspace package is installed from its sb.flow.yaml: a git URL is cloned
     /// into <sb_home>/repos/<name>/ (or --dir), a local folder is used in place.
     /// The installed copy goes to <sb_home>/workspaces/<name>/ and becomes the
     /// active workspace; each `messages:` source is imported into the vault and
@@ -241,7 +252,7 @@ struct UpdateArgs {
 #[derive(clap::Args)]
 struct InstallArgs {
     /// Git URL, optionally pinned as `<url>@<branch-or-tag>`, or the path of a
-    /// local package folder (one that holds sb.app.yml or flow.yaml).
+    /// local package folder (one that holds sb.app.yml or sb.flow.yaml).
     #[arg(value_name = "URL|PATH")]
     source: String,
     /// For `kind: docker` packages, run `docker pull <image>` now even when the
@@ -376,20 +387,27 @@ impl AppKindArg {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// Module name registered in the active workspace's flow.yaml.
+    /// Run in the foreground: build, then run one instance in this terminal
+    /// with no tmux; `sb` exits with the module's exit code.
+    #[arg(long)]
+    fg: bool,
+    /// `<module>` (every instance) or `<module>:<id>` (one instance), as
+    /// registered in the active workspace's flow.
     module: String,
-    /// Extra args forwarded verbatim to `runscript.bash`. Anything after
-    /// `<module>` is collected here; use `--` to disambiguate args that
-    /// start with `-` from `sb`'s own flags.
+    /// Extra args appended to the module's start command (or forwarded
+    /// verbatim to a legacy `runscript.bash`). Anything after the target is
+    /// collected here; use `--` to disambiguate args that start with `-`
+    /// from `sb`'s own flags.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
 
 #[derive(clap::Args)]
 struct StopArgs {
-    /// Module name registered in the active workspace's flow.yaml.
+    /// Module name registered in the active workspace's flow.
     module: String,
-    /// Extra args forwarded verbatim to `stopscript.bash`.
+    /// Extra args appended to the module's `scripts.stop` (or forwarded
+    /// verbatim to a legacy `stopscript.bash`).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -491,7 +509,7 @@ enum SubCmd {
     },
     /// Add a subscriber.
     Add(SubAddCli),
-    /// Re-render a subscriber file from current `sb.dev.yml`.
+    /// Re-render a subscriber file from the current module manifest.
     Edit {
         /// Bare topic or wire key of the subscriber (a leading '/' is ignored)
         topic: String,
@@ -594,7 +612,7 @@ struct TopicListenCli {
     topic: String,
     /// Transport to subscribe on: `zenoh` (alias `z`) or `iceoryx2`
     /// (aliases `i`, `iox2`). Default: the topic's `<transport>` path
-    /// segment (a bare topic: its `sb.dev.yml` entry).
+    /// segment (a bare topic: its module manifest entry).
     #[arg(short = 't', long, value_enum)]
     transport: Option<TransportArg>,
     /// Skip the Header probe and emit hex bytes only.
@@ -635,7 +653,7 @@ struct TopicPubCli {
     bytes_hex: String,
     /// Transport to publish on: `zenoh` (alias `z`) or `iceoryx2` (aliases
     /// `i`, `iox2`). Default: the topic's `<transport>` path segment (a
-    /// bare topic: its `sb.dev.yml` entry).
+    /// bare topic: its module manifest entry).
     #[arg(short = 't', long, value_enum)]
     transport: Option<TransportArg>,
 }
@@ -680,9 +698,9 @@ impl From<TransportArg> for Transport {
 
 #[derive(Subcommand)]
 enum WsCmd {
-    /// Write ./flow.yaml for a new workspace, then install it.
+    /// Write ./sb.flow.yaml for a new workspace, then install it.
     ///
-    /// Refuses when ./flow.yaml already exists or a workspace of that name is
+    /// Refuses when ./sb.flow.yaml (or a legacy ./flow.yaml) already exists or a workspace of that name is
     /// already installed. Add modules with `sb init <dir>` under this folder.
     Create { name: String },
     /// Install a workspace package (`sb install` restricted to workspaces).
@@ -721,7 +739,7 @@ enum WsCmd {
 #[derive(clap::Args)]
 struct WsInstallArgs {
     /// Git URL (optionally `<url>@<branch-or-tag>`) or local folder holding
-    /// flow.yaml. Default: the current folder.
+    /// sb.flow.yaml. Default: the current folder.
     #[arg(value_name = "URL|PATH")]
     source: Option<String>,
     /// Git URL only: clone into this folder instead of <sb_home>/repos/<name>/.
@@ -755,7 +773,7 @@ enum IoCmd {
         #[arg(long)]
         module: Option<String>,
     },
-    /// Regenerate every generated io file from sb.dev.yml.
+    /// Regenerate every generated io file from the module manifest.
     ///
     /// Targets <module>, else the module in the current folder, else (or
     /// with --all) every module of the active workspace. Unchanged files are
@@ -884,8 +902,8 @@ struct IoEditCli {
 struct InitArgs {
     /// Project root to adopt. Defaults to the current working directory.
     rootpath: Option<PathBuf>,
-    /// Language tag. Required if no `sb.dev.yml` exists yet at `<rootpath>`.
-    /// Exactly one of these may be set.
+    /// Language tag. Required if no module manifest (`sb.module.yaml`)
+    /// exists yet at `<rootpath>`. Exactly one of these may be set.
     #[arg(long, group = "lang")]
     rust: bool,
     #[arg(long, group = "lang")]
@@ -896,15 +914,19 @@ struct InitArgs {
     flutter: bool,
     #[arg(long, group = "lang")]
     unity: bool,
-    /// Overwrite an existing `sb.dev.yml` / `runscript.bash` at `<rootpath>`.
+    /// Write a fresh `sb.module.yaml` over the existing manifest (its entries
+    /// are dropped), and with --runscript overwrite `runscript.bash`.
     #[arg(long)]
     force: bool,
-    /// Emit a docker-flavored `runscript.bash` whose `--id <name>` branches
-    /// dispatch to one pre-resolved `docker run` per instance declared in
-    /// `flow.yaml::instances.<module>`. Requires that block to be populated;
-    /// see documents/sbcli_docker_runscript.md.
+    /// Check, before writing anything, that every instance of this module in
+    /// the workspace flow declares `docker: { image }`; see
+    /// documents/sbcli_module.md.
     #[arg(long)]
     docker: bool,
+    /// Also write a `runscript.bash` stub (deprecated: sb launches modules
+    /// natively from `scripts:` in sb.module.yaml).
+    #[arg(long)]
+    runscript: bool,
 }
 
 #[derive(Subcommand)]
@@ -1161,22 +1183,42 @@ fn real_main() -> Result<ExitCode> {
                 all,
             } => cmd_io_update(module.as_deref(), services, all),
         },
-        Cmd::List(a) => cmd_list(a.module.as_deref(), Scope::All),
-        Cmd::Pub(p) => match p {
-            PubCmd::List { module } => cmd_list(module.as_deref(), Scope::PubsOnly),
-            PubCmd::Add(a) => cmd_pub_add(a),
-            PubCmd::Edit(a) => cmd_pub_edit(a),
-            PubCmd::Rm { name, module } => cmd_pub_rm(&name, module.as_deref()),
-        },
-        Cmd::Sub(s) => match s {
-            SubCmd::List { module } => cmd_list(module.as_deref(), Scope::SubsOnly),
-            SubCmd::Add(a) => cmd_sub_add(a),
-            SubCmd::Edit { topic, module } => cmd_sub_edit(&topic, module.as_deref()),
-            SubCmd::Rm { topic, module } => cmd_sub_rm(&topic, module.as_deref()),
-        },
-        Cmd::Service(s) => match s {
-            ServiceCmd::Init { module } => cmd_service_init(module.as_deref()),
-        },
+        // The four pre-`sb io` verbs: warn on stderr first, then do the old
+        // work unchanged.
+        Cmd::List(a) => {
+            deprecation::warn_deprecated(deprecation::items::VERB_LIST, "use sb io list");
+            cmd_list(a.module.as_deref(), Scope::All)
+        }
+        Cmd::Pub(p) => {
+            deprecation::warn_deprecated(
+                deprecation::items::VERB_PUB,
+                "use sb io add pub, sb io edit, sb io rm",
+            );
+            match p {
+                PubCmd::List { module } => cmd_list(module.as_deref(), Scope::PubsOnly),
+                PubCmd::Add(a) => cmd_pub_add(a),
+                PubCmd::Edit(a) => cmd_pub_edit(a),
+                PubCmd::Rm { name, module } => cmd_pub_rm(&name, module.as_deref()),
+            }
+        }
+        Cmd::Sub(s) => {
+            deprecation::warn_deprecated(
+                deprecation::items::VERB_SUB,
+                "use sb io add sub, sb io edit, sb io rm",
+            );
+            match s {
+                SubCmd::List { module } => cmd_list(module.as_deref(), Scope::SubsOnly),
+                SubCmd::Add(a) => cmd_sub_add(a),
+                SubCmd::Edit { topic, module } => cmd_sub_edit(&topic, module.as_deref()),
+                SubCmd::Rm { topic, module } => cmd_sub_rm(&topic, module.as_deref()),
+            }
+        }
+        Cmd::Service(s) => {
+            deprecation::warn_deprecated(deprecation::items::VERB_SERVICE, "use sb io add service");
+            match s {
+                ServiceCmd::Init { module } => cmd_service_init(module.as_deref()),
+            }
+        }
         Cmd::Topic(t) => match t {
             TopicCmd::List(a) => cmd_topic_list(a),
             TopicCmd::Listen(a) => cmd_topic_listen(a),
@@ -1184,7 +1226,7 @@ fn real_main() -> Result<ExitCode> {
             TopicCmd::Prune(a) => cmd_topic_prune(a),
         },
         Cmd::Up => cmd_up(),
-        Cmd::Run(a) => cmd_run(&a.module, &a.args),
+        Cmd::Run(a) => cmd_run(&a),
         Cmd::Stop(a) => cmd_stop(&a.module, &a.args),
         Cmd::Down => cmd_down(),
         Cmd::Attach => cmd_attach(),
@@ -1759,7 +1801,7 @@ struct SubChange<'a> {
 /// Change subscriber `idx` and regenerate its file. sb-pubsub has no
 /// field-level subscriber edit, so the change is applied to a copy of the
 /// module and rendered there (which checks the type against the vault);
-/// `sb.dev.yml` and the module are updated only once that succeeds. The
+/// The module manifest and the module are updated only once that succeeds. The
 /// encoding rules match `sb io edit` on a publisher.
 fn edit_subscriber(
     handle: &mut ModuleHandle,
@@ -1802,7 +1844,7 @@ fn edit_subscriber(
     next.config.subscribers[idx] = spec;
     let mut outcome = sb_pubsub::regenerate_entry(&mut next, &name, ctx)?;
     if !outcome.dev_yml_written {
-        let body = serde_yaml::to_string(&next.config).context("serializing sb.dev.yml")?;
+        let body = serde_yaml::to_string(&next.config).context("serializing the module manifest")?;
         std::fs::write(&next.dev_yml_path, body)
             .with_context(|| format!("writing {}", next.dev_yml_path.display()))?;
         outcome.dev_yml_written = true;
@@ -1848,7 +1890,7 @@ fn cmd_io_update(module: Option<&str>, services: bool, all: bool) -> Result<()> 
         device: &device,
     };
 
-    let whole = all || (module.is_none() && !cwd.join("sb.dev.yml").is_file());
+    let whole = all || (module.is_none() && sb_workspace::find_module_file(&cwd).is_none());
     let targets: Vec<(String, Result<ModuleHandle>)> = if whole {
         let paths = sb_workspace::read_flow(&home, &ws)?.module_paths();
         if paths.is_empty() {
@@ -1866,9 +1908,16 @@ fn cmd_io_update(module: Option<&str>, services: bool, all: bool) -> Result<()> 
         vec![(label, resolve_module(module, &cwd, &home))]
     };
 
+    // Services are user-edited routers: re-rendered only on --services.
+    let service_render = if services {
+        sb_pubsub::ServiceRender::Always
+    } else {
+        sb_pubsub::ServiceRender::Skip
+    };
     let mut problems = 0usize;
     for (label, handle) in targets {
-        let report = handle.and_then(|mut h| sb_pubsub::update_all(&mut h, &ctx, services));
+        let report =
+            handle.and_then(|mut h| sb_pubsub::update_all(&mut h, &ctx, service_render));
         match report {
             Ok(r) => {
                 let mut line = format!(
@@ -1917,22 +1966,23 @@ fn sb_home() -> Result<SbHome> {
     SbHome::from_config(&cfg)
 }
 
-/// `sb ws create <name>`: write `./flow.yaml` naming the workspace, then
-/// install it like any other workspace package.
+/// `sb ws create <name>`: write `./sb.flow.yaml` naming the workspace,
+/// then install it like any other workspace package. A folder that already
+/// holds a flow (either name) is refused.
 fn cmd_ws_create(name: &str) -> Result<()> {
     sb_core::validate_identifier(name)
         .map_err(|e| anyhow::anyhow!("invalid workspace name {name:?}: {e}"))?;
     let cfg = load_config()?;
     let home = SbHome::from_config(&cfg)?;
     let cwd = std::env::current_dir().context("getting cwd")?;
-    let flow = cwd.join(sb_workspace::FLOW_FILE);
-    if flow.exists() {
+    if let Some(existing) = sb_workspace::find_flow_file(&cwd) {
         anyhow::bail!(
             "{} already exists; install it with `sb install .`, or create the workspace in \
              another folder",
-            flow.display()
+            existing.display()
         );
     }
+    let flow = sb_workspace::new_flow_file(&cwd);
     let dir = home.workspace_dir(name);
     if dir.exists() {
         anyhow::bail!(
@@ -2074,7 +2124,7 @@ fn cmd_ws_list() -> Result<()> {
                     .to_string()
             }),
             Ok(None) => String::new(),
-            Err(_) => "(flow.yaml unreadable)".to_owned(),
+            Err(_) => "(flow unreadable)".to_owned(),
         };
         let stale = matches!(sb_workspace::is_stale(&home, &e.name), Ok(Some(_)));
         any_stale |= stale;
@@ -2086,7 +2136,7 @@ fn cmd_ws_list() -> Result<()> {
         println!("{}", line.trim_end());
     }
     if any_stale {
-        println!("[stale]: the repo flow.yaml changed after install; run `sb install <source>`");
+        println!("[stale]: the repo flow changed after install; run `sb install <source>`");
     }
     Ok(())
 }
@@ -2113,6 +2163,7 @@ fn cmd_init(a: InitArgs) -> Result<()> {
         language,
         force: a.force,
         docker: a.docker,
+        runscript: a.runscript,
     };
     let outcome = sb_workspace::init_module(&home, &opts)?;
     let lang_tag = outcome.language.map(|l| l.as_str()).unwrap_or("?");
@@ -2122,8 +2173,13 @@ fn cmd_init(a: InitArgs) -> Result<()> {
         lang_tag,
         outcome.root_abs.display()
     );
-    if outcome.dev_yml_written {
-        println!("  wrote sb.dev.yml");
+    if outcome.manifest_written {
+        println!("  wrote {}", sb_workspace::MODULE_FILE);
+    } else if outcome.legacy_manifest {
+        println!(
+            "  adopted existing {} (deprecated)",
+            sb_workspace::LEGACY_MODULE_FILE
+        );
     }
     if outcome.runscript_written {
         println!("  wrote runscript.bash (executable)");
@@ -2134,12 +2190,13 @@ fn cmd_init(a: InitArgs) -> Result<()> {
     match (&outcome.repo_flow, outcome.flow_appended) {
         (Some(repo), true) => println!("  registered in {}", repo.display()),
         (Some(repo), false) => println!("  (already registered in {})", repo.display()),
-        (None, true) => println!("  registered in flow.yaml"),
-        (None, false) => println!("  (already registered in flow.yaml)"),
+        (None, true) => println!("  registered in workspace {}", outcome.workspace),
+        (None, false) => println!("  (already registered in workspace {})", outcome.workspace),
     }
     if outcome.repo_flow.is_some() {
         println!("  installed workspace {} (active)", outcome.workspace);
     }
+    crate::deprecation::warn_all(&outcome.deprecations);
     Ok(())
 }
 
@@ -2183,7 +2240,7 @@ const REPOS_DIR: &str = "repos";
 enum PackageKind {
     /// `sb.app.yml`
     App,
-    /// `flow.yaml`
+    /// `sb.flow.yaml` (or the legacy `flow.yaml`)
     Workspace,
 }
 
@@ -2191,18 +2248,35 @@ enum PackageKind {
 /// folder, or the URL it was cloned from).
 fn package_kind(root: &Path, shown: &str) -> Result<PackageKind> {
     let app = root.join(sb_apps::MANIFEST_FILE).is_file();
-    let flow = root.join(sb_workspace::FLOW_FILE).is_file();
+    let flow = sb_workspace::find_flow_file(root);
     match (app, flow) {
-        (true, true) => anyhow::bail!(
-            "{shown} has both sb.app.yml and flow.yaml; a package is one or the other"
+        (true, Some(flow)) => anyhow::bail!(
+            "{shown} has both sb.app.yml and {}; a package is one or the other",
+            file_name_of(&flow)
         ),
-        (true, false) => Ok(PackageKind::App),
-        (false, true) => Ok(PackageKind::Workspace),
-        (false, false) => anyhow::bail!(
-            "{shown} has neither sb.app.yml (an app package) nor flow.yaml (a workspace \
-             package) at its root"
+        (true, None) => Ok(PackageKind::App),
+        (false, Some(_)) => Ok(PackageKind::Workspace),
+        (false, None) => anyhow::bail!(
+            "{shown} has neither sb.app.yml (an app package) nor {} (a workspace \
+             package) at its root",
+            sb_workspace::FLOW_FILE
         ),
     }
+}
+
+/// The workspace flow at the root of package folder `root`: `sb.flow.yaml`,
+/// else the legacy `flow.yaml`, else the new name (so a later error names
+/// the file that is missing).
+fn package_flow(root: &Path) -> PathBuf {
+    sb_workspace::find_flow_file(root).unwrap_or_else(|| sb_workspace::new_flow_file(root))
+}
+
+/// `p`'s file name for messages, or the whole path when it has none.
+fn file_name_of(p: &Path) -> String {
+    p.file_name().map_or_else(
+        || p.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// `sb install <source>`, and `sb ws install` with `only` set: install the
@@ -2215,8 +2289,9 @@ fn cmd_install(a: &InstallArgs, only: Option<PackageKind>) -> Result<()> {
         if !looks_git && !expand_tilde(&a.source).exists() {
             anyhow::anyhow!(
                 "{}: no such folder; pass a package folder (one holding sb.app.yml or \
-                 flow.yaml) or a git URL",
-                a.source
+                 {}) or a git URL",
+                a.source,
+                sb_workspace::FLOW_FILE
             )
         } else {
             e
@@ -2237,7 +2312,7 @@ fn cmd_install(a: &InstallArgs, only: Option<PackageKind>) -> Result<()> {
                     install_app(&home, &a.source, a.prefetch)
                 }
                 PackageKind::Workspace => {
-                    let flow = dir.join(sb_workspace::FLOW_FILE);
+                    let flow = package_flow(&dir);
                     let report = sb_workspace::install_flow(&home, &flow, None)?;
                     finish_workspace_install(&cfg, &home, &report, a.force)
                 }
@@ -2322,7 +2397,7 @@ fn install_from_git(
         }
         PackageKind::Workspace => {
             let root = checkout.into_workspace_root(home, url)?;
-            let flow = root.join(sb_workspace::FLOW_FILE);
+            let flow = package_flow(&root);
             let report = sb_workspace::install_flow(home, &flow, Some(&recorded))?;
             finish_workspace_install(cfg, home, &report, a.force)
         }
@@ -2448,21 +2523,21 @@ impl Checkout {
 /// The name a freshly cloned workspace installs under: its flow's `name:`,
 /// else the repository folder name of `url`.
 fn staged_workspace_name(repo: &Path, url: &str) -> Result<String> {
-    let flow_path = repo.join(sb_workspace::FLOW_FILE);
+    let flow_path = package_flow(repo);
+    let shown = file_name_of(&flow_path);
     let text = std::fs::read_to_string(&flow_path)
-        .with_context(|| format!("reading {} from {url}", sb_workspace::FLOW_FILE))?;
+        .with_context(|| format!("reading {shown} from {url}"))?;
     let flow: sb_core::WorkspaceFlow = if text.trim().is_empty() {
         sb_core::WorkspaceFlow::default()
     } else {
-        serde_yaml::from_str(&text)
-            .with_context(|| format!("parsing {} from {url}", sb_workspace::FLOW_FILE))?
+        serde_yaml::from_str(&text).with_context(|| format!("parsing {shown} from {url}"))?
     };
     let name = flow
         .name
         .unwrap_or_else(|| sb_apps::source::repo_dir_name(url));
     sb_core::validate_identifier(&name).map_err(|e| {
         anyhow::anyhow!(
-            "workspace name {name:?} (from {url}) is invalid: {e}; set `name:` in its flow.yaml"
+            "workspace name {name:?} (from {url}) is invalid: {e}; set `name:` in its {shown}"
         )
     })?;
     Ok(name)
@@ -2554,16 +2629,18 @@ fn git_pull_ff(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The steps after a workspace's `flow.yaml` is installed, one line each:
+/// The steps after a workspace's flow is installed, one line each:
 /// workspace, modules, each message source (import + compile into the
 /// configured vault), each module's io regeneration. Message conflicts
-/// fail the command after every step has run, unless `force`.
+/// fail the command after every step has run, unless `force`. Deprecated
+/// forms the repo uses are announced on stderr first.
 fn finish_workspace_install(
     cfg: &SbCliConfig,
     home: &SbHome,
     report: &sb_workspace::InstallReport,
     force: bool,
 ) -> Result<()> {
+    crate::deprecation::warn_all(&report.deprecations);
     let verb = if report.created { "created" } else { "updated" };
     println!("-- workspace {}: {verb}, active", report.name);
 
@@ -2584,7 +2661,7 @@ fn finish_workspace_install(
     println!("{line}");
     for m in report.modules.iter().filter(|m| !m.exists) {
         eprintln!(
-            "warning: module {}: no sb.dev.yml at {} yet; run `sb init` in its folder",
+            "warning: module {}: no module manifest at {} yet; run `sb init` in its folder",
             m.name,
             m.dev_yml.display()
         );
@@ -2699,9 +2776,12 @@ fn install_messages(
     Ok(conflicts)
 }
 
-/// Regenerate each installed module's io files (services excluded), one
-/// `-- io:` line per module. Entries that do not render are warnings: the
-/// workspace itself is installed, and `sb ws check` reports them too.
+/// Regenerate each installed module's io files, one `-- io:` line per
+/// module. A service router is rendered only when its file is missing (an
+/// existing one is user code and is never overwritten), with one
+/// `rendered services/<name> for <module>` line each. Entries that do not
+/// render are warnings: the workspace itself is installed, and
+/// `sb ws check` reports them too.
 fn install_io(cfg: &SbCliConfig, vctx: &VaultCtx, report: &sb_workspace::InstallReport) {
     if report.modules.is_empty() {
         println!("-- io: no modules");
@@ -2716,11 +2796,12 @@ fn install_io(cfg: &SbCliConfig, vctx: &VaultCtx, report: &sb_workspace::Install
     };
     for m in &report.modules {
         if !m.exists {
-            println!("-- io: {} skipped (no sb.dev.yml)", m.name);
+            println!("-- io: {} skipped (no module manifest)", m.name);
             continue;
         }
-        let updated = load_module_handle(&m.dev_yml)
-            .and_then(|mut handle| sb_pubsub::update_all(&mut handle, &ctx, false));
+        let updated = load_module_handle(&m.dev_yml).and_then(|mut handle| {
+            sb_pubsub::update_all(&mut handle, &ctx, sb_pubsub::ServiceRender::IfMissing)
+        });
         match updated {
             Ok(r) => {
                 let skipped = if r.skipped.is_empty() {
@@ -2734,6 +2815,9 @@ fn install_io(cfg: &SbCliConfig, vctx: &VaultCtx, report: &sb_workspace::Install
                     r.written.len(),
                     r.unchanged.len()
                 );
+                for service in &r.services_rendered {
+                    println!("  rendered services/{service} for {}", m.name);
+                }
                 for (entry, why) in &r.skipped {
                     eprintln!("warning: {} {entry}: {why}", m.name);
                 }
@@ -2751,7 +2835,7 @@ fn device_of(cfg: &SbCliConfig) -> String {
     cfg.device.clone().unwrap_or_else(|| "dev01".to_string())
 }
 
-/// Load the module whose `sb.dev.yml` is `dev_yml` (what `sb_pubsub`'s
+/// Load the module whose manifest is `dev_yml` (what `sb_pubsub`'s
 /// resolver does for one path).
 fn load_module_handle(dev_yml: &Path) -> Result<ModuleHandle> {
     let text = std::fs::read_to_string(dev_yml)
@@ -3237,6 +3321,7 @@ fn workspace_checks(cfg: &SbCliConfig, home: &SbHome, name: &str) -> Vec<sb_doct
             flow: &flow,
             vault_root: &vault_root,
             stale_repo_flow: stale.as_ref().map(|(repo, _)| repo.as_path()),
+            host: sb_core::Host::current(),
         },
     )
 }
@@ -4657,7 +4742,7 @@ fn cmd_topic_list(a: TopicListCli) -> Result<()> {
 
 /// Fill the schema of Zenoh rows the wire left blank (no Header type, no
 /// encoding schema, as from publishers rendered by older templates) with
-/// the `type` the owning module's `sb.dev.yml` declares, found through the
+/// the `type` the owning module's manifest declares, found through the
 /// active workspace's registry. Rows of unregistered modules stay blank.
 fn fill_config_schemas(rows: &mut [sb_discover::TopicEntry]) {
     if rows.iter().all(|r| r.schema.is_some()) {
@@ -5079,12 +5164,12 @@ fn cmd_topic_pub(a: TopicPubCli) -> Result<()> {
     Ok(())
 }
 
-/// The active workspace's module registry (`flow.yaml::modules`: module
-/// name → its `sb.dev.yml`).
+/// The active workspace's module registry (`sb.flow.yaml::modules`: module
+/// name → its module manifest).
 type ModuleRegistry = std::collections::BTreeMap<String, PathBuf>;
 
 /// [`ModuleRegistry`] of the active workspace, or `None` when there is no
-/// config, no active workspace, or its `flow.yaml` does not read. Only
+/// config, no active workspace, or its flow does not read. Only
 /// used to look up a topic's schema, which is a fallback, so every failure
 /// is silent.
 fn active_module_registry() -> Option<ModuleRegistry> {
@@ -5102,7 +5187,7 @@ fn module_registry_for(cfg: &SbCliConfig) -> Option<ModuleRegistry> {
 
 /// Transport for `sb topic listen/pub`: `--transport` when given, else the
 /// one the resolver found (the `<transport>` segment of a fully-qualified
-/// topic, or the matched `sb.dev.yml` entry of a bare one). A flag that
+/// topic, or the matched module manifest entry of a bare one). A flag that
 /// disagrees with the topic wins, with a note on stderr. There is no
 /// default: with neither, the topic cannot be routed.
 fn pick_transport(
@@ -5134,10 +5219,10 @@ fn pick_transport(
 
 /// Resolve a bare-or-full topic for `sb topic listen/pub`. Builds the
 /// full path (the wire key, no leading `/`) against the cwd module's
-/// `sb.dev.yml` + the active workspace + sb.config.yml's `device`. An
+/// the module manifest + the active workspace + sb.config.yml's `device`. An
 /// input containing a `/` is fully-qualified and passes through, with a
 /// leading `/` accepted and dropped (no cwd module needed); with a
-/// `registry`, its schema is looked up in the owning module's `sb.dev.yml`.
+/// `registry`, its schema is looked up in the owning module's manifest.
 fn resolve_topic_for_runtime(
     input: &str,
     registry: Option<&ModuleRegistry>,
@@ -5152,14 +5237,17 @@ fn resolve_topic_for_runtime(
     let cfg = load_config()?;
     let home = sb_workspace::SbHome::from_config(&cfg)?;
     let cwd = std::env::current_dir().context("getting cwd")?;
-    let dev_yml = cwd.join("sb.dev.yml");
-    let cwd_module: Option<sb_core::ModuleDevConfig> = if dev_yml.exists() {
-        let s = std::fs::read_to_string(&dev_yml)
-            .with_context(|| format!("reading {}", dev_yml.display()))?;
-        Some(serde_yaml::from_str(&s).with_context(|| format!("parsing {}", dev_yml.display()))?)
-    } else {
-        None
-    };
+    let cwd_module: Option<sb_core::ModuleDevConfig> =
+        if let Some(dev_yml) = sb_workspace::find_module_file(&cwd) {
+            let s = std::fs::read_to_string(&dev_yml)
+                .with_context(|| format!("reading {}", dev_yml.display()))?;
+            Some(
+                serde_yaml::from_str(&s)
+                    .with_context(|| format!("parsing {}", dev_yml.display()))?,
+            )
+        } else {
+            None
+        };
     let workspace = sb_workspace::active_workspace(&home)?.unwrap_or_default();
     let device = cfg.device.clone().unwrap_or_else(|| "dev01".to_string());
     sb_discover::resolve_bare_topic(input, cwd_module.as_ref(), &device, &workspace, None)
@@ -5174,94 +5262,132 @@ fn require_active_workspace() -> Result<(SbCliConfig, SbHome, String)> {
     let cfg = load_config()?;
     let home = SbHome::from_config(&cfg)?;
     let ws = active_workspace(&home)?.ok_or_else(|| {
-        anyhow::anyhow!("no active workspace — run `sb ws create <name> && sb ws set <name>` first")
+        anyhow::anyhow!("no active workspace; run `sb ws create <name> && sb ws set <name>` first")
     })?;
     Ok((cfg, home, ws))
 }
 
-/// Warn (and carry on) when the active workspace's repo `flow.yaml` was
-/// edited after it was installed: `sb up` / `sb run` use the installed copy.
+/// Warn (and carry on) when the active workspace's repo flow
+/// (`sb.flow.yaml`, or the deprecated `flow.yaml`) was edited after it was
+/// installed: `sb up` / `sb run` / `sb stop` use the installed copy.
 fn warn_if_stale(home: &SbHome, ws: &str) {
     if let Ok(Some((repo_flow, _))) = sb_workspace::is_stale(home, ws) {
+        let file = repo_flow
+            .file_name()
+            .map_or_else(|| repo_flow.display().to_string(), |f| f.to_string_lossy().into_owned());
         let repo = repo_flow.parent().unwrap_or(&repo_flow);
         eprintln!(
-            "warning: flow.yaml at {} is newer than the installed copy; run sb install",
+            "warning: {file} at {} is newer than the installed copy; run sb install",
             repo.display()
         );
     }
 }
 
+/// `sb up`: plan, refuse a running session, build every module inline,
+/// then open the windows. Nothing touches tmux state until the builds pass.
 fn cmd_up() -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
     warn_if_stale(&home, &ws);
-    let plan = sb_launch::plan_workspace(&home, &ws)?;
+    let plan = sb_launch::plan_workspace(&home, &ws, &sb_core::Host::current())?;
+    crate::deprecation::warn_all(&plan.deprecations);
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
+    sb_launch::ensure_no_session(&tmux, &plan.session)?;
+    for (module, reason) in &plan.skipped {
+        println!("skipped {module}: {reason}");
+    }
+    sb_launch::run_builds(&plan)?;
     let outcome = sb_launch::up(&plan, &tmux)?;
     println!(
-        "launched {} module(s) in tmux session {:?}",
-        outcome.modules.len(),
+        "launched {} window(s) in tmux session {:?}",
+        outcome.windows.len(),
         outcome.session
     );
-    for m in &outcome.modules {
-        println!("  - {m}");
+    for w in &outcome.windows {
+        println!("  - {w}");
     }
     println!("attach with: tmux attach -t {}", outcome.session);
     Ok(())
 }
 
-fn cmd_run(module: &str, args: &[String]) -> Result<()> {
+/// `sb run [--fg] <module>[:<id>] [args...]`: build, then start (or
+/// restart) the target's windows, or with `--fg` run its one instance in
+/// this terminal and exit with its code.
+fn cmd_run(a: &RunArgs) -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
     warn_if_stale(&home, &ws);
-    let (plan, pane) = sb_launch::plan_single(&home, &ws, module, sb_launch::Script::Run, args)?;
+    let plan = sb_launch::plan_run(&home, &ws, &a.module, &a.args, &sb_core::Host::current())?;
+    crate::deprecation::warn_all(&plan.deprecations);
+    if a.fg {
+        use std::io::Write;
+        // Unix: exec, so this only returns on failure. Windows: the child's code.
+        let code = sb_launch::run_foreground(&plan)?;
+        let _ = std::io::stdout().flush();
+        std::process::exit(code);
+    }
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
-    let outcome = sb_launch::run_single(&plan, &pane, &tmux)?;
-    let verb = if outcome.replaced {
-        "restarted"
+    sb_launch::run_builds(&plan)?;
+    let outcome = sb_launch::run(&plan, &tmux)?;
+    let suffix = if a.args.is_empty() {
+        String::new()
     } else {
-        "launched"
+        format!(" (args: {})", a.args.join(" "))
     };
-    if args.is_empty() {
+    for window in &outcome.windows {
+        let verb = if outcome.replaced.contains(window) {
+            "restarted"
+        } else {
+            "launched"
+        };
         println!(
-            "{verb} {} in tmux session {:?}",
-            outcome.module, outcome.session
-        );
-    } else {
-        println!(
-            "{verb} {} in tmux session {:?} (args: {})",
-            outcome.module,
-            outcome.session,
-            args.join(" "),
+            "{verb} {window} in tmux session {:?}{suffix}",
+            outcome.session
         );
     }
     Ok(())
 }
 
+/// `sb stop <module> [args...]`: close every window of the module, then
+/// run its `scripts.stop` inline. A legacy module with a `stopscript.bash`
+/// runs that script in its window instead, with the pre-0.6 output.
 fn cmd_stop(module: &str, args: &[String]) -> Result<()> {
     let (cfg, home, ws) = require_active_workspace()?;
-    let (plan, pane) = sb_launch::plan_single(&home, &ws, module, sb_launch::Script::Stop, args)?;
+    warn_if_stale(&home, &ws);
+    let plan = sb_launch::plan_stop(&home, &ws, module, args, &sb_core::Host::current())?;
+    crate::deprecation::warn_all(&plan.deprecations);
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
-    let outcome = sb_launch::run_single(&plan, &pane, &tmux)?;
-    // `replaced` here just means the module's tmux window already held
-    // another command (typically the running runscript) — that's the
-    // expected case for "stop after run", so we don't surface the
-    // distinction loudly.
-    let verb = if outcome.replaced {
-        "stopping (replaced existing window for)"
-    } else {
-        "stopping"
-    };
-    if args.is_empty() {
-        println!(
-            "{verb} {} in tmux session {:?}",
-            outcome.module, outcome.session
-        );
-    } else {
-        println!(
-            "{verb} {} in tmux session {:?} (args: {})",
-            outcome.module,
-            outcome.session,
-            args.join(" "),
-        );
+    let outcome = sb_launch::stop(&plan, &tmux)?;
+    if outcome.legacy {
+        // `killed` here means the module's window already held another
+        // command (typically the running runscript), the expected case for
+        // "stop after run", so the distinction is not surfaced loudly.
+        let verb = if outcome.killed.is_empty() {
+            "stopping"
+        } else {
+            "stopping (replaced existing window for)"
+        };
+        if args.is_empty() {
+            println!(
+                "{verb} {} in tmux session {:?}",
+                plan.module, outcome.session
+            );
+        } else {
+            println!(
+                "{verb} {} in tmux session {:?} (args: {})",
+                plan.module,
+                outcome.session,
+                args.join(" "),
+            );
+        }
+        return Ok(());
+    }
+    println!(
+        "stopped {}: closed {} window(s) [{}]",
+        plan.module,
+        outcome.killed.len(),
+        outcome.killed.join(", ")
+    );
+    if outcome.ran_stop {
+        println!("ran scripts.stop for {}", plan.module);
     }
     Ok(())
 }
@@ -5273,7 +5399,7 @@ fn cmd_down() -> Result<()> {
     if outcome.cleared {
         println!("killed tmux session {:?}", outcome.session);
     } else {
-        println!("no tmux session {:?} — nothing to do", outcome.session);
+        println!("no tmux session {:?}; nothing to do", outcome.session);
     }
     Ok(())
 }
@@ -5284,10 +5410,10 @@ fn cmd_attach() -> Result<()> {
     let tmux = sb_launch::resolve_tmux(cfg.tmux.as_deref())?;
     let info = sb_launch::attach_info(&ws, &tmux)?;
     if std::io::stdout().is_terminal() {
-        // Interactive — replace this process with `tmux attach`.
+        // Interactive: hand the terminal to `tmux attach` (exact target).
         let err = std::process::Command::new(&tmux)
             .args(["attach", "-t"])
-            .arg(&info.session)
+            .arg(format!("={}", info.session))
             .status();
         match err {
             Ok(s) if s.success() => return Ok(()),
@@ -5344,7 +5470,7 @@ fn print_gopro_outcome(o: &sb_gopro::GoproOutcome) {
     println!("froze module {} → {}", o.module, o.prd_yml_path.display());
     for m in &o.missing_files {
         eprintln!(
-            "  warning: {} {} declared in sb.dev.yml but no file at {} \
+            "  warning: {} {} declared in the module manifest but no file at {} \
              (run `sb {} edit ...` to regenerate)",
             m.role,
             m.name,
