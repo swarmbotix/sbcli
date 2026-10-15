@@ -24,14 +24,16 @@ platforms/
 │   ├── dist-tooling/               ← long-lived build + installer source (in repo)
 │   │   ├── build.sh                   staging script
 │   │   ├── install.sh                 version-agnostic entry-point
+│   │   ├── get-sb.sh                  version-free curl | bash bootstrap (staged beside the zips)
 │   │   ├── uninstall.sh               PATH line + $SB_HOME removal
 │   │   └── sb.config.yml.template     seeded into new installs (.so paths)
 │   └── dist/                       ← release output, one dir per version
-│       └── 0.8.0/
-│           ├── swarmbotix-0.8.0-linux-x86_64.zip
-│           ├── swarmbotix-0.8.0-linux-x86_64.zip.sha256
-│           ├── swarmbotix-0.8.0-linux-aarch64.zip
-│           └── swarmbotix-0.8.0-linux-aarch64.zip.sha256
+│       └── 0.9.0/
+│           ├── get-sb.sh              ← loose, NOT in a zip; fetches one and runs its install.sh
+│           ├── swarmbotix-0.9.0-linux-x86_64.zip
+│           ├── swarmbotix-0.9.0-linux-x86_64.zip.sha256
+│           ├── swarmbotix-0.9.0-linux-aarch64.zip
+│           └── swarmbotix-0.9.0-linux-aarch64.zip.sha256
 │
 └── windows/
     ├── version.json                ← platform descriptor
@@ -41,12 +43,12 @@ platforms/
     │   ├── uninstall.ps1
     │   └── sb.config.win.yml.template (.dll paths)
     └── dist/
-        └── 0.8.0/
-            ├── swarmbotix-0.8.0-windows-x86_64.zip
-            └── swarmbotix-0.8.0-windows-x86_64.zip.sha256
+        └── 0.9.0/
+            ├── swarmbotix-0.9.0-windows-x86_64.zip
+            └── swarmbotix-0.9.0-windows-x86_64.zip.sha256
 ```
 
-Both platforms ship for `0.8.0`. The two staging scripts take the same inputs
+Both platforms ship for `0.9.0`. The two staging scripts take the same inputs
 (`.env` + the platform descriptor), enforce the same drift check, and emit the
 same two files per architecture, so a release cut on one box matches one cut on
 the other.
@@ -92,13 +94,13 @@ to go. Each platform now carries its own, next to its tooling:
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.8.0-windows-x86_64"
+  "package_stem": "swarmbotix-0.9.0-windows-x86_64"
 }
 ```
 
@@ -145,9 +147,10 @@ name contradicts the binary inside it.
 - **`dist/<version>/` has no platform segment.** The platform is already in the
   path (`platforms/windows/dist/…`), so the old `dist/<version>/<platform>/`
   nesting collapses by one level.
-- **Exactly three shipped files per version**: the payload zip, its `.sha256`,
-  and a version-agnostic installer that locates its sibling zip by glob. The
-  set can be handed over as-is.
+- **A version slot holds a zip and its `.sha256` per architecture**, with the
+  installer and uninstaller inside each zip, plus one loose file on Linux:
+  `get-sb.sh`, the version-free bootstrap that downloads a zip and runs its
+  `install.sh`. The set can be handed over as-is.
 - **Staging clears only the `<version>/` slot it is building.** Cutting Windows
   never touches `platforms/linux/`, so the two platforms of one version can be
   built on different boxes and merged by commit.
@@ -185,7 +188,7 @@ Three jobs, in a chain:
 |---|---|---|
 | `check` | `ubuntu-latest` + `windows-latest` | guards that the tag matches `Cargo.toml`, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` |
 | `build` | one job per target | writes `.env`, then runs this platform's staging script; uploads the slot as a run artifact |
-| `release` | `ubuntu-latest` | on a `v*` tag only: downloads every artifact, asserts all three zips are present, attaches them to a GitHub Release |
+| `release` | `ubuntu-latest` | on a `v*` tag only: downloads every artifact, asserts all three zips and `get-sb.sh` are present, attaches them to a GitHub Release |
 
 `check` gates `build` gates `release`: nothing is packaged unless the tree
 passes its own gates, and nothing is published unless it packaged. A mistyped
@@ -219,8 +222,8 @@ Cutting a release is therefore:
 
 ```bash
 /sb-release                     # bumps all seven mirror sites
-git commit -am "release 0.8.0"
-git tag v0.8.0                 # the tag mirrors Cargo.toml — checked in CI
+git commit -am "release 0.9.0"
+git tag v0.9.0                 # the tag mirrors Cargo.toml — checked in CI
 git push --follow-tags
 ```
 

@@ -18,6 +18,10 @@
 //! Every function takes the `sb_home` root explicitly, and every network
 //! access goes through a [`Fetcher`], so tests point both at tempdirs.
 //!
+//! [`tools`] is the other installer here: `sb tools install` fetches the
+//! pinned `protoc` and `flatc` release zips, checks them against pinned
+//! sha256 digests, and unpacks them under a prefix (`/opt` by default).
+//!
 //! Environment:
 //!
 //! * `SB_RELEASE_BASE`: repository URL to use instead of
@@ -27,11 +31,16 @@
 //!   from looking for a newer release.
 //! * `SB_UPDATE_ALLOW_ANY_EXE=1`: lets `sb update` run from a binary other
 //!   than `<sb_home>/bin/sb`. For tests only.
+//! * `SB_TOOLS_BASE`: `file:///<dir>` makes `sb tools install` copy the
+//!   protoc / flatc zips from `<dir>` instead of downloading them, checked
+//!   against `<dir>/<asset>.sha256` when present (offline tests). Any other
+//!   non-empty value is an error.
 
 pub mod cache;
 pub mod check;
 pub mod fetch;
 pub mod notice;
+pub mod tools;
 pub mod update;
 pub mod version;
 
@@ -41,6 +50,7 @@ pub use check::{CheckOutcome, check};
 pub use fetch::{DirFetcher, Fetcher, GithubFetcher, from_env as fetcher_from_env};
 pub use notice::version_notice;
 pub use semver::Version;
+pub use tools::{InstallPlan, Installed, Tool, ToolPlan, ToolSpec, ToolState};
 pub use update::{
     UpdateOptions, UpdateOutcome, UpdatePlan, apply, cleanup_stale_binary, plan, update,
 };

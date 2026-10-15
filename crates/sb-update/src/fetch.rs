@@ -211,7 +211,7 @@ fn tag_from_location(location: &str) -> Option<String> {
 /// The folder a `file://` URL names: `file:///tmp/rel` is `/tmp/rel` and
 /// `file:///C:/rel` is `C:/rel`. The path is taken literally, without
 /// percent-decoding. `None` for any other scheme.
-fn dir_from_file_url(url: &str) -> Option<PathBuf> {
+pub(crate) fn dir_from_file_url(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     let bytes = rest.as_bytes();

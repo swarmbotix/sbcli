@@ -23,7 +23,7 @@ pub mod zenoh_bytes;
 
 pub use decode::{
     DecodeContext, DecodedFrame, FbLookup, FramePayload, Iox2Lookup, decode_frame,
-    decode_frame_dynamic, render_decoded_json_line,
+    decode_frame_dynamic, render_decoded_json_line, render_decoded_json_pretty,
 };
 pub use iceoryx::{IceoryxFrames, Iox2PayloadDetail, listen_iceoryx, publish_iceoryx_raw};
 pub use image_fields::{ImageFields, extract_compressed, extract_image};

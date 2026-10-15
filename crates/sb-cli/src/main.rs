@@ -169,6 +169,41 @@ enum Cmd {
     /// SB_NO_UPDATE_CHECK=1 to turn that off.
     #[command(after_long_help = UPDATE_EXAMPLES)]
     Update(UpdateArgs),
+    /// Install the pinned protoc and flatc for this platform.
+    ///
+    /// `sb tools install` downloads the protoc 35.0 release zip from
+    /// github.com/protocolbuffers/protobuf and the flatc 25.12.19 release zip
+    /// from github.com/google/flatbuffers, verifies each against the sha256
+    /// pinned in this sb, unpacks it under the prefix, and writes `protoc:` and
+    /// `flatc:` into the global sb.config.yml (the file `sb config set` edits).
+    /// It ends by printing the protoc and flatc rows of `sb doctor`.
+    ///
+    /// The prefix is /opt on Linux and C:/cmake_ext_libs on Windows. On Linux,
+    /// protoc lands in <prefix>/protobuf/protoc-35.0-linux-x86_64/bin/protoc
+    /// (protoc-35.0-linux-aarch_64 on aarch64) and flatc in
+    /// <prefix>/flatbuffers/flatc-25.12.19/flatc. On Windows, protoc lands in
+    /// <prefix>/protoc/35.0/bin/protoc.exe and flatc in
+    /// <prefix>/flatbuffers/25.12.19/flatc.exe. A tool whose executable already
+    /// reports the pinned version is left alone; one that reports another
+    /// version is replaced. No prebuilt flatc is published for linux-aarch64:
+    /// sb notes that and installs protoc only.
+    ///
+    /// sb never runs sudo. When <prefix>/protobuf or <prefix>/flatbuffers is
+    /// missing or not writable, sb prints the one sudo line that creates the
+    /// folders and hands them to you, then exits 1 without downloading; run
+    /// that line once and re-run. --prefix DIR installs under another folder
+    /// instead; a folder you own needs no sudo.
+    ///
+    /// --only protoc|flatc installs one tool. Without --yes, sb prints the plan
+    /// and asks before installing; when stdin is not a terminal, --yes is
+    /// required.
+    ///
+    /// SB_TOOLS_BASE=file:///<dir> copies the zips from <dir> instead of
+    /// downloading them (offline installs and tests); a <asset>.sha256 file
+    /// beside a zip replaces its pinned digest. Any other non-empty value is an
+    /// error.
+    #[command(subcommand, after_long_help = TOOLS_EXAMPLES)]
+    Tools(ToolsCmd),
     // `sb <name> [args...]`: any other subcommand is an installed app. Clap hands
     // over the raw words (name first), so app flags such as `--help` pass through.
     #[command(external_subcommand)]
@@ -235,6 +270,36 @@ struct UpdateArgs {
     /// Reinstall even when the target version is the one already running.
     #[arg(long)]
     force: bool,
+}
+
+const TOOLS_EXAMPLES: &str = "\
+Examples:
+  sudo mkdir -p /opt/protobuf /opt/flatbuffers && sudo chown \"$USER\" /opt/protobuf /opt/flatbuffers
+  sb tools install --yes               install both under /opt
+  sb tools install --only protoc       just protoc
+  sb tools install --prefix ~/tools    no sudo: a user-writable prefix";
+
+#[derive(clap::Subcommand)]
+enum ToolsCmd {
+    /// Download protoc 35.0 and flatc 25.12.19, unpack them under the prefix, and point sb.config.yml at them.
+    ///
+    /// See `sb tools --help` for the install layout, the sudo rule and
+    /// SB_TOOLS_BASE.
+    #[command(after_long_help = TOOLS_EXAMPLES)]
+    Install(ToolsInstallArgs),
+}
+
+#[derive(clap::Args)]
+struct ToolsInstallArgs {
+    /// Install under this folder instead of /opt (Windows: C:/cmake_ext_libs).
+    #[arg(long, value_name = "DIR")]
+    prefix: Option<PathBuf>,
+    /// Only this tool.
+    #[arg(long, value_name = "protoc|flatc")]
+    only: Option<String>,
+    /// Do not ask before installing. Required when stdin is not a terminal.
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 #[derive(clap::Args)]
@@ -471,6 +536,10 @@ struct TopicListenCli {
     /// Omit `bytes` field contents; print only their `<name>_len`.
     #[arg(long)]
     no_data: bool,
+    /// Indent each frame's JSON (one object across several lines, blank
+    /// line between frames) instead of one compact line per frame.
+    #[arg(long)]
+    pretty: bool,
     /// Also draw image frames (`Image` / `CompressedImage`-shaped messages)
     /// in a window titled with the topic; stdout is unchanged. Closing the
     /// window or pressing Escape ends the listen. Needs a display.
@@ -1043,6 +1112,7 @@ fn real_main() -> Result<ExitCode> {
             AppCmd::Remove { name } => cmd_app_remove(&name),
         },
         Cmd::Update(a) => return cmd_update(&a),
+        Cmd::Tools(ToolsCmd::Install(a)) => return cmd_tools_install(&a),
         Cmd::External(argv) => return cmd_external(&argv),
     }?;
     Ok(ExitCode::SUCCESS)
@@ -1138,6 +1208,130 @@ fn confirm(question: &str) -> Result<bool> {
         line.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// tools: `sb tools install`
+// ─────────────────────────────────────────────────────────────────────
+
+/// `sb tools install`: plan, print the table, check the parents are writable,
+/// confirm, install, point sb.config.yml at the executables, then print the
+/// protoc / flatc doctor rows. Every failure is an error (exit 1); sb never
+/// runs sudo, it prints the line to run instead.
+fn cmd_tools_install(a: &ToolsInstallArgs) -> Result<ExitCode> {
+    use sb_update::tools::{Tool, ToolState};
+    use std::io::IsTerminal;
+
+    // A relative or unexpanded `~` prefix would put relative paths into the
+    // global config, which then resolve against whatever cwd sb runs from.
+    let prefix = match &a.prefix {
+        Some(p) => {
+            let p = p.to_str().map_or_else(|| p.clone(), expand_tilde);
+            std::path::absolute(&p).unwrap_or(p)
+        }
+        None => sb_update::tools::default_prefix(),
+    };
+    let only = match a.only.as_deref() {
+        None => None,
+        Some(s) => match Tool::parse(s) {
+            Some(tool) => Some(tool),
+            None => anyhow::bail!("unknown tool `{s}`; expected protoc or flatc"),
+        },
+    };
+
+    let plan = sb_update::tools::plan(&prefix, only)?;
+
+    println!("{:<10}: {}", "prefix", plan.prefix.display());
+    for tool in Tool::ALL {
+        if let Some(tp) = plan.tools.iter().find(|tp| tp.spec.tool == tool) {
+            let state = match &tp.state {
+                ToolState::Installed => "installed".to_owned(),
+                ToolState::Missing => "missing".to_owned(),
+                ToolState::Stale(line) => format!("stale ({line})"),
+            };
+            println!(
+                "{:<10}: {:<10} {state:<12} -> {}",
+                tool.name(),
+                tool.version(),
+                tp.exe.display()
+            );
+        } else if let Some((_, reason)) = plan.unavailable.iter().find(|(t, _)| *t == tool) {
+            println!(
+                "{:<10}: {:<10} unavailable ({reason})",
+                tool.name(),
+                tool.version()
+            );
+        }
+    }
+
+    let pending = plan
+        .tools
+        .iter()
+        .any(|tp| matches!(tp.state, ToolState::Missing | ToolState::Stale(_)));
+
+    let installed = if pending {
+        let dirs = sb_update::tools::unwritable_parents(&plan);
+        if !dirs.is_empty() {
+            let listed = dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "{listed} not writable; run this once, then re-run `sb tools install`:\n  {}",
+                sb_update::tools::privilege_hint(&dirs)
+            );
+        }
+        if !a.yes {
+            if !std::io::stdin().is_terminal() {
+                anyhow::bail!("not a terminal; pass --yes");
+            }
+            if !confirm("Proceed? [y/N] ")? {
+                anyhow::bail!("cancelled");
+            }
+        }
+        let done = sb_update::tools::install(&plan, &mut |line: &str| eprintln!("{line}"))?;
+        for d in &done {
+            println!(
+                "installed: {} {} -> {}",
+                d.tool.name(),
+                d.tool.version(),
+                d.exe.display()
+            );
+        }
+        done
+    } else {
+        println!("nothing to do: every available tool is at its pinned version");
+        Vec::new()
+    };
+
+    // Point the global config at what was just installed, and at any tool
+    // that was already in place but configured elsewhere (or not at all).
+    let cfg = load_config()?;
+    for d in &installed {
+        cmd_config_set(d.tool.name(), &d.exe.display().to_string(), false)?;
+    }
+    for tp in plan
+        .tools
+        .iter()
+        .filter(|tp| tp.state == ToolState::Installed)
+    {
+        let configured = match tp.spec.tool {
+            Tool::Protoc => cfg.protoc.as_deref(),
+            Tool::Flatc => cfg.flatc.as_deref(),
+        };
+        if configured != Some(tp.exe.as_path()) {
+            cmd_config_set(tp.spec.tool.name(), &tp.exe.display().to_string(), false)?;
+        }
+    }
+
+    let cfg = load_config()?;
+    print!("{}", sb_doctor::tool_checks(&cfg).render(stdout_color()));
+
+    for (tool, reason) in &plan.unavailable {
+        eprintln!("note: {}: {reason}", tool.name());
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -3617,7 +3811,7 @@ fn compile_style_in(
     let protoc = cfg
         .protoc
         .as_deref()
-        .context("protoc path not set in sb.config.yml — set it or run `sb doctor`")?;
+        .context("protoc path not set in sb.config.yml — set it or run `sb tools install`")?;
 
     // ── 1. Always: produce the FileDescriptorSet IR ──
     let cache_dir = vault.defs_dir(style).join(".cache");
@@ -4575,7 +4769,11 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
             None => true,
         };
         decoded.summarize_bytes(a.no_data);
-        println!("{}", sb_listen::render_decoded_json_line(&decoded));
+        if a.pretty {
+            println!("{}\n", sb_listen::render_decoded_json_pretty(&decoded));
+        } else {
+            println!("{}", sb_listen::render_decoded_json_line(&decoded));
+        }
         emitted += 1;
         if !window_open {
             return Ok(());

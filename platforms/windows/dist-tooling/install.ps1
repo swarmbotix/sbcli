@@ -311,7 +311,7 @@ try {
         Write-Host "  message vault compiled"
     } else {
         Write-Warning "message vault did not fully compile for: $($failed -join ', ')"
-        Write-Warning "         run 'sb doctor' then re-run 'sb message compile'."
+        Write-Warning "         run 'sb tools install', then re-run 'sb message compile'."
     }
 } finally {
     Pop-Location
@@ -322,6 +322,7 @@ Write-Host ""
 Write-Host "Installed. Try:"
 Write-Host "  sb --version"
 Write-Host "  sb doctor"
+Write-Host "  sb tools install"
 Write-Host ""
 Write-Host "To remove it later:"
 Write-Host "  $SbHome\uninstall.ps1"

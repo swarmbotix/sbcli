@@ -221,7 +221,8 @@ that names no iox2 struct is tried as protobuf.
 **`bytes` fields**, both transports: up to 64 bytes print inline (a base64
 string for protobuf, a number array for iox2); longer values print as
 `{"len": N, "head_hex": "<first 16 bytes>"}`. `--no-data` drops the field
-and keeps only `<name>_len`.
+and keeps only `<name>_len`. `--pretty` (sb 0.9.0+) indents each frame across
+several lines with a blank line between frames; the content is unchanged.
 
 **`--show`** opens a window titled with the topic and draws image frames on
 either transport: a decoded body whose fields, at the top level or one
@@ -1327,8 +1328,11 @@ consumes. If `protoc` is not set or its path is dead, compile fails
 with:
 
 ```
-error: protoc path not set in sb.config.yml — set it or run `sb doctor`
+error: protoc path not set in sb.config.yml — set it or run `sb tools install`
 ```
+
+(sb 0.9.0+; earlier releases pointed at `sb doctor`.
+[sbcli_tools.md](sbcli_tools.md) installs the pinned protoc and flatc.)
 
 `flatc` is only required for `--fb`. Setting `--fb` without `flatc`
 configured errors with the analogous flatc message.

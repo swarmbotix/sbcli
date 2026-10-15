@@ -20,11 +20,11 @@ pattern — the `.env` switch, `target/` and `dist/` layouts, `build.ps1` /
 plus a checksum beside it, in a per-version, per-platform directory:
 
 ```
-platforms/linux/dist/0.8.0/
-  swarmbotix-0.8.0-linux-x86_64.zip           ← the payload, installer included
-  swarmbotix-0.8.0-linux-x86_64.zip.sha256    ← checksum (sha256sum -c)
-  swarmbotix-0.8.0-linux-aarch64.zip
-  swarmbotix-0.8.0-linux-aarch64.zip.sha256
+platforms/linux/dist/0.9.0/
+  swarmbotix-0.9.0-linux-x86_64.zip           ← the payload, installer included
+  swarmbotix-0.9.0-linux-x86_64.zip.sha256    ← checksum (sha256sum -c)
+  swarmbotix-0.9.0-linux-aarch64.zip
+  swarmbotix-0.9.0-linux-aarch64.zip.sha256
 ```
 
 **The installer is inside the zip**, not beside it. One download is the whole
@@ -67,25 +67,65 @@ binary this machine cannot execute.
 
 The binary itself is self-contained, but some commands (`sb doctor`,
 `sb message compile`, `sb up`) shell out to external tools. Install whichever
-of these you actually need — `sb doctor` will tell you what's missing:
+of these you actually need — `sb doctor` will tell you what's missing.
+`protoc` and `flatc` are installed by `sb tools install` (sb 0.9.0+), at the
+exact versions this `sb` pins:
 
-| Tool | Needed for | Min version |
+| Tool | Needed for | Version |
 |---|---|---|
-| `protoc` | `.proto` codegen | libprotoc 3.21+ |
-| `flatc` | Flatbuffers codegen | 24.x+ |
+| `protoc` | `.proto` codegen | 35.0 via `sb tools install`; another version works, `sb doctor` warns |
+| `flatc` | Flatbuffers codegen | 25.12.19 via `sb tools install` (x86_64 only: no prebuilt aarch64 flatc upstream); another version warns |
 | `libzenohc.so` | cross-device pub/sub | matches `zenoh 1.9` |
 | `libiceoryx2_ffi_c.so` | same-device pub/sub | matches `iceoryx2 0.9` |
 | `tmux` | launching modules via `sb up` | 3.2+ |
 
 ### One-line install
 
-Download the zip for your machine from `platforms/linux/dist/0.8.0/`
-(`uname -m` tells you which; the `.sha256` too if you want to verify), then:
+From sb 0.9.0, a fresh machine goes to a green `sb doctor` with one block,
+no prompts, top to bottom:
 
 ```bash
-sha256sum -c swarmbotix-0.8.0-linux-x86_64.zip.sha256   # optional
-unzip swarmbotix-0.8.0-linux-x86_64.zip
-./swarmbotix-0.8.0-linux-x86_64/install.sh
+curl -fsSL https://github.com/swarmbotix/sbcli/releases/latest/download/get-sb.sh | bash -s -- --yes
+export PATH="$HOME/.swarmbotix/bin:$PATH"
+sudo mkdir -p /opt/protobuf /opt/flatbuffers && sudo chown "$USER" /opt/protobuf /opt/flatbuffers
+sb tools install --yes
+sb message compile
+sb doctor
+```
+
+- `get-sb.sh` (published beside the zips of every Linux release) maps
+  `uname -m` to the right zip, verifies it against its `.sha256`, and runs
+  the `install.sh` inside it with `--yes`. It needs `curl`, `unzip` and
+  `sha256sum` and names whichever is missing. `--version X.Y.Z` pins a
+  release; `SB_HOME` is passed through.
+- The installer already appended the `export PATH` line to `~/.bashrc` for
+  future shells; the current shell has not read it, hence line 2.
+- **`sb` never runs `sudo`.** Line 3 is the only privileged step, kept
+  separate because an agent or a script cannot type a password. It creates
+  the two folders `sb tools install` unpacks into. No root at all:
+  skip it and run `sb tools install --yes --prefix ~/tools` instead of
+  line 4.
+- `sb tools install` downloads protoc 35.0 and flatc 25.12.19, checks their
+  pinned SHA-256, unpacks them to `/opt/protobuf/protoc-35.0-linux-x86_64/`
+  and `/opt/flatbuffers/flatc-25.12.19/`, and writes both paths into
+  `~/.swarmbotix/sb.config.yml`.
+- On aarch64 (Pi, Jetson) it installs protoc only and notes that flatc is
+  unavailable; `sb doctor` shows `[SKIP] flatc`, which is expected unless you
+  need FlatBuffers (then build flatc from source).
+
+Run it from a directory without a `messages/` folder (not from inside a
+clone of this repo): `sb message compile` and `sb doctor` prefer a
+`messages/` tree found from the current directory. Full reference:
+[documents/sbcli_tools.md](documents/sbcli_tools.md).
+
+**By hand**, download the zip for your machine from
+`platforms/linux/dist/0.9.0/` (`uname -m` tells you which; the `.sha256` too
+if you want to verify), then:
+
+```bash
+sha256sum -c swarmbotix-0.9.0-linux-x86_64.zip.sha256   # optional
+unzip swarmbotix-0.9.0-linux-x86_64.zip
+./swarmbotix-0.9.0-linux-x86_64/install.sh
 ```
 
 Unzip anywhere except inside `~/.swarmbotix` itself — the installer refuses
@@ -112,7 +152,7 @@ Verify after install:
 
 ```bash
 source ~/.bashrc      # or open a new terminal
-sb --version          # → sb 0.8.0
+sb --version          # → sb 0.9.0
 sb doctor             # lists what's missing on your system
 ```
 
@@ -157,7 +197,7 @@ layout on the target machine".
 For CI, scripts, or anyone tired of being prompted:
 
 ```bash
-./swarmbotix-0.8.0-linux-x86_64/install.sh --yes
+./swarmbotix-0.9.0-linux-x86_64/install.sh --yes
 ```
 
 Auto-accepts the bashrc edit. Everything else is unchanged.
@@ -165,7 +205,7 @@ Auto-accepts the bashrc edit. Everything else is unchanged.
 ### Custom install prefix
 
 ```bash
-SB_HOME=/opt/swarmbotix ./swarmbotix-0.8.0-linux-x86_64/install.sh
+SB_HOME=/opt/swarmbotix ./swarmbotix-0.9.0-linux-x86_64/install.sh
 ```
 
 Installs under `$SB_HOME` instead of `~/.swarmbotix`. You're responsible for
@@ -254,13 +294,14 @@ platforms/
       build.sh                     ← staging script; the whole release procedure
       install.sh                   ← version-agnostic entry-point, staged INTO the zip
       uninstall.sh                 ← ditto; also placed in $SB_HOME at install time
+      get-sb.sh                    ← curl | bash bootstrap, copied BESIDE the zips (sb 0.9.0+)
       sb.config.yml.template       ← seeded into new installs
     dist/                          ← release output (one dir per version)
-      0.8.0/
-        swarmbotix-0.8.0-linux-x86_64.zip
-        swarmbotix-0.8.0-linux-x86_64.zip.sha256
-        swarmbotix-0.8.0-linux-aarch64.zip
-        swarmbotix-0.8.0-linux-aarch64.zip.sha256
+      0.9.0/
+        swarmbotix-0.9.0-linux-x86_64.zip
+        swarmbotix-0.9.0-linux-x86_64.zip.sha256
+        swarmbotix-0.9.0-linux-aarch64.zip
+        swarmbotix-0.9.0-linux-aarch64.zip.sha256
   windows/                         ← see installguide_windows.md
   mac/                             ← future: when a macOS build exists
 ```
@@ -355,13 +396,15 @@ Steps 3 to 8 run once **per architecture**; the rest happen once.
 
 ### What goes in `platforms/linux/dist/<version>/`
 
-One zip and one checksum **per architecture**, and nothing else:
+One zip and one checksum **per architecture**, plus (sb 0.9.0+) one
+`get-sb.sh`, and nothing else:
 
 | Path | Source | Notes |
 |---|---|---|
 | `swarmbotix-<version>-linux-x86_64.zip` | staged payload | Binary + messages + docs + VERSION + template + the two scripts |
 | `swarmbotix-<version>-linux-aarch64.zip` | staged payload | Same payload, aarch64 binary |
 | `<pkg>.zip.sha256` | generated | One per zip. `sha256sum` format, so the recipient can `sha256sum -c` it |
+| `get-sb.sh` | `platforms/linux/dist-tooling/` | Version-free bootstrap, mode `0755`, **beside** the zips, not in them. Every release uploads it, so `releases/latest/download/get-sb.sh` always resolves |
 
 Slots up to `0.1.40` were cut before the installer moved inside the package and
 still carry a loose `install.sh`. Nothing reads it any more.
@@ -435,14 +478,31 @@ have no `install.sh` to run.
 A fresh sandbox has no `protoc` path in its seeded config, so the vault compile
 at the end of the install reports `did not fully compile`. That is expected
 there and is not a release blocker — it is the same message a first-run user
-sees before `sb doctor`.
+sees before `sb tools install`.
 
-Four paths the smoke test should cover before any release:
+Five paths the smoke test should cover before any release:
 
 1. **`--yes` auto-accept** — the happy path; bashrc gets the export line.
 2. **Idempotent re-run** — second `--yes` invocation must detect the marker comment and skip the bashrc edit. Line count should stay at 1.
 3. **Decline path** — when the user answers `n` (or stdin is closed and `/dev/tty` cannot be opened), the installer falls through to printing manual instructions and leaves `~/.bashrc` untouched. Note it tests a *successful exit*, not just an untouched bashrc: `/dev/tty` passes an `-r` test even with no controlling terminal, and a redirect that then fails with `ENXIO` would end the script under `set -e` after everything is already copied. The installer opens the tty instead of testing it, precisely so this path exits 0.
 4. **Uninstall** — `$SB_HOME` gone and the bashrc line with it. The uninstaller it runs lives inside the directory it deletes, so this is also the test that its re-exec-from-a-temp-copy works.
+5. **Fresh-machine block** (sb 0.9.0+) — a clean `SB_HOME`, the six lines of §One-line install, and `sb doctor` exits 0. Before publishing, run it against the staged slot in a sandbox, with a sandbox `--prefix` standing in for the `sudo` line and `/opt` (below). After publishing, run the block verbatim once on a clean VM: that is the only check of the real download URLs, `get-sb.sh` included.
+
+```bash
+# 5. Fresh-machine block against the staged slot (offline for sb itself;
+#    sb tools install still downloads protoc/flatc from GitHub).
+SANDBOX5=$(mktemp -d); mkdir -p "${SANDBOX5}/home"
+(
+  export HOME="${SANDBOX5}/home" SB_HOME="${SANDBOX5}/home/.swarmbotix"
+  cd "$HOME"
+  SB_RELEASE_BASE="file://${DIST}" bash "${DIST}/get-sb.sh" --yes --version "${VERSION}"
+  export PATH="$HOME/.swarmbotix/bin:$PATH"
+  sb tools install --yes --prefix "${SANDBOX5}/opt"
+  sb message compile
+  sb doctor; echo "sb doctor exit: $?"                      # → 0
+)
+rm -rf "${SANDBOX5}"
+```
 
 ### Versioning
 
@@ -463,13 +523,13 @@ and [platforms/windows/version.json](platforms/windows/version.json):
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "os": "linux",
   "binary": "sb",
   "arch": "linux-x86_64",
   "triple": "x86_64-unknown-linux-gnu",
   "installer": "install.sh",
-  "package_stem": "swarmbotix-0.8.0-linux-x86_64"
+  "package_stem": "swarmbotix-0.9.0-linux-x86_64"
 }
 ```
 
@@ -508,8 +568,8 @@ besides, since the installer travels inside each zip:
 
 ```bash
 /sb-release                     # bumps all seven mirror sites
-git commit -am "release 0.8.0"
-git tag v0.8.0                 # must match Cargo.toml; CI checks it first
+git commit -am "release 0.9.0"
+git tag v0.9.0                 # must match Cargo.toml; CI checks it first
 git push --follow-tags
 ```
 

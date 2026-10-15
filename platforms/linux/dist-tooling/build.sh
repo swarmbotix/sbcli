@@ -8,10 +8,13 @@
 # Produces, for EVERY architecture in the descriptor:
 #     <package_stem>.zip
 #     <package_stem>.zip.sha256
+# and once per version slot:
+#     get-sb.sh                the version-free curl | bash bootstrap
 #
-# install.sh and uninstall.sh go INSIDE each zip, at the top of the package.
-# Nothing loose is staged beside the archives: one download is the whole
-# product, and there is no second copy of the installer to drift.
+# install.sh and uninstall.sh go INSIDE each zip, at the top of the package:
+# one download is the whole product, and there is no second copy of the
+# installer to drift. get-sb.sh is the one loose file. It holds no version
+# and no payload; it downloads a zip and runs the install.sh inside it.
 #
 # Usage:
 #   ./build.sh                 build + stage + zip, every architecture
@@ -31,7 +34,7 @@ while [ $# -gt 0 ]; do
         --arch)       shift; ONLY_ARCH="${1:-}"
                       [ -n "$ONLY_ARCH" ] || { echo "error: --arch needs a value" >&2; exit 2; } ;;
         --arch=*)     ONLY_ARCH="${1#--arch=}" ;;
-        --help|-h)    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --help|-h)    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -331,6 +334,20 @@ while read -r target_arch target_triple; do
 done <<TARGETS
 ${TARGETS}
 TARGETS
+
+# ─────────────────────────────────────────────────────────────────────
+# 10. get-sb.sh, once per slot, BESIDE the zips and never inside one: the
+#     zip holds exactly one top-level folder (sb update asserts that), and
+#     the bootstrap is what fetches a zip in the first place. It names no
+#     version, so the copy in every slot is the same file, and the Release
+#     serves it at releases/latest/download/get-sb.sh. Every arch's run
+#     writes the same bytes; CI uploads it from the linux-x86_64 job only.
+#     `bash -n` first: a syntax error here would break every fresh install.
+# ─────────────────────────────────────────────────────────────────────
+GET_SB="${TOOLING}/get-sb.sh"
+[ -f "$GET_SB" ] || { echo "error: missing ${GET_SB}" >&2; exit 1; }
+bash -n "$GET_SB" || { echo "error: ${GET_SB} does not parse" >&2; exit 1; }
+place_exec "$GET_SB" "${DIST}/get-sb.sh"
 
 if [ "$NO_ZIP" -eq 1 ]; then
     echo

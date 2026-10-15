@@ -144,8 +144,8 @@ Everything the tooling needs, derived from `OS` alone:
 | `windows` | `x86_64-pc-windows-msvc` | `sb.exe` | `windows-x86_64` | `platforms/windows/dist/<ver>/` | `install.ps1` | `%USERPROFILE%\.swarmbotix` |
 | `mac` | `aarch64-apple-darwin` | `sb` | `macos-arm64` | `platforms/mac/dist/<ver>/` | `install.sh` | `$HOME/.swarmbotix` |
 
-Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.8.0 is
-`swarmbotix-0.8.0-windows-x86_64`.
+Package stem is always `swarmbotix-<version>-<arch>`, so Windows v0.9.0 is
+`swarmbotix-0.9.0-windows-x86_64`.
 
 `%USERPROFILE%\.swarmbotix` is not a free choice — it is what
 `dirs::home_dir()` returns on Windows, which is what `sb` itself uses to find
@@ -255,9 +255,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.sh
 │   │   └── sb.config.yml.template                    ← .so paths
 │   └── dist/                                         ← release OUTPUT, one dir per version
-│       ├── 0.8.0/
-│       │   ├── swarmbotix-0.8.0-linux-x86_64.zip
-│       │   ├── swarmbotix-0.8.0-linux-x86_64.zip.sha256
+│       ├── 0.9.0/
+│       │   ├── swarmbotix-0.9.0-linux-x86_64.zip
+│       │   ├── swarmbotix-0.9.0-linux-x86_64.zip.sha256
 │       │   └── install.sh                            ← verbatim from dist-tooling/
 │       └── 0.1.28/ …                                 ← previous cuts kept side by side
 │
@@ -267,9 +267,9 @@ platforms/                                            ← committed (only /targe
 │   │   ├── install.ps1
 │   │   └── sb.config.win.yml.template                ← .dll paths
 │   └── dist/
-│       └── 0.8.0/
-│           ├── swarmbotix-0.8.0-windows-x86_64.zip  ← the payload
-│           ├── swarmbotix-0.8.0-windows-x86_64.zip.sha256
+│       └── 0.9.0/
+│           ├── swarmbotix-0.9.0-windows-x86_64.zip  ← the payload
+│           ├── swarmbotix-0.9.0-windows-x86_64.zip.sha256
 │           └── install.ps1                           ← verbatim from dist-tooling/
 │
 └── mac/                                              ← not created yet; add as a sibling
@@ -298,7 +298,7 @@ Identical shape to Linux — one top-level dir named after the package stem, whi
 is what `install.ps1` asserts on:
 
 ```
-swarmbotix-0.8.0-windows-x86_64/
+swarmbotix-0.9.0-windows-x86_64/
 ├── bin/
 │   └── sb.exe                        ← from target/x86_64-pc-windows-msvc/release/
 ├── messages/                         ← one subdir per style; minus .cache/, targets/, message_targets/
@@ -341,6 +341,40 @@ C:\Users\you\.swarmbotix\
 
 Byte-for-byte the same tree as Linux, under a different root. Nothing in the
 CLI branches on OS to find it — `resolve_sb_home_dir` handles it.
+
+#### `protoc` and `flatc`: `sb tools install` (sb 0.9.0+)
+
+The Windows counterpart of installguide_ubuntu.md §"One-line install". There
+is no `get-sb.sh` on Windows; unzip and run the installer, then:
+
+```powershell
+Expand-Archive swarmbotix-<version>-windows-x86_64.zip -DestinationPath .
+.\swarmbotix-<version>-windows-x86_64\install.ps1 -Yes
+sb tools install --yes
+sb message compile
+sb doctor
+```
+
+`install.ps1` adds `bin\` to the user `PATH` and to the running session's
+`$env:Path`, so `sb` resolves on the next line when the installer was run
+with `&` / `.\` in this same PowerShell (not via `powershell -File`, which is
+a child process).
+
+`sb tools install` downloads `protoc-35.0-win64.zip` and
+`Windows.flatc.binary.zip` from GitHub, checks their pinned SHA-256, and
+unpacks them to the layout the maintainer boxes already use:
+
+```
+C:/cmake_ext_libs/protoc/35.0/bin/protoc.exe
+C:/cmake_ext_libs/flatbuffers/25.12.19/flatc.exe
+```
+
+then writes those two paths as `protoc:` / `flatc:` into
+`%USERPROFILE%\.swarmbotix\sb.config.yml`. **There is no `sudo` step and
+no elevated prompt:** a standard user can create `C:\cmake_ext_libs`. `sb`
+never elevates; if the prefix cannot be created it prints `mkdir` lines to
+run and exits 1. `--prefix <dir>` installs elsewhere. Full reference:
+`documents/sbcli_tools.md`.
 
 #### Overriding the location
 
@@ -593,6 +627,10 @@ field *names* (`libzenohc`, `libiceoryx2`) are part of the config schema
 ([sb-core/src/config.rs:109-111](crates/sb-core/src/config.rs#L109-L111)) and
 must not be renamed per platform:
 
+`protoc:` and `flatc:` stay `null` in the template; from sb 0.9.0,
+`sb tools install` fills them in after the install (the template's comment
+already shows the `C:/cmake_ext_libs/...` paths it writes).
+
 ```yaml
 # Host-specific tool paths. `sb doctor` reports which are missing.
 protoc:      null      # protoc.exe
@@ -627,7 +665,7 @@ Run on this box (Windows 11, rustc 1.89.0, host `x86_64-pc-windows-msvc`):
   all 26 zenoh 1.9 crates, `iceoryx2 0.9`, and every `sb-*` crate.
 - `cargo build --release --bin sb` → **links**, 2m16s cold, producing
   `target\release\sb.exe` (27.2 MB) + `sb.pdb` (9.8 MB).
-- `sb.exe --version` → `sb 0.8.0`.
+- `sb.exe --version` → `sb 0.9.0`.
 - `sb.exe doctor` → runs, correctly reports the four unset tool paths, and
   **auto-detects psmux**: `[OK] tmux  …\WinGet\Links\tmux.exe (tmux 3.3.4)`.
   The `which`-based resolution in `sb-launch` works exactly as its comment
@@ -652,13 +690,13 @@ It is now split per platform, next to that platform's tooling:
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.8.0-windows-x86_64"
+  "package_stem": "swarmbotix-0.9.0-windows-x86_64"
 }
 ```
 
@@ -847,27 +885,32 @@ Windows analogue of installguide_ubuntu.md §"Smoke testing before release" — 
 Linux smoke test covers have an equivalent:
 
 ```powershell
-$Dist = "platforms\windows\dist\0.8.0"
+$Dist = "platforms\windows\dist\0.9.0"
+$Pkg  = "swarmbotix-$(Split-Path $Dist -Leaf)-windows-x86_64"
 
 $Sandbox = Join-Path $env:TEMP "sb-smoke-$(Get-Random)"
 New-Item -ItemType Directory -Force $Sandbox | Out-Null
 $env:SB_HOME = "$Sandbox\.swarmbotix"
 
+# The installer is inside the zip: unpack it, then run it from the package
+# folder (the zip's single top-level entry), as the Linux smoke test does.
+Expand-Archive "$Dist\$Pkg.zip" -DestinationPath $Sandbox
+
 # 1. Auto-accept path
-& "$Dist\install.ps1" -Yes
+& "$Sandbox\$Pkg\install.ps1" -Yes
 
 # Verify
-& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.8.0
+& "$env:SB_HOME\bin\sb.exe" --version              # → sb 0.9.0
 Get-ChildItem "$env:SB_HOME\messages"
 & "$env:SB_HOME\bin\sb.exe" doctor                 # lists what's missing
 
 # 2. Idempotent re-run — PATH must not gain a duplicate entry
-& "$Dist\install.ps1" -Yes
+& "$Sandbox\$Pkg\install.ps1" -Yes
 (([Environment]::GetEnvironmentVariable('Path','User') -split ';') |
     Where-Object { $_ -like '*\.swarmbotix\bin' }).Count    # → 1
 
 # 3. Decline path — answer 'n'; PATH left untouched
-& "$Dist\install.ps1"
+& "$Sandbox\$Pkg\install.ps1"
 
 Remove-Item $Sandbox -Recurse -Force
 Remove-Item Env:\SB_HOME
@@ -876,6 +919,15 @@ Remove-Item Env:\SB_HOME
 Note that a custom `SB_HOME` makes `install.ps1` skip PATH wiring entirely (same
 rule as `install.sh`), so check 2 must run against the default prefix on a
 throwaway box or VM — the sandbox verifies extraction and layout, not PATH.
+
+4. **Tools install** (sb 0.9.0+), the counterpart of the Linux smoke test's
+case 5: on a clean `SB_HOME`, after the install and before the `Remove-Item` cleanup,
+`sb tools install --yes --prefix "$Sandbox\tools"`, then `sb message compile`
+and `sb doctor`; doctor must exit 0 with `[OK]   protoc` and
+`[OK]   flatc` rows. A second `sb tools install --yes` must print
+`nothing to do: every available tool is at its pinned version`. Run it once
+without `--prefix` on a throwaway box to confirm the default
+`C:/cmake_ext_libs` layout.
 
 ---
 

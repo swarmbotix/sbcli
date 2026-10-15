@@ -268,13 +268,14 @@ if [[ -z "$compile_failed" ]]; then
     echo "  message vault compiled"
 else
     echo "  warning: message vault did not fully compile for:$compile_failed" >&2
-    echo "           run 'sb doctor' then re-run 'sb message compile'." >&2
+    echo "           run 'sb tools install', then re-run 'sb message compile'." >&2
 fi
 
 echo
 echo "Installed. Try:"
 echo "  sb --version"
 echo "  sb doctor"
+echo "  sb tools install"
 echo
 echo "To remove it later:"
 echo "  $SB_HOME/uninstall.sh"

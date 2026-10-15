@@ -1,6 +1,6 @@
 # L5 — Launch & Production (running report)
 
-Last updated: 2026-10-13
+Last updated: 2026-10-15
 
 ---
 
@@ -21,6 +21,79 @@ sb attach                          # interactive: exec tmux attach; non-tty: pri
 sb gopro                           # one module — dev.yml + io_dir/ → prd.yml (sanitized)
 sb gopro --all                     # every module in the active workspace
 ```
+
+**`sb tools install` and the one-block install (sb 0.9.0).** Goal: a fresh
+Linux machine reaches a green `sb doctor` from six non-interactive lines an AI
+agent can run straight off the README:
+
+```bash
+curl -fsSL https://github.com/swarmbotix/sbcli/releases/latest/download/get-sb.sh | bash -s -- --yes
+export PATH="$HOME/.swarmbotix/bin:$PATH"
+sudo mkdir -p /opt/protobuf /opt/flatbuffers && sudo chown "$USER" /opt/protobuf /opt/flatbuffers
+sb tools install --yes
+sb message compile
+sb doctor
+```
+
+What shipped:
+
+- `sb tools install [--prefix DIR] [--only protoc|flatc] [-y]` downloads the
+  pinned protoc 35.0 and flatc 25.12.19 release zips from GitHub, checks a
+  sha256 compiled into `sb`, unpacks them under `/opt` (Windows
+  `C:/cmake_ext_libs`) in the layout the maintainer boxes already used, writes
+  `protoc:` / `flatc:` into the global `sb.config.yml`, and prints the two
+  doctor rows. Idempotent: a second run prints `nothing to do`.
+- `versions.json` now pins `protoc` and `flatc` beside zenoh / iceoryx2.
+  `sb-doctor`'s build script bakes them in; a configured tool whose
+  `--version` lacks the pin is `[WARN]`, unset is `[SKIP]`, and every row
+  names `sb tools install` as the fix. Unset `libzenohc` / `libiceoryx2` and
+  an absent tmux became `[SKIP]` too: they had been `[FAIL]` since the first
+  commit while the docs promised `[SKIP]`, which made a green doctor on a
+  fresh box impossible.
+- `get-sb.sh`, a version-free bootstrap uploaded beside the Linux zips of
+  every release, so `releases/latest/download/get-sb.sh` always resolves. It
+  verifies the zip and runs the `install.sh` inside it, then prints the next
+  steps, listing in the `sudo` line only the `/opt` parents that are actually
+  missing or unwritable.
+
+Why it looks like this:
+
+- **`sb` never runs `sudo`.** An agent or a CI job cannot type a password, and
+  a CLI that escalates on its own is one you must trust with root. So the one
+  privileged step is a separate, printed, copy-pasteable line, and
+  `sb tools install` exits 1 with that exact line before downloading anything.
+  `--prefix ~/tools` avoids root entirely.
+- **The `export PATH` line is in the block on purpose.** `install.sh` appends
+  it to `~/.bashrc`, but a running shell never rereads that, and Ubuntu's
+  default `.bashrc` returns early for non-interactive shells, so `source`
+  would not help an agent either. Without line 2, line 4 is
+  `sb: command not found`.
+- **Hashes are pinned in the binary, not fetched.** A sidecar downloaded
+  next to the asset proves only that two files agree with each other.
+  `SB_TOOLS_BASE=file:///<dir>` exists for offline tests and air-gapped
+  installs; a `.sha256` sidecar there overrides the pin and is for tests only.
+
+**The Linux aarch64 flatc gap.** FlatBuffers publishes no Linux aarch64
+`flatc`. On a Pi or Jetson `sb tools install` installs protoc, reports flatc as
+`unavailable (no prebuilt flatc 25.12.19 for linux-aarch64; build it from
+source: https://github.com/google/flatbuffers)`, prints a `note:` and exits 0.
+Doctor shows `[SKIP] flatc`, and `sb message compile` simply omits the `fb`
+backend. That is the accepted steady state there; a user who needs
+FlatBuffers on aarch64 builds flatc 25.12.19 from source and runs
+`sb config set flatc <path>`.
+
+Files: `crates/sb-update/src/tools.rs` (new; pins, assets, plan, install),
+`crates/sb-cli/src/main.rs` (`sb tools install`),
+`crates/sb-cli/tests/level1_tools_install.rs` (new, offline via
+`SB_TOOLS_BASE`), `crates/sb-doctor/{build.rs,src/lib.rs}`, `versions.json`,
+`platforms/linux/dist-tooling/{get-sb.sh,build.sh,install.sh}`,
+`platforms/windows/dist-tooling/install.ps1`, `.github/workflows/build.yml`,
+`platforms/README.md`; docs `documents/sbcli_tools.md` (new),
+`documents/{sbcli,sbcli_doctor,sbcli_config,sbcli_messages}.md`, `README.md`,
+`installguide_ubuntu.md` (smoke case 5), `installguide_windows.md`,
+`requirements.md` (§Host Tools, §Pinned third-party versions); skills
+`/sb-deps` (protoc / flatc sync targets) and `/sb-release` (the slot holds
+`get-sb.sh`).
 
 **The installer moved inside the package.** Up to 0.1.40 a release page carried
 five assets: three zips, their checksums, and a loose `install.sh` /

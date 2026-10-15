@@ -176,9 +176,9 @@ camera_app/
 ### `sb.config.yml` schema
 
 ```yaml
-# Host-specific tool paths
-protoc:      /usr/local/bin/protoc
-flatc:       /usr/local/bin/flatc
+# Host-specific tool paths (protoc / flatc: written by `sb tools install`, sb 0.9.0+)
+protoc:      /opt/protobuf/protoc-35.0-linux-x86_64/bin/protoc
+flatc:       /opt/flatbuffers/flatc-25.12.19/flatc
 libzenohc:   /usr/local/lib/libzenohc.so
 libiceoryx2: /usr/local/lib/libiceoryx2_ffi_c.so
 
@@ -200,11 +200,21 @@ transport_cross_device:  zenoh
 3. `~/.swarmbotix/sb.config.yml` — global defaults
 4. Built-in defaults
 
-Missing paths are explicit errors from `sb doctor` — never silently swallowed.
+`sb doctor` reports every tool path: an unset one is `[SKIP]` (only the commands that use the tool need it), a set one that does not exist on disk is `[FAIL]`. Nothing is silently swallowed (§Doctor).
 
 ### Forge → user install
 
 This repository (the forge) bundles the canonical `std/` message set under `messages/ros2/message_definitions/`. On install (`cargo install sb-cli` or release tarball), `sb` copies the bundle into `~/.swarmbotix/messages/ros2/message_definitions/std/` if not already present. The forge is the source of truth; user machines hold a copy.
+
+### Pinned third-party versions: `versions.json`
+
+`versions.json` at the repository root is the single source of truth for every third-party version `sb` is built and tested against. It is flat `"name": "X.Y.Z"`:
+
+```json
+{ "zenoh": "1.9.0", "iceoryx2": "0.9.3", "protoc": "35.0", "flatc": "25.12.19" }
+```
+
+`zenoh` / `iceoryx2` are linked crates (exact `=` pins in `[workspace.dependencies]`). `protoc` / `flatc` (sb 0.9.0+) are not linked: they are the versions `sb tools install` downloads (`sb_update::tools::PROTOC_VERSION` / `FLATC_VERSION`, with the asset table and SHA-256 hashes in `crates/sb-update/src/tools.rs`) and the versions `sb doctor` compares the configured executables against (`sb-doctor`'s build script bakes them in as `SB_PROTOC_VERSION` / `SB_FLATC_VERSION`, `unknown` when absent). A unit test in `tools.rs` fails when the consts and `versions.json` disagree. Bumping a pin means editing `versions.json`, then the consts, URLs and hashes together (`/sb-deps`). The installed tools live outside `~/.swarmbotix/`, under the prefix (§Host Tools).
 
 ---
 
@@ -609,6 +619,7 @@ Subscribe and print frames as JSON lines.
 - `--type <style>/<ns>/<Leaf>` (default: none): decode every frame as this vault message, overriding the wire schema and the Header probe.
 - `--no-data` (default: off): drop `bytes` field contents and keep only `<name>_len`.
 - `--show` (default: off): open a window and draw image frames (below). Conflicts with `--raw`.
+- `--pretty` (default: off): indent each frame's JSON across several lines, with a blank line between frames, instead of one compact line per frame. Whitespace only; the content is identical. `sb 0.9.0+`.
 
 `--type`, `--no-data`, `--show`, the `schema_source` key, the `bytes` summary, the wire-schema source, and typed iceoryx2 opens are `sb 0.4.0+`. The `-t` short, the transport aliases, transport inference, and the `"config"` source are `sb 0.4.1+`; before 0.4.1, `--transport` defaulted to `zenoh`.
 
@@ -748,6 +759,67 @@ Guard: `current_exe` must be `<sb_home>/bin/sb[.exe]` (`SB_UPDATE_ALLOW_ANY_EXE=
 
 ---
 
+### Host Tools (`sb 0.9.0+`)
+
+`protoc` and `flatc` are not bundled; `sb tools install` fetches the pinned releases (§Pinned third-party versions). Shipped doc: `documents/sbcli_tools.md`. A fresh Linux machine reaches a green `sb doctor` non-interactively with:
+
+```bash
+curl -fsSL https://github.com/swarmbotix/sbcli/releases/latest/download/get-sb.sh | bash -s -- --yes
+export PATH="$HOME/.swarmbotix/bin:$PATH"
+sudo mkdir -p /opt/protobuf /opt/flatbuffers && sudo chown "$USER" /opt/protobuf /opt/flatbuffers
+sb tools install --yes
+sb message compile
+sb doctor
+```
+
+Line 2 is needed because a running or non-interactive shell does not read `~/.bashrc`, where the installer appended it. `sb` never invokes `sudo`; line 3 is the only privileged step and is the user's.
+
+#### `get-sb.sh [--yes] [--version X.Y.Z]`
+Linux bootstrap published beside the zips of every release (not inside them), so `releases/latest/download/get-sb.sh` always resolves. Version: `--version`, else the tag from the `Location` header of `<base>/releases/latest`. Arch map as `install.sh` (`x86_64|amd64` → `linux-x86_64`, `aarch64|arm64` → `linux-aarch64`, else error). Requires `curl`, `unzip`, `sha256sum` (names the missing one, exit 1). Downloads `swarmbotix-<v>-<arch>.zip` + `.sha256` into `mktemp -d`, verifies, unzips, runs `install.sh [--yes]`, removes the temp dir on exit. Passes `SB_HOME` through; honours `SB_RELEASE_BASE` with the same meaning as `sb update`. Ends with `Next steps:`: the `export PATH` line when `sb` is not on `PATH`, the `sudo` line listing only the `/opt` parents that are missing or unwritable, then `sb tools install --yes`, `sb message compile`, `sb doctor`.
+
+#### `sb tools install [--prefix DIR] [--only protoc|flatc] [-y|--yes]`
+Install the pinned `protoc` and `flatc` for this platform and point the global `sb.config.yml` at them.
+- `--prefix DIR` (default: `/opt`; Windows `C:/cmake_ext_libs`) — install root.
+- `--only protoc|flatc` (default: both) — case-insensitive; anything else fails with ``unknown tool `<x>`; expected protoc or flatc``.
+- `-y | --yes` — do not ask. Required when stdin is not a terminal.
+
+Pins and assets (platform = the one `sb` was built for, as `sb update`):
+
+| Platform | Tool | Asset | SHA-256 |
+|---|---|---|---|
+| `linux-x86_64` | protoc | `protoc-35.0-linux-x86_64.zip` | `a45cda0989c17dd950db55f6fbe1e5814c50fda08e87aa422980ac1f89dddbbc` |
+| `linux-aarch64` | protoc | `protoc-35.0-linux-aarch_64.zip` | `36b518ac14d90351cc6598228ed2bbe5afe4e357b1af470b07e0ec1609875de2` |
+| `windows-x86_64` | protoc | `protoc-35.0-win64.zip` | `d1cede9e308cc3eb072392af1c02ccae4bdd3d2f374ec2970dbd8cdfdaa91363` |
+| `linux-x86_64` | flatc | `Linux.flatc.binary.g++-13.zip` | `9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039` |
+| `linux-aarch64` | flatc | none published | unavailable: `no prebuilt flatc 25.12.19 for linux-aarch64; build it from source: https://github.com/google/flatbuffers` |
+| `windows-x86_64` | flatc | `Windows.flatc.binary.zip` | `fff9445c9db907227bc64b54cc98743084c4949282aa4e576cff6a955724ddc8` |
+
+URLs: `https://github.com/protocolbuffers/protobuf/releases/download/v35.0/<asset>` and `https://github.com/google/flatbuffers/releases/download/v25.12.19/<asset>`.
+
+Layout (`dir` relative to the prefix, executable relative to `dir`): Linux protoc `protobuf/protoc-35.0-linux-x86_64` (aarch64: `protobuf/protoc-35.0-linux-aarch_64`) + `bin/protoc`; Linux flatc `flatbuffers/flatc-25.12.19` + `flatc`; Windows protoc `protoc/35.0` + `bin/protoc.exe`; Windows flatc `flatbuffers/25.12.19` + `flatc.exe`.
+
+Tool state: `installed` (exe exists and the first line of `exe --version` contains the pin), `missing` (no exe), `stale (<line>)` (exe exists, other line or `--version` failed), `unavailable (<reason>)` (no asset for this platform).
+
+Behaviour, in order:
+1. Resolve prefix and `--only`; plan every tool (in `protoc`, `flatc` order).
+2. Print to stdout, `{:<10}: {:<10} {:<12} -> {}`, unavailable rows without arrow and path:
+   ```
+   prefix    : /opt
+   protoc    : 35.0       missing      -> /opt/protobuf/protoc-35.0-linux-x86_64/bin/protoc
+   flatc     : 25.12.19   missing      -> /opt/flatbuffers/flatc-25.12.19/flatc
+   ```
+3. No tool `missing` or `stale`: print `nothing to do: every available tool is at its pinned version`, still set the config key of any installed tool whose configured path differs, print the doctor rows, exit 0.
+4. Privilege: the parents `<prefix>/<first component of dir>` that do not exist or are not writable, for tools not `installed` (dedup, tool order). Non-empty: exit 1 with ``<dirs joined by ", "> not writable; run this once, then re-run `sb tools install`:`` and, on the next line, two-space indented, `sudo mkdir -p <dirs> && sudo chown "$USER" <dirs>` (dirs space-separated; Windows: `mkdir` lines instead). Nothing is downloaded first.
+5. Confirm `Proceed? [y/N]` unless `--yes`; no terminal without `--yes` → `not a terminal; pass --yes`; no → `cancelled`.
+6. Per tool to install, progress on stderr (`downloading <url> ...`, `verifying sha256`, `unpacking into <dest>`): temp dir → fetch → SHA-256 compare (mismatch deletes the download and fails with `sha256 mismatch for <asset>: pinned <hex>, download is <hex>`) → unzip → `chmod 0755` the exe (unix) → create the parent → remove an existing `dest` → move into place (rename, else recursive copy) → `exe --version` must contain the pin. Then stdout `installed: <tool> <version> -> <exe>` per tool.
+7. `sb config set <tool> <exe>` (global file) for each installed tool and each `installed`-state tool whose configured path differs; prints `set <tool> in <path>`.
+8. Reload the config; print `sb_doctor::tool_checks` (§Doctor 1-2).
+9. Per unavailable tool, stderr `note: <tool>: <reason>`. Exit 0.
+
+`SB_TOOLS_BASE=file:///<dir>`: copy `<dir>/<asset>` instead of downloading; a `<dir>/<asset>.sha256` sidecar's first token replaces the pinned digest (offline tests only). Any other non-empty value is an error; unset or empty downloads the pinned URLs.
+
+---
+
 ### Web UI
 
 #### `sb ui [OPTIONS]`
@@ -761,10 +833,10 @@ Start the `swarmctl` server in a tmux pane and open the browser. Idempotent — 
 
 #### `sb doctor`
 Print `sb <version>`, then read merged `sb.config.yml` and run twelve checks, in this order:
-1-2. Executables (`--version` succeeds): `protoc`, `flatc`.
+1-2. Executables: `protoc`, `flatc`, each against its `versions.json` pin (sb 0.9.0+). Rows, exactly: unset → `[SKIP]` ``not set in sb.config.yml (run `sb tools install`)``; path missing on disk → `[FAIL]` ``<name> not found at <path> (run `sb tools install`)``; `--version` fails → `[FAIL]` `<path> --version exited <status>: <stderr>` (or `<path> --version failed: <error>`); first stdout line contains the pin, or the pin is `unknown` → `[OK]` `<path> (<line>)`; otherwise → `[WARN]` ``<path> (<line>; sb pins <name> <pinned>, run `sb tools install`)``. `sb_doctor::tool_checks(&cfg)` returns exactly these two rows; `sb tools install` prints them.
 3. `transports` — the zenoh and iceoryx2 **crate** versions linked into this binary, baked in from the workspace lockfile by `sb-doctor`'s build script (`SB_ZENOH_VERSION` / `SB_ICEORYX2_VERSION`; `unknown` when the build tree had no lockfile). Reads nothing from the config and never fails.
 4-5. Shared libraries (file exists + `dlopen` succeeds): `libzenohc.so`, `libiceoryx2_ffi_c.so`. Each also reports the install's own version, probed in order from `<libdir>/pkgconfig/*.pc`, `<libdir>/cmake/*/…ConfigVersion.cmake`, a version component of the canonicalized path, then a `.so.X.Y.Z` suffix; `version unknown` when every probe misses. A version that disagrees with check 3 **warns**, never fails: zenoh on differing `major.minor`, iceoryx2 on any differing digit (segments are opened on exact version equality).
-6. `tmux` (or `psmux`), probed with `-V`, not `--version`.
+6. `tmux` (or `psmux`), probed with `-V`, not `--version`. Unset falls back to `tmux` on `PATH`; neither → `[SKIP]` ``not on PATH and not set in sb.config.yml (needed by `sb up`)`` (sb 0.9.0+; `[FAIL]` before). Unset `libzenohc` / `libiceoryx2` (4-5) → `[SKIP]` `not set in sb.config.yml`.
 7. `message styles` — one row per style under the resolved root with its `.proto` count and whether its targets are built. Fails only when the root holds no styles at all.
 8. `unity targets` — stale generated C# inside a Unity project (see §Generated-code language levels). **Warns**, never fails.
 9. `config keys` — the dead `message_style` / `message_definitions` / `message_targets` keys, if still present.

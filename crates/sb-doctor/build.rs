@@ -13,6 +13,12 @@
 //! the two have drifted apart, which is a maintainer error that no compiler
 //! check would otherwise catch.
 //!
+//! The code generators `protoc` and `flatc` are pinned in `versions.json` too,
+//! but they are external executables, not crates: nothing in `Cargo.lock`
+//! names them, so their pins are read from `versions.json` alone and there is
+//! no drift to check. `sb doctor` compares them with what the configured
+//! binaries print for `--version`.
+//!
 //! Neither file is required. A build from a source tree that lacks them still
 //! succeeds, with the version reported as `unknown` — a doctor row that says
 //! "unknown" is a smaller problem than a build that refuses to run.
@@ -24,6 +30,14 @@ use std::path::{Path, PathBuf};
 const TRANSPORTS: &[(&str, &str)] = &[
     ("zenoh", "SB_ZENOH_VERSION"),
     ("iceoryx2", "SB_ICEORYX2_VERSION"),
+];
+
+/// External tools whose pinned version is baked in, and the env var each
+/// lands in. Read from `versions.json` only — they never appear in
+/// `Cargo.lock`. Keep in step with `versions.json`.
+const DECLARED_TOOLS: &[(&str, &str)] = &[
+    ("protoc", "SB_PROTOC_VERSION"),
+    ("flatc", "SB_FLATC_VERSION"),
 ];
 
 const UNKNOWN: &str = "unknown";
@@ -66,6 +80,14 @@ fn main() {
         }
 
         println!("cargo::rustc-env={env_var}={resolved}");
+    }
+
+    for (tool, env_var) in DECLARED_TOOLS {
+        let pinned = declared
+            .as_deref()
+            .and_then(|t| declared_version(t, tool))
+            .unwrap_or_else(|| UNKNOWN.to_owned());
+        println!("cargo::rustc-env={env_var}={pinned}");
     }
 }
 

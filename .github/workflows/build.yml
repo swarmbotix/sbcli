@@ -231,6 +231,10 @@ jobs:
       # left to race over. The installer and uninstaller are not listed here
       # because they are not loose files any more: build.sh / build.ps1 stage
       # them inside the package, so they arrive as part of the zip.
+      #
+      # get-sb.sh is the one loose file. Both Linux jobs stage the same bytes,
+      # so only linux-x86_64 uploads it, as its own artifact: two artifacts
+      # carrying one path is exactly the race described above.
       - name: Version being built
         shell: bash
         run: |
@@ -246,6 +250,13 @@ jobs:
             platforms/${{ matrix.platform }}/dist/${{ env.PKG_VERSION }}/swarmbotix-${{ env.PKG_VERSION }}-${{ matrix.arch }}.zip.sha256
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'linux-x86_64'
+        with:
+          name: get-sb
+          path: platforms/linux/dist/${{ env.PKG_VERSION }}/get-sb.sh
+          if-no-files-found: error
+
   # Publishes only on a tag. A manual dispatch still runs check + build and
   # leaves the artifacts on the run, so a rehearsal costs the same minutes but
   # cannot create a Release by accident.
@@ -256,20 +267,24 @@ jobs:
     permissions:
       contents: write
     steps:
-      # merge-multiple flattens the three artifacts into one tree. Each now
-      # carries only its own architecture's zip and checksum, so they share no
-      # filenames at all and nothing is overwritten.
+      # merge-multiple flattens the four artifacts into one tree. Each
+      # architecture's carries only its own zip and checksum, and get-sb's
+      # carries only get-sb.sh, so they share no filenames at all and nothing
+      # is overwritten.
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      # What a release carries: one zip + .sha256 per architecture, and
-      # nothing else — the installer and uninstaller ride inside each zip, so
-      # a user downloads one file. Named rather than globbed, in both directions:
-      # a missing artifact is a failed release instead of a quietly short one,
-      # and an artifact belonging to some other version is a failed release
-      # instead of a Release page full of stale downloads.
+      # What a release carries: one zip + .sha256 per architecture, plus
+      # get-sb.sh, and nothing else. The installer and uninstaller ride inside
+      # each zip, so a manual install is one download. get-sb.sh is the
+      # version-free bootstrap beside them; because every Release carries it,
+      # releases/latest/download/get-sb.sh always resolves to the newest one.
+      # Named rather than globbed, in both directions: a missing artifact is a
+      # failed release instead of a quietly short one, and an artifact
+      # belonging to some other version is a failed release instead of a
+      # Release page full of stale downloads.
       - name: What is being published
         run: |
           find artifacts -type f -printf '%P\t%s bytes\n' | sort
@@ -278,6 +293,10 @@ jobs:
             find artifacts -name "swarmbotix-${v}-${want}.zip" | grep -q . || {
               echo "::error::no ${want} zip for ${v} among the artifacts"; exit 1; }
           done
+          [ -f artifacts/get-sb.sh ] || {
+            echo "::error::no get-sb.sh among the artifacts"; exit 1; }
+          bash -n artifacts/get-sb.sh || {
+            echo "::error::get-sb.sh does not parse"; exit 1; }
           stray=$(find artifacts -name 'swarmbotix-*.zip' \
                   ! -name "swarmbotix-${v}-*.zip" -printf '%P ')
           if [ -n "$stray" ]; then
@@ -291,7 +310,8 @@ jobs:
       # out with a sidecar that described neither. A checksum users are told
       # to verify against is worth verifying here first. `tr -d` because the
       # Windows sidecar is CRLF and carries no filename, so `sha256sum -c`
-      # cannot read it.
+      # cannot read it. get-sb.sh has no sidecar and is not in this loop: it
+      # is the script that does the verifying, fetched over the same HTTPS.
       - name: Checksums match
         run: |
           fail=0
@@ -309,6 +329,8 @@ jobs:
           done < <(find artifacts -name 'swarmbotix-*.zip' | sort)
           [ "$fail" -eq 0 ]
 
+      # artifacts/** publishes everything downloaded above: the three zips,
+      # their .sha256 files, and get-sb.sh.
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**

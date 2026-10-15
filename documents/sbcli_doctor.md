@@ -67,8 +67,8 @@ list. Each entry corresponds to one dependency.
 
 | # | Check name | What's verified | What configures it |
 |---|---|---|---|
-| 1 | `protoc` | Executable exists; `<path> --version` exits 0 and prints a version. | `protoc:` in sb.config.yml |
-| 2 | `flatc` | Same. | `flatc:` |
+| 1 | `protoc` | Executable exists; `<path> --version` exits 0 and prints a version. sb 0.9.0+: that first line must contain the version `sb` pins (`35.0`), else `[WARN]`. Unset is `[SKIP]`. | `protoc:` in sb.config.yml; `sb tools install` writes it |
+| 2 | `flatc` | Same, pinned `25.12.19`. | `flatc:`; `sb tools install` writes it |
 | 3 | `transports` | States the zenoh / iceoryx2 crate versions compiled into this `sb`. Reports a property of the binary, so it is **always `[OK]`** and reads nothing from the config. | nothing — fixed at build time |
 | 4 | `libzenohc` | File exists at path; `libloading::Library::new(<path>)` succeeds (dlopen); the install's own version is read and compared with the linked zenoh crate (major.minor). | `libzenohc:` |
 | 5 | `libiceoryx2` | Same shape as libzenohc, but compared on **every digit** — iceoryx2 opens shared-memory segments on exact version equality. | `libiceoryx2:` |
@@ -101,8 +101,11 @@ field is unset (`None` after merging), the check is **`[SKIP]`**, not
 `[FAIL]`:
 
 ```
-[SKIP] flatc        not set in sb.config.yml
+[SKIP] flatc        not set in sb.config.yml (run `sb tools install`)
 ```
+
+The ``(run `sb tools install`)`` hint (sb 0.9.0+) appears on the `protoc`
+and `flatc` rows only; that command installs nothing else.
 
 Rationale: not every host needs every tool. A pure-Rust user with no
 FlatBuffers consumers can leave `flatc:` unset and doctor stays
@@ -118,7 +121,8 @@ hard error, set the field to a non-existent path:
 flatc: /not/installed
 ```
 
-Then doctor reports `[FAIL] flatc /not/installed (file not found)`
+Then doctor reports
+``[FAIL] flatc        flatc not found at /not/installed (run `sb tools install`)``
 and the run exits non-zero.
 
 ---
@@ -128,8 +132,8 @@ and the run exits non-zero.
 ```
 $ sb doctor
 sb <version>
-[OK]   protoc       /opt/protobuffer/protoc-35.0-linux-x86_64/bin/protoc (libprotoc 35.0)
-[OK]   flatc        /opt/flatbuffers/Linux.flatc.binary.g++-13/flatc (flatc version 25.12.19)
+[OK]   protoc       /opt/protobuf/protoc-35.0-linux-x86_64/bin/protoc (libprotoc 35.0)
+[OK]   flatc        /opt/flatbuffers/flatc-25.12.19/flatc (flatc version 25.12.19)
 [OK]   transports   zenoh 1.9.0, iceoryx2 0.9.3 (linked into this sb)
 [OK]   libzenohc    /opt/zenoh-c/current/lib/libzenohc.so (v1.9.0, dlopen OK)
 [OK]   libiceoryx2  /opt/iceoryx2/current/lib/libiceoryx2_ffi_c.so (v0.9.3, dlopen OK)
@@ -232,7 +236,9 @@ from the crate `sb` links (§4.3, §4.4), and (sb 0.5.0+) legacy
 `topic: /...` entries in the active workspace (§4.10), missing
 generated io files or a stale installed copy in the active workspace,
 and (sb 0.6.0+) a module that does not support this host or a
-leftover pre-0.6.0 file, ignored since 0.7.0 (§4.11). The first two
+leftover pre-0.6.0 file, ignored since 0.7.0 (§4.11), and (sb 0.9.0+) a
+`protoc` or `flatc` that runs but is not the version `sb` pins (§4.1).
+The first two
 break a *host* project rather than `sb`; the third breaks nothing, since
 `sb` reads such an entry as `key:`, but flags a file the next `sb io`
 write will rewrite. Failing there would block every unrelated `sb doctor`
@@ -251,26 +257,47 @@ sb doctor | grep -q '^\[WARN\]' && exit 1
 ### 4.1 `protoc`
 
 ```
-[OK]   protoc       /opt/protobuffer/protoc-35.0-linux-x86_64/bin/protoc (libprotoc 35.0)
-[FAIL] protoc       /usr/local/bin/protoc (file not found)
-[FAIL] protoc       /tmp/dead/protoc (--version exited 127)
-[SKIP] protoc       not set in sb.config.yml
+[OK]   protoc       /opt/protobuf/protoc-35.0-linux-x86_64/bin/protoc (libprotoc 35.0)
+[WARN] protoc       /usr/bin/protoc (libprotoc 3.21.12; sb pins protoc 35.0, run `sb tools install`)
+[FAIL] protoc       protoc not found at /usr/local/bin/protoc (run `sb tools install`)
+[FAIL] protoc       /tmp/dead/protoc --version exited exit status: 127: <stderr>
+[SKIP] protoc       not set in sb.config.yml (run `sb tools install`)
 ```
 
 Verification:
 
 1. Read `cfg.protoc` (typed as `Option<PathBuf>`).
-2. If `None` → `[SKIP]`.
-3. If the file doesn't exist → `[FAIL]`.
-4. Spawn `<path> --version`, capture stdout. If exit code != 0 →
-   `[FAIL]` with the exit code.
-5. On success, extract the first line of stdout (e.g. `libprotoc 35.0`)
-   for the details column.
+2. If `None` → `[SKIP]`, ``not set in sb.config.yml (run `sb tools install`)``.
+3. If the file doesn't exist → `[FAIL]`,
+   ``protoc not found at <path> (run `sb tools install`)``.
+4. Spawn `<path> --version`, capture stdout. If it cannot start or exits
+   non-zero → `[FAIL]`, `<path> --version failed: <error>` or
+   `<path> --version exited <status>: <stderr>`.
+5. On success, take the first line of stdout (e.g. `libprotoc 35.0`).
+   sb 0.9.0+: if it contains the pinned version (`35.0`) → `[OK]`,
+   `<path> (<line>)`; otherwise → `[WARN]`,
+   ``<path> (<line>; sb pins protoc 35.0, run `sb tools install`)``. A
+   `[WARN]` does not change the exit code: another protoc usually works,
+   but the generated code is tested against the pinned one.
+
+`sb tools install` (sb 0.9.0+) clears the `[SKIP]`, the
+`not found` `[FAIL]` and the `[WARN]`: it installs the pinned version and
+points `protoc:` at it, then prints this row so you can see the result
+without re-running doctor ([sbcli_tools.md](sbcli_tools.md)). The pin is
+part of the `sb` build; a build that did not record one accepts any
+version.
 
 ### 4.2 `flatc`
 
-Same shape as `protoc`. The details column shows the first line of
-`<path> --version`, typically `flatc version 25.12.19`.
+Same shape as `protoc`, pinned `25.12.19`. The details column shows the
+first line of `<path> --version`, typically `flatc version 25.12.19`.
+
+On Linux aarch64 (Raspberry Pi, Jetson) the FlatBuffers project ships no
+prebuilt `flatc`, so `sb tools install` installs `protoc` only and this
+row stays ``[SKIP] flatc        not set in sb.config.yml (run `sb tools install`)``.
+That is expected and keeps doctor green; you need `flatc` only for
+FlatBuffers, and then build it from source
+([sbcli_tools.md](sbcli_tools.md) §6).
 
 ### 4.3 `libzenohc`
 
@@ -356,11 +383,15 @@ matching install (`sb config set libiceoryx2 <path>`), or by rebuilding
 ```
 [OK]   tmux         /usr/bin/tmux (tmux 3.4)
 [FAIL] tmux         /usr/bin/tmux (-V exited 1)
+[SKIP] tmux         not on PATH and not set in sb.config.yml (needed by `sb up`)
 ```
 
 Verification: same as protoc/flatc, but invokes `<path> -V` (note the
 short flag — tmux's `--version` triggers help on some builds).
-First line of stdout becomes the details column.
+First line of stdout becomes the details column. With `tmux:` unset,
+doctor uses the `tmux` found on `PATH`; with neither, the row is
+`[SKIP]` (sb 0.9.0+; earlier releases failed here), since only `sb up`
+and the other launch verbs need it.
 
 `sb up` / `sb run` require tmux at runtime; doctor's tmux check is
 what tells you ahead of time whether those will work. On Windows the
@@ -713,7 +744,7 @@ discovered from the current directory.
 $ sb doctor
 sb <version>
 [OK]   protoc       ...
-[FAIL] flatc        /opt/flatc/dead (file not found)
+[FAIL] flatc        flatc not found at /opt/flatc/dead (run `sb tools install`)
 [OK]   transports   ...
 [OK]   libzenohc    ...
 [OK]   libiceoryx2  ...
@@ -755,12 +786,12 @@ sb doctor > /dev/null || { echo "host needs setup"; exit 1; }
 ```
 $ sb doctor
 sb <version>
-[SKIP] protoc       not set in sb.config.yml
-[SKIP] flatc        not set in sb.config.yml
+[SKIP] protoc       not set in sb.config.yml (run `sb tools install`)
+[SKIP] flatc        not set in sb.config.yml (run `sb tools install`)
 [OK]   transports   zenoh 1.9.0, iceoryx2 0.9.3 (linked into this sb)
 [SKIP] libzenohc    not set in sb.config.yml
 [SKIP] libiceoryx2  not set in sb.config.yml
-[SKIP] tmux         not set in sb.config.yml
+[SKIP] tmux         not on PATH and not set in sb.config.yml (needed by `sb up`)
 [OK]   message styles /home/user/.swarmbotix/messages
                     ros2         138 msg  NOT COMPILED — run `sb message compile --style ros2`
 [OK]   unity targets no stale generated C# in a Unity tree
@@ -770,8 +801,10 @@ sb <version>
 error: 1 check(s) failed
 ```
 
-Recovery: `sb message list` (auto-installs) + edit
-`~/.swarmbotix/sb.config.yml` to point at the installed tools (see
+Recovery: `sb message list` (auto-installs), then (sb 0.9.0+)
+`sb tools install --yes` for `protoc` and `flatc`
+([sbcli_tools.md](sbcli_tools.md) §0), or edit
+`~/.swarmbotix/sb.config.yml` to point at tools you already have (see
 [sbcli_config.md](sbcli_config.md) §6).
 
 ### 6.2 Fully-configured dev box
@@ -779,8 +812,8 @@ Recovery: `sb message list` (auto-installs) + edit
 ```
 $ sb doctor
 sb <version>
-[OK]   protoc       /opt/protobuffer/protoc-35.0-linux-x86_64/bin/protoc (libprotoc 35.0)
-[OK]   flatc        /opt/flatbuffers/Linux.flatc.binary.g++-13/flatc (flatc version 25.12.19)
+[OK]   protoc       /opt/protobuf/protoc-35.0-linux-x86_64/bin/protoc (libprotoc 35.0)
+[OK]   flatc        /opt/flatbuffers/flatc-25.12.19/flatc (flatc version 25.12.19)
 [OK]   transports   zenoh 1.9.0, iceoryx2 0.9.3 (linked into this sb)
 [OK]   libzenohc    /opt/zenoh-c/current/lib/libzenohc.so (v1.9.0, dlopen OK)
 [OK]   libiceoryx2  /opt/iceoryx2/current/lib/libiceoryx2_ffi_c.so (v0.9.3, dlopen OK)
@@ -802,13 +835,19 @@ Exit code 0. This is the expected steady state.
 $ sb doctor
 sb <version>
 [OK]   protoc       /opt/protoc/bin/protoc (libprotoc 35.0)
-[FAIL] flatc        /opt/flatc-old/bin/flatc (file not found)
+[FAIL] flatc        flatc not found at /opt/flatc-old/bin/flatc (run `sb tools install`)
 ...
 error: 1 check(s) failed
 ```
 
 The `flatc:` entry still points at a directory the user deleted.
-Fix:
+Fix (sb 0.9.0+ installs the pinned one and re-points the key):
+
+```bash
+sb tools install --yes
+```
+
+or point at a flatc you have:
 
 ```bash
 sb config set flatc /opt/flatc-new/bin/flatc
@@ -925,7 +964,9 @@ details column. Tools that print a banner before the version (rare)
 would show the banner instead. None of the L1-required tools do
 this, but if you swap in an exotic protoc / flatc fork, the column
 might look odd. No correctness issue — exit code still reflects
-truth.
+truth. sb 0.9.0+ compares the pinned version against that same line,
+so a banner that does not contain the version shows `[WARN]` rather
+than `[OK]`.
 
 ### 9.3 Tool path with spaces
 

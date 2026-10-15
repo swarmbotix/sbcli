@@ -86,8 +86,8 @@ unspecified fields from `builtin_defaults()`. Field-by-field:
 | Field | Type | Built-in default | Owner / consumer |
 |---|---|---|---|
 | `sb_home_dir` | `Option<PathBuf>` | `~/.swarmbotix` (via `dirs::home_dir()`) | [sbcli_ws.md](sbcli_ws.md) §2 |
-| `protoc` | `Option<PathBuf>` | none → `[SKIP]` in doctor | [sbcli_messages.md](sbcli_messages.md) §4.5, [sbcli_doctor.md](sbcli_doctor.md) §4.1 |
-| `flatc` | `Option<PathBuf>` | none | sbcli_messages, sbcli_doctor |
+| `protoc` | `Option<PathBuf>` | none → `[SKIP]` in doctor. sb 0.9.0+: `sb tools install` installs the pinned protoc and writes this key ([sbcli_tools.md](sbcli_tools.md)) | [sbcli_messages.md](sbcli_messages.md) §4.5, [sbcli_doctor.md](sbcli_doctor.md) §4.1 |
+| `flatc` | `Option<PathBuf>` | none → `[SKIP]` in doctor. sb 0.9.0+: written by `sb tools install`, except on Linux aarch64 (no prebuilt flatc) | sbcli_messages, sbcli_doctor |
 | `libzenohc` | `Option<PathBuf>` | none | sbcli_doctor |
 | `libiceoryx2` | `Option<PathBuf>` | none | sbcli_doctor |
 | `tmux` | `Option<PathBuf>` | none | sbcli_doctor; L5 `sb up` |

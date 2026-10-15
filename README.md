@@ -291,8 +291,48 @@ shows them as two entries, and `sb topic list` shows both live.
 
 ### From a GitHub release (recommended)
 
-A release is one zip per architecture with the installer inside it. Download
-the one matching your machine from the
+**Linux, one block** (x86_64 or aarch64; sb 0.9.0+). On a fresh machine, run
+these six lines top to bottom; they need no answers and end in a green
+`sb doctor`:
+
+```bash
+curl -fsSL https://github.com/swarmbotix/sbcli/releases/latest/download/get-sb.sh | bash -s -- --yes
+export PATH="$HOME/.swarmbotix/bin:$PATH"
+sudo mkdir -p /opt/protobuf /opt/flatbuffers && sudo chown "$USER" /opt/protobuf /opt/flatbuffers
+sb tools install --yes
+sb message compile
+sb doctor
+```
+
+1. `get-sb.sh` picks the release zip for this machine, verifies its SHA-256,
+   and runs the `install.sh` inside it into `~/.swarmbotix/`. It needs `curl`,
+   `unzip` and `sha256sum`, and names whichever is missing.
+2. The installer already appended that `export PATH` line to `~/.bashrc` for
+   future shells; this shell has not read it, so it is repeated here.
+3. The `sudo` line is the only one that needs root. **`sb` never runs
+   `sudo` itself**, because a script or an AI agent cannot type a password;
+   it is a separate line so a person (or passwordless `sudo`) can run it.
+   To avoid root entirely, skip it and use
+   `sb tools install --yes --prefix ~/tools` instead of the next line.
+4. `sb tools install` downloads the `protoc` 35.0 and `flatc` 25.12.19 this
+   `sb` is pinned to, checks their SHA-256, unpacks them under `/opt`, and
+   writes `protoc:` / `flatc:` into `~/.swarmbotix/sb.config.yml`.
+5. `sb message compile` builds the bindings for every message style.
+6. `sb doctor` exits 0. `[SKIP]` rows for `libzenohc`, `libiceoryx2` and
+   `tmux` are fine until you need those (see Runtime prerequisites below).
+
+Run the block from a directory with no `messages/` folder in it (your home
+directory is fine): `sb message compile` and `sb doctor` use a `messages/`
+tree found from the current directory instead of the installed one.
+
+On a Raspberry Pi or Jetson (aarch64) FlatBuffers publishes no prebuilt
+`flatc`, so `sb tools install` installs `protoc` only, notes that `flatc` is
+unavailable, and `sb doctor` shows `[SKIP] flatc`. That is expected; build
+`flatc` from source only if you need FlatBuffers. Full reference:
+[sbcli_tools.md](documents/sbcli_tools.md).
+
+**By hand.** A release is one zip per architecture with the installer inside
+it. Download the one matching your machine from the
 [Releases](https://github.com/swarmbotix/sbcli/releases) page.
 
 **Linux** (x86_64 or aarch64; `uname -m` tells you which):
@@ -306,7 +346,7 @@ unzip swarmbotix-<version>-linux-x86_64.zip
 **Windows** (x86_64):
 
 ```powershell
-Expand-Archive swarmbotix-<version>-windows-x86_64.zip
+Expand-Archive swarmbotix-<version>-windows-x86_64.zip -DestinationPath .
 .\swarmbotix-<version>-windows-x86_64\install.ps1
 ```
 
@@ -320,9 +360,13 @@ Linux binaries are linked against glibc 2.17, so they load on Ubuntu 20.04 and
 22.04, Debian 11, JetPack 5 and 6, and anything newer, with no distro floor to
 check.
 
-Verify:
+Then install the pinned code generators and verify (Linux needs the `sudo`
+line from the block above first; Windows installs under `C:/cmake_ext_libs`,
+which a normal user can create, so it has no such step):
 
 ```bash
+sb tools install --yes
+sb message compile
 sb --version
 sb doctor
 ```
@@ -344,12 +388,13 @@ from a packaged release; see [Development](#development) for cutting one.
 ### Runtime prerequisites
 
 The binary is self-contained, but some commands shell out. Install what you
-need; `sb doctor` reports what is missing:
+need; `sb doctor` reports what is missing. `protoc` and `flatc` come from
+`sb tools install` (sb 0.9.0+), which installs exactly the pinned versions:
 
-| Tool | Needed for | Minimum |
+| Tool | Needed for | Version |
 |---|---|---|
-| `protoc` | `.proto` codegen | libprotoc 3.21+ |
-| `flatc` | FlatBuffers codegen | 24.x+ |
+| `protoc` | `.proto` codegen | 35.0, or `sb tools install`; other versions work but `sb doctor` warns |
+| `flatc` | FlatBuffers codegen | 25.12.19, or `sb tools install` (none prebuilt for Linux aarch64); other versions warn |
 | `libzenohc.so` | cross-device pub/sub | matches Zenoh 1.9 |
 | `libiceoryx2_ffi_c.so` | same-device pub/sub | matches iceoryx2 0.9 |
 | `tmux` (psmux on Windows) | `sb up` and friends | 3.2+ |
@@ -383,8 +428,8 @@ reads what the previous one wrote to disk; no state lives in memory between
 **1. Set up the host** (once)
 
 ```bash
+sb tools install --yes                       # pinned protoc + flatc (Linux: sudo line first, see Installation)
 sb doctor                                    # check tooling
-sb config set protoc /usr/local/bin/protoc   # point at tools doctor could not find
 sb config set device dev01                   # this host's <device> segment
 sb message list                              # first run installs the std/* bundle
 sb message compile                           # generate bindings into message_targets/
@@ -488,6 +533,7 @@ definitions live in [crates/sb-cli/src/main.rs](crates/sb-cli/src/main.rs).
 | Command | Purpose |
 |---|---|
 | `sb doctor` | Validate this host's tooling and vault against `sb.config.yml` |
+| `sb tools install [--prefix DIR] [--only protoc\|flatc] [-y]` | Install the pinned `protoc` and `flatc` under `/opt` (Windows: `C:/cmake_ext_libs`) and point `sb.config.yml` at them; never runs `sudo`, prints the line to run instead |
 | `sb config <open\|set\|show\|get>` | Read and edit the layered configuration |
 | `sb message <list\|new\|edit\|rm\|backends\|compile>` | Manage the message vault and compile bindings |
 
@@ -675,12 +721,16 @@ The `sb` version is canonical in `[workspace.package]` of the root
 [platforms/windows/version.json](platforms/windows/version.json). It is what
 `sb --version` prints and what names the release zip.
 
-The two transport versions are canonical in [versions.json](versions.json):
+The two transport versions are canonical in [versions.json](versions.json),
+which since sb 0.9.0 also pins the `protoc` and `flatc` that
+`sb tools install` downloads and `sb doctor` compares against:
 
 ```json
 {
   "zenoh": "1.9.0",
-  "iceoryx2": "0.9.3"
+  "iceoryx2": "0.9.3",
+  "protoc": "35.0",
+  "flatc": "25.12.19"
 }
 ```
 
@@ -715,6 +765,7 @@ release. Start with [sbcli.md](documents/sbcli.md).
 | [sbcli_reqres.md](documents/sbcli_reqres.md) | Services (`sb io add service`): request/response over Zenoh queryables |
 | [sbcli_app.md](documents/sbcli_app.md) | `sb app` / `sb install`: app packages, `sb.app.yml`, running `sb <name>` |
 | [sbcli_update.md](documents/sbcli_update.md) | `sb update` / `sb --version`: update notice, `--check`, in-place self-update |
+| [sbcli_tools.md](documents/sbcli_tools.md) | `sb tools install`: the pinned `protoc` / `flatc`, install layout, the `sudo` rule, aarch64 |
 
 Maintainer docs that stay in the repo: [installguide_ubuntu.md](installguide_ubuntu.md),
 [installguide_windows.md](installguide_windows.md), [requirements.md](requirements.md),

@@ -169,7 +169,7 @@ or without a leading `/`, so a listed row pastes in unchanged.
 
 ## 4. Command groups
 
-The `sb` binary exposes **eleven** verb groups today. The table below is
+The `sb` binary exposes **twelve** verb groups today. The table below is
 the index; detailed behavior, flag-by-flag semantics, error catalogue,
 and edge cases live in the per-group reference. The last row (`sb ui`,
 L6) is a roadmap entry and is **not** in `sb --help` yet — `sb --help`
@@ -183,10 +183,11 @@ is always the authority on what this build actually accepts.
 | `sb ws *` | Workspace lifecycle. `sb 0.5.0+`: a workspace lives in a repository; `sb 0.8.0+`: as `sb.workspace.yaml` (modules, messages) plus flow files (nodes, instances, wires). `create` writes `./sb.workspace.yaml` and `./sb.flow.yaml` and installs them; `install` installs a repository (the workspace-only form of `sb install`); `check [<name>]` validates a workspace (default: the active one); `update` runs `git pull --ff-only` and reinstalls; `uninstall [--clean]` removes the installed copy (and, with `--clean`, each module's io dir and the clone `sb` made). `set` / `list` / `delete` as before; `list` shows each workspace's source and a stale marker. The active workspace's installed `sb.workspace.yaml` is the module registry every other verb reads. | [sbcli_ws.md](sbcli_ws.md) · [sbcli_workspace.md](sbcli_workspace.md) · [sbcli_flow.md](sbcli_flow.md) | L2; `sb 0.5.0+` (repository); `sb 0.8.0+` (workspace and flow files) |
 | `sb init` | Adopt an existing user project as a swarmbotix module. Drops `sb.module.yaml` (sb 0.6.0+; no launch script, no `root:`) and an empty `swarmbotix_io/`; registers the module in the repository `sb.workspace.yaml` above it and reinstalls (sb 0.8.0+), or else in the active workspace. It does not add the module to a flow. What else the manifest can hold: [sbcli_module.md](sbcli_module.md). | [sbcli_init.md](sbcli_init.md) | L2 |
 | `sb io *` | The codegen surface (sb 0.5.0+). `add pub` / `add sub` / `add service`, `edit`, `rm`, `list` mutate `sb.module.yaml` and regenerate the matching file under `swarmbotix_io/{publishers,subscribers,services}/`; `--proto` / `--fb` / `--raw [<mime>]` pick the Zenoh payload encoding; `update [<module>] [--services]` regenerates without changing the YAML. Publishers, subscribers, and services share one name space per module. Generated pub/sub classes expose a `TopicOverrides` API for runtime per-segment override (swarm instances). A service is a REST-style request/response router over Zenoh queryables with JSON payloads, independent of pub/sub (Rust and Python); you write its routes. | [sbcli_pubsub.md](sbcli_pubsub.md) §14 (codegen reference) · [sbcli_pubsub_consuming.md](sbcli_pubsub_consuming.md) (consumer guide: main, build glue, swarm pattern) · [sbcli_reqres.md](sbcli_reqres.md) (services) | L3, L4; `sb io` `sb 0.5.0+` |
-| `sb topic *` | Introspect the live swarm. `list` enumerates active topics on either transport; `listen` decodes frames as JSON lines; `pub` does a one-shot raw publish; `prune` clears iceoryx2 registrations left behind by dead publishers (the `(dead)` rows in `list`). `listen` and `pub` read the transport from the topic path's `zenoh` / `iox2` segment, so `-t zenoh` or `-t iox2` is needed only for a path without one (sb 0.4.1+). | (ref TBD — see `requirements.md` §"Topic Introspection") | L4 |
+| `sb topic *` | Introspect the live swarm. `list` enumerates active topics on either transport; `listen` decodes frames as JSON lines (`--pretty` indents them, sb 0.9.0+); `pub` does a one-shot raw publish; `prune` clears iceoryx2 registrations left behind by dead publishers (the `(dead)` rows in `list`). `listen` and `pub` read the transport from the topic path's `zenoh` / `iox2` segment, so `-t zenoh` or `-t iox2` is needed only for a path without one (sb 0.4.1+). | (ref TBD — see `requirements.md` §"Topic Introspection") | L4 |
 | `sb up` / `sb run` / `sb stop` / `sb down` / `sb attach` | Build and launch the nodes of one flow of the active workspace under tmux, one window per instance (`<module>-<id>`), or a single module or instance (`sb run <module>[:<id>]`, `--fg` for the current terminal), or kill the session. `sb 0.6.0+`: driven by each module's `sb.module.yaml`, with no launch scripts; `stop` closes the module's windows and runs its optional `scripts.stop`. `sb 0.8.0+`: `sb up [FLOW]` (default `default`) records the active flow, and `sb run` follows it. | [sbcli_launch.md](sbcli_launch.md) · [sbcli_flow.md](sbcli_flow.md) · [sbcli_module.md](sbcli_module.md) | L5; native launch `sb 0.6.0+`; flows `sb 0.8.0+` |
 | `sb install` / `sb app *` | Install app packages from a git URL or a local folder and run them as `sb <name> [args...]`, with no `PATH` change. `app init` makes any folder a package by writing `sb.app.yml`; `list` / `info` / `update` / `remove` manage what is installed. Global to the host, independent of workspaces. `sb 0.5.0+`: `sb install` on a source whose root holds a workspace file instead of `sb.app.yml` installs a workspace (clone, install `sb.workspace.yaml` and every flow, import and compile `messages:`, regenerate every module's io; `sb.workspace.yaml` since 0.8.0). | [sbcli_app.md](sbcli_app.md) · [sbcli_ws.md](sbcli_ws.md) §5.2 | `sb 0.2.1+`; workspaces `sb 0.5.0+` |
 | `sb update` / `sb --version` | Self-update from the GitHub release page: `--version` adds an `update available` line (cached 24 h, silent offline, `SB_NO_UPDATE_CHECK=1` to skip); `update --check` compares and exits 10 when newer exists; `update` downloads, verifies the checksum and runs the package installer in place. | [sbcli_update.md](sbcli_update.md) | `sb 0.2.1+` |
+| `sb tools install` | Install the `protoc` (35.0) and `flatc` (25.12.19) this `sb` is pinned to: download the official GitHub release zip, verify its SHA-256, unpack under `/opt` (Windows: `C:/cmake_ext_libs`; `--prefix` to change), write `protoc:` / `flatc:` into the global `sb.config.yml`, print the two doctor rows. Never runs `sudo`: when `/opt/protobuf` or `/opt/flatbuffers` is not writable it prints the one `sudo` line to run and exits 1. Linux aarch64 gets `protoc` only (no upstream `flatc` build). | [sbcli_tools.md](sbcli_tools.md) | `sb 0.9.0+` |
 | `sb gopro` | Freeze a module for production. Reads `sb.module.yaml` + `swarmbotix_io/` and writes a sanitized, language-agnostic `sb.prd.yml` that ships with the binary. | (ref TBD — see `requirements.md` §"Production") | L5 |
 | `sb ui` *(not shipped)* | Start `swarmctl` (REST + MCP server + visual flow editor) in a tmux pane and open the browser. | (ref TBD — `requirements.md` §"Web UI" + `plan/level6.html`, both in the source repo) | L6 |
 
@@ -220,7 +221,7 @@ running swarm you build yourself:
 ```
 ┌─ Setup (once per host) ─────────────────────────────────────────────┐
 │ sb doctor                # check tooling                            │
-│ sb config set protoc /usr/local/bin/protoc                          │
+│ sb tools install --yes   # pinned protoc + flatc (sb 0.9.0+)        │
 │ sb config set device dev01                                          │
 │ sb message list          # triggers std/* install                   │
 │ sb message compile       # generate bindings into <message_targets> │
@@ -267,6 +268,8 @@ running swarm you build yourself:
 │   #   --type <style>/<ns>/<Leaf>  decode as this vault message      │
 │   #   --no-data                   omit bytes data, keep <name>_len  │
 │   #   --show                      open a window for image frames    │
+│   # sb 0.9.0+: --pretty           indent each frame, blank line     │
+│   #                               between frames (default: 1 line)  │
 │ sb run camera_app        # rebuild + restart one module             │
 │ sb stop camera_app       # close its windows (+ its scripts.stop)   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -362,6 +365,7 @@ second thin wrapper around the same core, exposing REST + MCP.
 | "Why is my module still running after `sb stop`?" | [sbcli_launch.md](sbcli_launch.md) §4.1 + §8 |
 | "How do I ship a tool so users run it as `sb <name>` without touching `PATH`?" | [sbcli_app.md](sbcli_app.md) §3 + §4 |
 | "Is there a newer `sb`, and how do I get it without redownloading by hand?" | [sbcli_update.md](sbcli_update.md) §2 + §4 |
+| "How do I get protoc / flatc?" | `sb tools install --yes` (sb 0.9.0+): [sbcli_tools.md](sbcli_tools.md) §0 + §4 |
 | "Authoritative spec for any flag, file, or path" | `requirements.md` (sbcli source repo — not shipped) |
 | "When does feature X land?" | `plan/levelN.html` (same repo) |
 

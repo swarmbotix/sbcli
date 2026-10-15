@@ -252,7 +252,7 @@ fn verify_sha256(file: &Path, sidecar: &Path) -> Result<()> {
 /// The digest in a `.sha256` file: its first whitespace-separated token,
 /// lowercased. Accepts `sha256sum` output (`<hex>  <name>`), a bare digest,
 /// CRLF line ends, a UTF-8 BOM, and `sha256sum`'s `\` escape marker.
-fn parse_sidecar(text: &str) -> Result<String> {
+pub(crate) fn parse_sidecar(text: &str) -> Result<String> {
     let token = text
         .trim_start_matches('\u{feff}')
         .split_whitespace()
@@ -265,7 +265,7 @@ fn parse_sidecar(text: &str) -> Result<String> {
     Ok(token.to_ascii_lowercase())
 }
 
-fn sha256_hex(path: &Path) -> Result<String> {
+pub(crate) fn sha256_hex(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher).with_context(|| format!("reading {}", path.display()))?;
@@ -276,7 +276,7 @@ fn sha256_hex(path: &Path) -> Result<String> {
     Ok(hex)
 }
 
-fn unzip(zip_path: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn unzip(zip_path: &Path, dest: &Path) -> Result<()> {
     let file = File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file))
         .with_context(|| format!("{} is not a readable zip", zip_path.display()))?;

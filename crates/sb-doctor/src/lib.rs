@@ -20,6 +20,15 @@ pub const ZENOH_VERSION: &str = env!("SB_ZENOH_VERSION");
 /// [`ZENOH_VERSION`].
 pub const ICEORYX2_VERSION: &str = env!("SB_ICEORYX2_VERSION");
 
+/// The protoc release `sb tools install` installs, from `versions.json` at
+/// build time (see `build.rs`). `"unknown"` when the build tree carried no
+/// `versions.json`, in which case any protoc version is accepted.
+pub const PROTOC_VERSION: &str = env!("SB_PROTOC_VERSION");
+
+/// The flatc release `sb tools install` installs. Same provenance as
+/// [`PROTOC_VERSION`].
+pub const FLATC_VERSION: &str = env!("SB_FLATC_VERSION");
+
 /// Emitted by `build.rs` when it could not determine a version.
 const UNKNOWN: &str = "unknown";
 
@@ -38,7 +47,8 @@ pub enum CheckStatus {
     /// the exit code. Reserved for state that breaks a *host* project rather
     /// than sb (stale iox2 C# under a Unity `Assets/` tree, say): failing
     /// would block every unrelated `sb doctor` until cleanup, and staying
-    /// silent is what let the breakage accumulate.
+    /// silent is what let the breakage accumulate. Also used for a code
+    /// generator that runs but is not the version `versions.json` pins.
     Warn(String),
 }
 
@@ -149,9 +159,10 @@ pub fn run(cfg: &SbCliConfig) -> Report {
 
 /// Run every check against an explicitly resolved vault.
 pub fn run_with_vault(cfg: &SbCliConfig, vault: &VaultView<'_>) -> Report {
+    let [protoc, flatc] = tool_rows(cfg);
     let checks = vec![
-        check_exe("protoc", cfg.protoc.as_deref(), "--version"),
-        check_exe("flatc", cfg.flatc.as_deref(), "--version"),
+        protoc,
+        flatc,
         check_transports(),
         check_lib(
             "libzenohc",
@@ -172,6 +183,23 @@ pub fn run_with_vault(cfg: &SbCliConfig, vault: &VaultView<'_>) -> Report {
         check_std_vault(vault),
     ];
     Report { checks }
+}
+
+/// Only the `protoc` and `flatc` rows, exactly as [`run_with_vault`] reports
+/// them. `sb tools install` prints these after installing, so what it shows
+/// is what the next `sb doctor` will say.
+pub fn tool_checks(cfg: &SbCliConfig) -> Report {
+    Report {
+        checks: tool_rows(cfg).into(),
+    }
+}
+
+/// The two code-generator rows, each checked against its pinned version.
+fn tool_rows(cfg: &SbCliConfig) -> [CheckResult; 2] {
+    [
+        check_exe("protoc", cfg.protoc.as_deref(), "--version", PROTOC_VERSION),
+        check_exe("flatc", cfg.flatc.as_deref(), "--version", FLATC_VERSION),
+    ]
 }
 
 /// Indent that lines a continuation row up under the message column:
@@ -1278,24 +1306,58 @@ fn walk_count(dir: &Path, keep: &dyn Fn(&Path) -> bool) -> usize {
     n
 }
 
-fn check_exe(name: &'static str, path: Option<&Path>, version_flag: &str) -> CheckResult {
+/// Check — a code generator `sb tools install` provides (`protoc`, `flatc`),
+/// against the version `versions.json` pins.
+///
+/// An unset key is a skip, not a failure: `sb` itself runs without them and
+/// only `sb message compile` needs them. A version other than the pin is a
+/// warning — it may well work, but it is not what generated code is tested
+/// against. `pinned == "unknown"` (a build without `versions.json`) accepts
+/// any version.
+fn check_exe(
+    name: &'static str,
+    path: Option<&Path>,
+    version_flag: &str,
+    pinned: &str,
+) -> CheckResult {
     let Some(p) = path else {
-        return fail(name, format!("{name} path not set in sb.config.yml"));
+        return skip(name, "not set in sb.config.yml (run `sb tools install`)");
     };
     if !p.exists() {
-        return fail(name, format!("{name} not found at {}", p.display()));
+        return fail(
+            name,
+            format!(
+                "{name} not found at {} (run `sb tools install`)",
+                p.display()
+            ),
+        );
     }
-    let out = Command::new(p).arg(version_flag).output();
-    match out {
+    let line = match version_line(name, p, version_flag) {
+        Ok(line) => line,
+        Err(row) => return row,
+    };
+    if pinned == UNKNOWN || line.contains(pinned) {
+        ok(name, format!("{} ({line})", p.display()))
+    } else {
+        warn(
+            name,
+            format!(
+                "{} ({line}; sb pins {name} {pinned}, run `sb tools install`)",
+                p.display()
+            ),
+        )
+    }
+}
+
+/// First stdout line of `<p> <version_flag>`, or the `Fail` row saying why it
+/// could not be read.
+fn version_line(name: &'static str, p: &Path, version_flag: &str) -> Result<String, CheckResult> {
+    match Command::new(p).arg(version_flag).output() {
         Ok(o) if o.status.success() => {
-            let line = String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_owned();
-            ok(name, format!("{} ({line})", p.display()))
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            Ok(stdout.lines().next().unwrap_or("").to_owned())
         }
-        Ok(o) => fail(
+        Ok(o) => Err(fail(
             name,
             format!(
                 "{} {} exited {}: {}",
@@ -1304,11 +1366,11 @@ fn check_exe(name: &'static str, path: Option<&Path>, version_flag: &str) -> Che
                 o.status,
                 String::from_utf8_lossy(&o.stderr).trim()
             ),
-        ),
-        Err(e) => fail(
+        )),
+        Err(e) => Err(fail(
             name,
             format!("{} {} failed: {e}", p.display(), version_flag),
-        ),
+        )),
     }
 }
 
@@ -1332,8 +1394,10 @@ fn check_lib(
     linked: &str,
     policy: VersionPolicy,
 ) -> CheckResult {
+    // Unset is a skip: only generated C/C++ consumers load these, and `sb`
+    // itself runs without them.
     let Some(p) = path else {
-        return fail(name, format!("{name} path not set in sb.config.yml"));
+        return skip(name, "not set in sb.config.yml");
     };
     if !p.exists() {
         return fail(name, format!("{name} not found at {}", p.display()));
@@ -1603,11 +1667,28 @@ fn dirs_in(dir: &Path) -> Vec<PathBuf> {
 fn check_tmux(path: Option<&Path>) -> CheckResult {
     // tmux uses `-V` (uppercase), not `--version` — quirky.
     if let Some(p) = path {
-        return check_exe("tmux", Some(p), "-V");
+        return check_tmux_at(p);
     }
+    // Neither configured nor on PATH is a skip: only `sb up` needs tmux. A
+    // configured path that does not exist stays a failure (`check_tmux_at`).
     match which::which("tmux") {
-        Ok(p) => check_exe("tmux", Some(&p), "-V"),
-        Err(_) => fail("tmux", "tmux not on PATH and not set in sb.config.yml"),
+        Ok(p) => check_tmux_at(&p),
+        Err(_) => skip(
+            "tmux",
+            "not on PATH and not set in sb.config.yml (needed by `sb up`)",
+        ),
+    }
+}
+
+/// tmux is the system's, not something `sb tools install` provides, so it has
+/// no pin and its rows carry no install hint.
+fn check_tmux_at(p: &Path) -> CheckResult {
+    if !p.exists() {
+        return fail("tmux", format!("tmux not found at {}", p.display()));
+    }
+    match version_line("tmux", p, "-V") {
+        Ok(line) => ok("tmux", format!("{} ({line})", p.display())),
+        Err(row) => row,
     }
 }
 

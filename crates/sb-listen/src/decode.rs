@@ -755,6 +755,12 @@ pub fn render_decoded_json_line(frame: &DecodedFrame<'_>) -> String {
     serde_json::to_string(frame).unwrap_or_else(|_| "{}".into())
 }
 
+/// Same frame, indented (`--pretty`). Multi-line, no trailing newline;
+/// the caller adds the frame separator.
+pub fn render_decoded_json_pretty(frame: &DecodedFrame<'_>) -> String {
+    serde_json::to_string_pretty(frame).unwrap_or_else(|_| "{}".into())
+}
+
 pub(crate) fn hex_string(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -847,6 +853,31 @@ mod tests {
             &DecodeContext::default(),
         );
         assert_eq!((none.schema, none.schema_source), (None, None));
+    }
+
+    /// `--pretty` changes whitespace only: the indented render parses to the
+    /// same JSON as the compact line, and leaves the separator to the caller.
+    #[test]
+    fn pretty_render_is_the_compact_frame_indented() {
+        let header_only = Frame::from(synthetic_stamped("ros2/std/StringStamped", 5.0));
+        let frame = decode_frame_dynamic(
+            "zenoh",
+            "x",
+            &header_only,
+            false,
+            None,
+            &DecodeContext::default(),
+        );
+        let pretty = render_decoded_json_pretty(&frame);
+        assert!(pretty.contains('\n'), "must span lines: {pretty}");
+        assert!(
+            pretty.contains("  \"schema\""),
+            "top-level keys indented: {pretty}"
+        );
+        assert!(!pretty.ends_with('\n'), "caller adds the separator");
+
+        let parse = |s: &str| serde_json::from_str::<Value>(s).expect("valid JSON");
+        assert_eq!(parse(&pretty), parse(&render_decoded_json_line(&frame)));
     }
 
     /// The style segment is dropped: it is part of the vault identity but
