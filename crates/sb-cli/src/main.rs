@@ -1000,6 +1000,7 @@ fn warm_iceoryx_global_config() {
 /// Run the parsed command. Built-in commands exit 0 on success; an installed
 /// app (`sb <name> ...`) passes its own exit code through.
 fn real_main() -> Result<ExitCode> {
+    enable_windows_ansi();
     let cli = Cli::parse();
     if cfg!(windows) {
         // A Windows `sb update` leaves the replaced binary as sb.exe.old.
@@ -3438,11 +3439,44 @@ fn cmd_doctor() -> Result<()> {
     }
 }
 
-/// Color the doctor table when stdout is a terminal and `NO_COLOR` is unset.
+/// Color terminal output (doctor table, topic listen frames) when stdout is a terminal and `NO_COLOR` is unset.
 fn stdout_color() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
 }
+
+/// Let the legacy Windows console interpret ANSI escapes. No-op elsewhere
+/// and best effort when it fails: a console without VT support (Windows 10
+/// before 1511) would then show raw escapes; set `NO_COLOR` there.
+#[cfg(windows)]
+fn enable_windows_ansi() {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE,
+        SetConsoleMode,
+    };
+    // SAFETY: `GetStdHandle` takes no pointers. The handle is checked against
+    // null and `INVALID_HANDLE_VALUE` before use, so `GetConsoleMode` and
+    // `SetConsoleMode` only see a valid handle from `GetStdHandle`, and the
+    // out-pointer passed to `GetConsoleMode` is a live, aligned local `u32`.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(h, &mut mode) == 0 {
+            return;
+        }
+        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+}
+
+/// Let the legacy Windows console interpret ANSI escapes. No-op elsewhere
+/// and best effort when it fails: a console without VT support (Windows 10
+/// before 1511) would then show raw escapes; set `NO_COLOR` there.
+#[cfg(not(windows))]
+fn enable_windows_ansi() {}
 
 // ─────────────────────────────────────────────────────────────────────
 // message
@@ -4721,6 +4755,7 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
     let mut warned_no_schema = false;
     let mut warned_view = false;
     let mut emitted: u64 = 0;
+    let color = stdout_color();
     loop {
         if a.count != 0 && emitted >= a.count {
             return Ok(());
@@ -4769,10 +4804,17 @@ fn cmd_topic_listen(a: TopicListenCli) -> Result<()> {
             None => true,
         };
         decoded.summarize_bytes(a.no_data);
-        if a.pretty {
-            println!("{}\n", sb_listen::render_decoded_json_pretty(&decoded));
+        let line = if color {
+            sb_listen::render_decoded_json_colored(&decoded, a.pretty)
+        } else if a.pretty {
+            sb_listen::render_decoded_json_pretty(&decoded)
         } else {
-            println!("{}", sb_listen::render_decoded_json_line(&decoded));
+            sb_listen::render_decoded_json_line(&decoded)
+        };
+        if a.pretty {
+            println!("{line}\n");
+        } else {
+            println!("{line}");
         }
         emitted += 1;
         if !window_open {

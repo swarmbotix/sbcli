@@ -24,3 +24,4 @@ iceoryx2 = { workspace = true }
 tempfile = { workspace = true }
 minifb = { workspace = true }
 image = { workspace = true }
+anstyle = { workspace = true }

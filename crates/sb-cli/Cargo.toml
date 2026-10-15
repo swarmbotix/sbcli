@@ -39,6 +39,9 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 dirs = { workspace = true }

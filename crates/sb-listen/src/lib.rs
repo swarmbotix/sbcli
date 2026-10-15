@@ -13,6 +13,7 @@
 //!   layout; at L4 we restrict it to fixed-width byte slabs (the user
 //!   passed us hex bytes) sized to match the receiver's `[u8; N]` payload.
 
+pub mod color;
 pub mod decode;
 pub mod iceoryx;
 pub mod image_fields;
@@ -21,6 +22,7 @@ pub mod pool;
 pub mod view;
 pub mod zenoh_bytes;
 
+pub use color::render_decoded_json_colored;
 pub use decode::{
     DecodeContext, DecodedFrame, FbLookup, FramePayload, Iox2Lookup, decode_frame,
     decode_frame_dynamic, render_decoded_json_line, render_decoded_json_pretty,
