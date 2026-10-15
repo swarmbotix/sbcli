@@ -28,12 +28,12 @@ platforms/
 │   │   ├── uninstall.sh               PATH line + $SB_HOME removal
 │   │   └── sb.config.yml.template     seeded into new installs (.so paths)
 │   └── dist/                       ← release output, one dir per version
-│       └── 0.9.0/
+│       └── 0.9.1/
 │           ├── get-sb.sh              ← loose, NOT in a zip; fetches one and runs its install.sh
-│           ├── swarmbotix-0.9.0-linux-x86_64.zip
-│           ├── swarmbotix-0.9.0-linux-x86_64.zip.sha256
-│           ├── swarmbotix-0.9.0-linux-aarch64.zip
-│           └── swarmbotix-0.9.0-linux-aarch64.zip.sha256
+│           ├── swarmbotix-0.9.1-linux-x86_64.zip
+│           ├── swarmbotix-0.9.1-linux-x86_64.zip.sha256
+│           ├── swarmbotix-0.9.1-linux-aarch64.zip
+│           └── swarmbotix-0.9.1-linux-aarch64.zip.sha256
 │
 └── windows/
     ├── version.json                ← platform descriptor
@@ -43,12 +43,12 @@ platforms/
     │   ├── uninstall.ps1
     │   └── sb.config.win.yml.template (.dll paths)
     └── dist/
-        └── 0.9.0/
-            ├── swarmbotix-0.9.0-windows-x86_64.zip
-            └── swarmbotix-0.9.0-windows-x86_64.zip.sha256
+        └── 0.9.1/
+            ├── swarmbotix-0.9.1-windows-x86_64.zip
+            └── swarmbotix-0.9.1-windows-x86_64.zip.sha256
 ```
 
-Both platforms ship for `0.9.0`. The two staging scripts take the same inputs
+Both platforms ship for `0.9.1`. The two staging scripts take the same inputs
 (`.env` + the platform descriptor), enforce the same drift check, and emit the
 same two files per architecture, so a release cut on one box matches one cut on
 the other.
@@ -94,13 +94,13 @@ to go. Each platform now carries its own, next to its tooling:
 ```json
 {
   "product": "swarmbotix",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "os": "windows",
   "binary": "sb.exe",
   "arch": "windows-x86_64",
   "triple": "x86_64-pc-windows-msvc",
   "installer": "install.ps1",
-  "package_stem": "swarmbotix-0.9.0-windows-x86_64"
+  "package_stem": "swarmbotix-0.9.1-windows-x86_64"
 }
 ```
 
@@ -222,8 +222,8 @@ Cutting a release is therefore:
 
 ```bash
 /sb-release                     # bumps all seven mirror sites
-git commit -am "release 0.9.0"
-git tag v0.9.0                 # the tag mirrors Cargo.toml — checked in CI
+git commit -am "release 0.9.1"
+git tag v0.9.1                 # the tag mirrors Cargo.toml — checked in CI
 git push --follow-tags
 ```
 
